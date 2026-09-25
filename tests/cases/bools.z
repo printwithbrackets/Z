@@ -1,0 +1,10 @@
+print(true && false);
+print(true || false);
+print(!true);
+print(1 < 2);
+print(2 <= 2);
+print(3 > 4);
+print(3 == 3);
+print(1 != 1);
+var flag = 5 < 3;
+print(flag);

@@ -1,0 +1,32 @@
+// Generic functions via monomorphization: inference from arguments,
+// multiple type parameters, arrays, pointers, structs, and multiple
+// instantiations of the same template.
+struct Pair { int a; int b; int Sum() { return a + b; } }
+
+T max<T>(T a, T b) { if (a > b) { return a; } return b; }
+U pick<T, U>(T a, U b) { return b; }
+T first<T>(T a, T b) => a;
+bool same<T>(T a, T b) { return a == b; }
+int total<T>(T[] xs) { var s = 0; foreach (v in xs) { s = s + v; } return s; }
+int countTo<T>(T start, int n) { var c = 0; var i = 0; while (i < n) { c = c + 1; i = i + 1; } return c; }
+T twice<T>(T a) { return a + a; }
+
+int main() {
+    print(max(3, 7));         // 7
+    print(max(10, 4));        // 10
+    print(pick(3, 9));        // 9
+    print(first(42, 7));      // 42
+    print(same(5, 5));        // true
+    print(same(5, 6));        // false
+    print(same(true, false)); // false
+    print(twice(21));         // 42
+
+    var arr = new int[4];
+    arr[0]=1; arr[1]=2; arr[2]=3; arr[3]=4;
+    print(total(arr));        // 10
+
+    // generic that ignores its type param for the body, called with two types
+    print(countTo(0, 5));     // 5
+    print(countTo(100, 3));   // 3
+    return 0;
+}

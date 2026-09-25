@@ -1,0 +1,16 @@
+var i = 0;
+while (i < 3) {
+    print(i);
+    i = i + 1;
+}
+var sum = 0;
+i = 1;
+while (i <= 5) {
+    sum = sum + i;
+    i = i + 1;
+}
+print(sum);
+while (false) {
+    print("never");
+}
+print("end");

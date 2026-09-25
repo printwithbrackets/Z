@@ -1,0 +1,20 @@
+int add(int a, int b) {
+    return a + b;
+}
+
+int square(int n) {
+    return n * n;
+}
+
+print(add(3, 4));
+print(square(5));
+print(add(square(2), add(1, 1)));
+
+int noReturn(int n) {
+    if (n > 0) {
+        return 1;
+    }
+    return 0;
+}
+print(noReturn(5));
+print(noReturn(-1));

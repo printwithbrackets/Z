@@ -1,0 +1,16 @@
+struct Account {
+    int id;
+    int balance;
+    int Id { get; set; }
+    int Deposit(int amount) { balance += amount; return balance; }
+}
+
+int main() {
+    var a = new Account(0, 100);
+    a.Id = 42;
+    print(a.Id);
+    a.Id = 7;
+    print(a.Id);
+    print(a.Deposit(50));
+    return 0;
+}

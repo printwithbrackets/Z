@@ -1,0 +1,16 @@
+var x = 42;
+var p = &x;
+print(*p);
+*p = 99;
+print(x);
+int get(int* q) {
+    return *q;
+}
+int set(int* q, int v) {
+    *q = v;
+    return 0;
+}
+var y = 7;
+print(get(&y));
+set(&y, 123);
+print(y);

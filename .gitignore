@@ -1,0 +1,14 @@
+# Build artifacts
+*.o
+*.d
+/z
+/vela
+/tests/run
+# Generated from runtime/vela_rt.c by the Makefile
+/src/runtime_src.h
+
+# Compiler output
+*.s
+*.out
+# Embedded runtime temp files
+/tmp/z_*

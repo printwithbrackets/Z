@@ -1,0 +1,9 @@
+// bool renders as true/false in string concat and interpolation
+int main() {
+    var t = true;
+    var f = false;
+    print("t=" + t + " f=" + f);
+    print($"inline {t} and {f} and {1 == 1} and {1 == 2}");
+    print("num still works: " + 42 + " bool: " + t);
+    return 0;
+}

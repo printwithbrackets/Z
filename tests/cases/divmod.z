@@ -1,0 +1,26 @@
+// Constant division/modulo strength reduction: divisors incl. primes needing a
+// 65-bit magic, negatives, and edge cases. Must match truncating division.
+int main() {
+    print(1000000000 / 1000000007); print(1000000000 % 1000000007);
+    print(-1000000000 / 1000000007); print(-1000000000 % 1000000007);
+    print(7 / 3); print(7 % 3);
+    print(-7 / 3); print(-7 % 3);
+    print(1 / 3); print(1 % 3);
+    print(-1 / 3); print(-1 % 3);
+    print(100 / 7); print(100 % 7);
+    print(2 / 1000000007); print(2 % 1000000007);
+    print(999999999 / 1000000007); print(999999999 % 1000000007);
+    print(999999999999 / 1000000007); print(999999999999 % 1000000007);
+    print(6442450941 / 2147483647); print(6442450941 % 2147483647);
+    print(-7 / 2); print(-7 % 2);
+    print(7 / -2); print(7 % -2);
+    print(-1 / 1000000007); print(-1 % 1000000007);
+    print(0 / 7); print(0 % 7);
+    print(123456789 / 1000000007); print(123456789 % 1000000007);
+    print(-123456789 / 1000000007); print(-123456789 % 1000000007);
+    print(5 / 1000000000); print(5 % 1000000000);
+    print(987654321098 / 99991); print(987654321098 % 99991);
+    print(-50 / 3); print(-50 % 3);
+    print(1000000006 / 1000000007); print(1000000006 % 1000000007);
+    return 0;
+}

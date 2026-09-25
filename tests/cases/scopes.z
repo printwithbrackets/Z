@@ -1,0 +1,21 @@
+var x = 1;
+{
+    var x = 2;
+    print(x);
+    {
+        var x = 3;
+        print(x);
+    }
+    print(x);
+}
+print(x);
+
+int scopeTest(int n) {
+    var local = n;
+    {
+        var local = n * 2;
+        print(local);
+    }
+    return local;
+}
+print(scopeTest(5));

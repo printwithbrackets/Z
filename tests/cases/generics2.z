@@ -1,0 +1,19 @@
+// Generic edge cases: struct-returning (sret), pointer params, uninstantiated
+// template (must not be emitted or crash), recursion, nested generic calls.
+struct Vec { int x; int y; int Sum() { return x + y; } }
+Vec makeVec<T>(T a, T b) { var v = new Vec(0, 0); v.x = 1; v.y = 2; return v; }
+int setVal<T>(T* p, T val) { *p = val; return 0; }
+T neverCalled<T>(T a) { return a; }          // never instantiated
+int fact(int n) { if (n <= 1) { return 1; } return n * fact(n - 1); }
+
+int main() {
+    var v = makeVec(1, 2);
+    print(v.Sum());            // 3
+    var n = 5;
+    setVal(&n, 99);
+    print(n);                  // 99
+    print(fact(5));            // 120
+    // nested generic call: result of one generic feeds another
+    print(neverCalled(1) + 0); // wait - neverCalled uninstantiated; calling it instantiates
+    return 0;
+}

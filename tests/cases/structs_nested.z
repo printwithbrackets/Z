@@ -1,0 +1,18 @@
+struct Point { int x; int y; }
+struct Line { Point a; Point b; }
+
+int main() {
+    var l = new Line(new Point(1, 2), new Point(3, 4));
+    print(l.a.x);
+    print(l.a.y);
+    print(l.b.x);
+    print(l.b.y);
+
+    // array of structs
+    var pts = new Point[2];
+    pts[0] = new Point(7, 8);
+    pts[1] = new Point(9, 10);
+    print(pts[0].x);
+    print(pts[1].y);
+    return 0;
+}

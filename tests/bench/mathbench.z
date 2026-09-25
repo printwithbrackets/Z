@@ -1,0 +1,10 @@
+// Constant-heavy arithmetic - benefits from constant folding.
+int main() {
+    var s = 0;
+    s += 2 + 3 * 4 + (5 - 1) * 2;
+    s += 100 / 5 + 100 % 7;
+    s += 7 * 6 - 2;
+    s += 1 + 2 + 3 + 4 + 5;
+    print(s);
+    return 0;
+}

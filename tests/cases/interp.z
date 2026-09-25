@@ -1,0 +1,6 @@
+var name = "Vela";
+var n = 3;
+print($"Hello, {name}!");
+print($"n={n}, n*n={n*n}");
+print($"no interp here");
+print($"nested {"inner"} ok");

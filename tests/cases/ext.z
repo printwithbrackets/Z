@@ -1,0 +1,11 @@
+int Twice(this int n) { return n * 2; }
+int Add(this int a, int b) { return a + b; }
+string Shout(this string s) { return s + "!"; }
+
+int main() {
+    print(5.Twice());
+    print(7.Add(3));
+    print("hi".Shout());
+    print(10.Twice() + 1.Twice());
+    return 0;
+}

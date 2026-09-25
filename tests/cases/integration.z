@@ -1,0 +1,44 @@
+// Cross-feature integration: classes (vtables/ctors) + generics + structs +
+// enums + operator overloading + control flow + GC together. Exercises the
+// register allocator with many live values (incl. class objects) at once.
+class Animal {
+    int id;
+    Animal(int i) { this.id = i; }
+    virtual string Speak() { return "..."; }
+    int Id() { return this.id; }
+}
+class Dog : Animal {
+    string name;
+    Dog(int i, string n) { base(i); this.name = n; }
+    override string Speak() { return this.name + " woof"; }
+}
+class Cat : Animal {
+    Cat(int i) { base(i); }
+    override string Speak() { return "meow"; }
+}
+struct Vec { int x; int y; Vec op_Add(Vec* o) => new Vec(x + o.x, y + o.y); }
+enum Op { Add(int a, int b), Mul(int a, int b), Neg(int a) }
+int apply(Op o) => match o { Add(x, y) => x + y, Mul(m, n) => m * n, Neg(z) => 0 - z };
+T maxOf<T>(T a, T b) { if (a > b) { return a; } return b; }
+
+int main() {
+    var v1 = 10; var v2 = 20; var v3 = 30; var v4 = 40; var v5 = 50;
+    var d = new Dog(1, "Rex");
+    var c = new Cat(2);
+    var animals = new Animal*[2];
+    animals[0] = d; animals[1] = c;
+    var p = new Vec(1, 2); var q = new Vec(3, 4);
+    var r = p + q;
+    print(animals[0].Speak() + "/" + animals[1].Speak());  // Rex woof/meow
+    print(animals[0].Id() + " " + animals[1].Id());        // 1 2
+    print("v " + r.x + "," + r.y);                          // v 4,6
+    print(apply(Add(2, 3)) + " " + apply(Mul(4, 5)) + " " + apply(Neg(7)));
+    print(maxOf(v3, v4) + " " + maxOf(9, 2));               // 40 9
+    var acc = 0;
+    for (var i = 0; i < 50; i = i + 1) {
+        if (i % 2 == 0) { acc = acc + d.Id() + i; } else { acc = acc - i; }
+        if (acc > 20) { acc = acc % 17; }
+    }
+    print("acc " + acc);
+    return 0;
+}

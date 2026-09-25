@@ -1,0 +1,8 @@
+var x = 10;
+var y = 32;
+print(x + y);
+x = 99;
+print(x);
+int z = 7;
+z = z * 2;
+print(z);

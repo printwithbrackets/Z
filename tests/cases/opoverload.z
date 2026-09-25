@@ -1,0 +1,20 @@
+struct Vec {
+    int x;
+    int y;
+    Vec op_Add(Vec* o) { return new Vec(x + o.x, y + o.y); }
+    Vec op_Mul(int k) { return new Vec(x * k, y * k); }
+    bool op_Eq(Vec* o) { return x == o.x && y == o.y; }
+    string Show() { return "(" + x + ", " + y + ")"; }
+}
+
+int main() {
+    var a = new Vec(1, 2);
+    var b = new Vec(3, 4);
+    var c = a + b;
+    print(c.Show());
+    var d = a * 10;
+    print(d.Show());
+    print(a == b);
+    print((a + b) == new Vec(4, 6));
+    return 0;
+}

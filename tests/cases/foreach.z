@@ -1,0 +1,17 @@
+var a = new int[4];
+a[0] = 5;
+a[1] = 6;
+a[2] = 7;
+a[3] = 8;
+foreach (var x in a) {
+    print(x);
+}
+var sum = 0;
+foreach (int v in a) {
+    sum += v;
+}
+print(sum);
+// bare loop variable (no type annotation) must infer the element type
+foreach (v in a) {
+    print(v + 100);
+}

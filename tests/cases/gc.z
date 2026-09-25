@@ -1,0 +1,25 @@
+// The tracing GC must keep live data alive across collections while
+// reclaiming garbage (old strings/arrays become unreachable).
+int main() {
+    var s = "start";
+    var i = 0;
+    while (i < 3000) {
+        s = s + "x";
+        i = i + 1;
+    }
+    // live across many collections
+    var arr = new int[3];
+    arr[0] = 11; arr[1] = 22; arr[2] = 33;
+    var keep = "kept";
+    var j = 0;
+    while (j < 2000) {
+        var tmp = "garbage" + j;
+        j = j + 1;
+    }
+    print(keep);
+    print(arr[0] + arr[1] + arr[2]);
+    var total = 0;
+    foreach (var v in arr) { total += v; }
+    print(total);
+    return 0;
+}

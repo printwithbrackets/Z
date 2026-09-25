@@ -1,0 +1,8 @@
+int square(int n) => n * n;
+int sum(int a, int b) => a + b;
+
+int main() {
+    print(square(7));
+    print(sum(3, 9));
+    return 0;
+}

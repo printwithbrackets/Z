@@ -1,0 +1,4 @@
+int main() {
+    print("int main returns 7");
+    return 7;
+}

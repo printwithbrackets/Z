@@ -1,0 +1,28 @@
+enum Shape {
+    Circle(int r),
+    Rect(int w, int h),
+    Point
+}
+
+string describe(Shape s) => match s {
+    Circle(r) => "circle r=" + r,
+    Rect(w, h) => "rect " + w + "x" + h,
+    Point => "point"
+};
+
+int area(Shape s) => match s {
+    Circle(r) => 3 * r * r,
+    Rect(w, h) => w * h,
+    Point => 0
+};
+
+int main() {
+    var a = Circle(5);
+    var b = Rect(3, 4);
+    var c = Point();
+    print(describe(a));
+    print(describe(b));
+    print(describe(c));
+    print("areas: " + (area(a) + area(b) + area(c)));
+    return 0;
+}

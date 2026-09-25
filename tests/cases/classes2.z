@@ -1,0 +1,29 @@
+// Class constructors, base-constructor calls, and field initialization.
+class Animal {
+    int legs;
+    Animal(int l) { this.legs = l; }
+    virtual string Speak() { return "..."; }
+    int Legs() { return this.legs; }
+}
+class Dog : Animal {
+    string name;
+    Dog(int l, string n) { base(l); this.name = n; }
+    override string Speak() { return "Woof from " + this.name; }
+}
+class Cat : Animal {
+    Cat(int l) { base(l); }
+    override string Speak() { return "Meow"; }
+}
+int main() {
+    var d = new Dog(4, "Rex");
+    var c = new Cat(4);
+    print(d.Speak());   // Woof from Rex
+    print(c.Speak());   // Meow
+    print(d.Legs());    // 4 (inherited non-virtual method, field set via ctor)
+    print(c.Legs());    // 4
+    // a freshly allocated object has zeroed fields
+    var e = new Cat(0);
+    e.legs = 9;
+    print(e.Legs());    // 9
+    return 0;
+}

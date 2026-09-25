@@ -1,0 +1,41 @@
+// Classes with virtual methods and vtable dispatch.
+// Covers: inheritance, virtual/override, heap allocation, field init via
+// post-construction assignment, polymorphic arrays, dynamic dispatch through a
+// base-class reference, and non-virtual inherited methods.
+class Shape {
+    int tag;
+    virtual int Area() { return 0; }
+    virtual string Name() { return "shape"; }
+    int Tag() { return this.tag; }          // non-virtual, inherited
+}
+class Square : Shape {
+    int side;
+    override int Area() { return this.side * this.side; }
+    override string Name() { return "square"; }
+}
+class Circle : Shape {
+    int r;
+    override int Area() { return 3 * this.r * this.r; }
+    override string Name() { return "circle"; }
+}
+int main() {
+    var s = new Square();
+    s.side = 5;
+    s.tag = 1;
+    var c = new Circle();
+    c.r = 2;
+    c.tag = 2;
+    print(s.Name() + " " + s.Area());   // square 25
+    print(c.Name() + " " + c.Area());   // circle 12
+    print(s.Tag());                      // 1 (inherited non-virtual method)
+    // polymorphic: base-typed array of pointers -> dynamic dispatch
+    var shapes = new Shape*[2];
+    shapes[0] = s;
+    shapes[1] = c;
+    print(shapes[0].Name() + " " + shapes[0].Area());  // square 25
+    print(shapes[1].Name() + " " + shapes[1].Area());  // circle 12
+    // base-typed local -> dynamic dispatch
+    var any = s;
+    print(any.Name());                   // square
+    return 0;
+}

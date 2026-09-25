@@ -1,0 +1,3 @@
+t=true f=false
+inline true and false and true and false
+num still works: 42 bool: true

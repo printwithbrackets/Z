@@ -1,0 +1,15 @@
+{
+  "testCommand": "make test",
+  "formatCommand": "clang-format -i src/*.c src/*.h tests/*.c",
+  "lintCommand": "make",
+  "supportedLanguages": ["c"],
+  "testFramework": "custom (tests/run.c golden + diagnostic harness)",
+  "formatter": "clang-format",
+  "linter": "gcc -Wall -Wextra -Wpedantic -Werror",
+  "commitConvention": "conventional",
+  "minimumTestCoverage": 80,
+  "protectedBranches": ["main", "master"],
+  "requireCodeReview": true,
+  "allowDirectPushes": false,
+  "cicdPlatform": "github-actions"
+}

@@ -1,0 +1,8 @@
+print("hello");
+print("tab\there");
+print("newline\nend");
+var s = "stored";
+print(s);
+print("quote:\"ok");
+print("back\\slash");
+print("");
