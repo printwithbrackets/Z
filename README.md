@@ -12,7 +12,7 @@ struct methods/properties, extension methods, operator overloading, ternary),
 enums with exhaustive pattern matching, monomorphized generics, classes with
 vtables and inheritance, a tracing garbage collector for the heap, and a
 register-allocating, constant-folding, strength-reducing backend. See
-[TUTORIAL.md](TUTORIAL.md) to learn the language and [Roadmap](#roadmap) for
+[TUTORIAL.md](docs/TUTORIAL.md) to learn the language and [Roadmap](#roadmap) for
 what's next.
 
 ## Build & test
