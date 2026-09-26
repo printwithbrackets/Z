@@ -1,0 +1,2 @@
+class A { int v; A(int a) { v = a; } int get() { return v; } }
+int main() { var a = new A(1); var m = &a.nope; return 0; }

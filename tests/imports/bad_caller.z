@@ -1,0 +1,3 @@
+import "lib/broken.z";
+
+int main() { return 0; }

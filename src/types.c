@@ -43,6 +43,24 @@ Type *type_array(TypeCtx *ctx, Type *elem, int len) {
     return t;
 }
 
+Type *type_fnptr(TypeCtx *ctx, Type **ptypes, int nparams, Type *ret) {
+    Type *t = arena_alloc(ctx->arena, sizeof(Type));
+    t->kind = TK_FNPTR;
+    t->ptypes = ptypes;
+    t->nparams = nparams;
+    t->ret = ret;
+    return t;
+}
+
+Type *type_mptr(TypeCtx *ctx, Type **ptypes, int nparams, Type *ret) {
+    Type *t = arena_alloc(ctx->arena, sizeof(Type));
+    t->kind = TK_MPTR;
+    t->ptypes = ptypes;
+    t->nparams = nparams;
+    t->ret = ret;
+    return t;
+}
+
 UnionDef *type_define_union(TypeCtx *ctx, const char *name) {
     /* reuse a pre-registered (incomplete) union of the same name */
     for (int i = 0; i < ctx->nunion; i++) {
@@ -328,6 +346,8 @@ int type_size(Type *t) {
         return t->sdef->size;
     case TK_UNION:
         return t->udef->size;
+    case TK_FNPTR:
+    case TK_MPTR:
     case TK_TYPEPARAM:
         return 8;
     }
@@ -387,6 +407,17 @@ int type_equals(Type *a, Type *b) {
         return a->sdef == b->sdef;
     case TK_UNION:
         return a->udef == b->udef;
+    case TK_FNPTR:
+    case TK_MPTR: {
+        if (a->nparams != b->nparams)
+            return 0;
+        if (!type_equals(a->ret, b->ret))
+            return 0;
+        for (int i = 0; i < a->nparams; i++)
+            if (!type_equals(a->ptypes[i], b->ptypes[i]))
+                return 0;
+        return 1;
+    }
     case TK_TYPEPARAM:
         return a == b;
     }
@@ -429,6 +460,46 @@ const char *type_name(TypeCtx *ctx, Type *t) {
     case TK_ARRAY:
         snprintf(buf, sizeof bufs[0], "%s[]", type_name(ctx, t->base));
         break;
+    case TK_MPTR: {
+        /* Rendered like a function type; only diagnostics distinguish them, and
+         * there "method" reads better than "fn". */
+        const char *inner = type_name(ctx, t);
+        static char mbufs[2][256];
+        static int mnext = 0;
+        char *mbuf = mbufs[mnext];
+        mnext = (mnext + 1) % 2;
+        snprintf(mbuf, sizeof mbufs[0], "method %s", inner != NULL ? inner : "?");
+        return mbuf;
+    }
+    case TK_FNPTR: {
+        /* fn(int, string) -> bool. type_name hands back one rotating slot at a
+         * time, so this assembles the signature in a local and then copies it
+         * into a slot of its own. */
+        char tmp[256];
+        size_t off = (size_t)snprintf(tmp, sizeof tmp, "fn(");
+        for (int i = 0; i < t->nparams && off < sizeof tmp; i++) {
+            const char *pt = type_name(ctx, t->ptypes[i]);
+            if (pt == NULL)
+                pt = "?";
+            off += (size_t)snprintf(tmp + off, sizeof tmp - off, "%s%s", i ? ", " : "", pt);
+        }
+        if (off < sizeof tmp) {
+            /* type_name only returns NULL for a NULL type, which cannot
+             * happen here, but the check keeps the warning quiet. */
+            const char *rt = t->ret != NULL ? type_name(ctx, t->ret) : NULL;
+            snprintf(tmp + off, sizeof tmp - off, ") -> %s", rt != NULL ? rt : "?");
+        }
+        static char fbufs[4][256];
+        static int fnext = 0;
+        char *fbuf = fbufs[fnext];
+        fnext = (fnext + 1) % 4;
+        size_t n = strlen(tmp);
+        if (n >= sizeof fbufs[0])
+            n = sizeof fbufs[0] - 1;
+        memcpy(fbuf, tmp, n);
+        fbuf[n] = 0;
+        return fbuf;
+    }
     case TK_STRUCT:
         snprintf(buf, sizeof bufs[0], "%s", t->sdef->name);
         break;

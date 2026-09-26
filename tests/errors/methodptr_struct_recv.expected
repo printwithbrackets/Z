@@ -1,0 +1,1 @@
+cannot take a method pointer to struct 'S': its methods take the receiver by value, so there is nothing to bind

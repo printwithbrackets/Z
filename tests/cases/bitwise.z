@@ -1,0 +1,63 @@
+// Bitwise operators and shifts. Z's int is 64-bit and wraps like C's long
+// long, >> is arithmetic, and the precedence sits between && and == like C.
+const int F_ALIVE = 1;
+const int F_SHOOTER = 2;
+const int F_ELITE = 4;
+
+int describe(int flags) {
+    if ((flags & F_ALIVE) != 0 && (flags & F_ELITE) == 0) { return 1; }
+    if ((flags & F_ELITE) != 0) { return 3; }
+    return 0;
+}
+
+int popcount(int v) {
+    var n = 0;
+    while (v != 0) {
+        n = n + (v & 1);
+        v = v >> 1;
+    }
+    return n;
+}
+
+int main() {
+    print(12 & 10);   // 8
+    print(12 | 10);   // 14
+    print(12 ^ 10);   // 6
+    print(~0);        // -1
+    print(~12);       // -13
+    print(1 << 10);   // 1024
+    print(1024 >> 3); // 128
+    print(-16 >> 2);  // -4 (arithmetic)
+
+    /* Precedence: & binds tighter than |, both tighter than ==. */
+    print(1 | 2 & 3);   // 3
+    print(1 ^ 2 | 4);   // 7
+    print(7 & 3 | 8);   // 11
+    print((1 << 2) + 1); // 5
+    print(1 << 2 + 1);   // 8: + binds tighter than <<
+
+    print(describe(F_ALIVE));                // 1: alive and not elite
+    print(describe(F_ALIVE | F_SHOOTER));    // 1: still alive and not elite
+    print(describe(F_ALIVE | F_ELITE));      // 3: elite wins
+    print(describe(F_ELITE));                // 3
+    print(popcount(0));                      // 0
+    print(popcount(255));                    // 8
+    print(popcount(61680));                 // 8
+
+    /* Compound forms, including through a pointer. */
+    var a = 12; a &= 10; print(a);   // 8
+    var b = 12; b |= 3;  print(b);   // 15
+    var c = 12; c ^= 10; print(c);   // 6
+    var d = 1;  d <<= 10; print(d);  // 1024
+    var e = 1024; e >>= 3; print(e); // 128
+    var f = 0;
+    f |= 1; f |= 2; f ^= 3;
+    print(f);                       // 0
+    var p = &a; *p |= 16; print(a); // 24
+
+    /* Constant folding agrees with the runtime path. */
+    var g = (1 << 40) | 1;
+    print(g);            // 1099511627777
+    print(g >> 40);      // 1
+    return 0;
+}

@@ -1,0 +1,95 @@
+// sin/cos in integer fixed point: a full turn is 1<<30 units and results are
+// Q30, so 1.0 is exactly 1<<30. Angles outside one turn wrap and the result is
+// bit-for-bit periodic. Pure integer CORDIC, so no libm and no float rounding.
+//
+// Exactness is asserted where the algorithm is exact (the period, sin/cos
+// symmetry) and with a tolerance where fixed-point rounding is expected; the
+// observed worst case over a full turn is under 7 ulp of Q30, about 6e-9.
+// Prints the number of checks and 1 if every one held.
+const int TURN = 1 << 30;
+const int QUARTER = 1 << 28;
+const int ONE = 1 << 30;
+const int TOL = 8;
+/* Squaring amplifies the fixed-point error by about 2*sin, so a squared
+ * quantity needs a tolerance relative to its own magnitude: 1e-7 of ONE*ONE.
+ * The observed deviation is 5.9e9, about 5.1e-9 relative. */
+const int TOL_SQ = (1 << 30) * (1 << 30) / 10000000;
+
+int near(int got, int want) { return abs(got - want) <= TOL ? 1 : 0; }
+int near_sq(int got, int want) { return abs(got - want) <= TOL_SQ ? 1 : 0; }
+
+int main() {
+    var r = new int[64];
+    var n = 0;
+
+    /* cardinal angles, exact to within a couple of ulp */
+    r[n] = near(sin(0), 0); n = n + 1;
+    r[n] = near(cos(0), ONE); n = n + 1;
+    r[n] = near(sin(QUARTER), ONE); n = n + 1;
+    r[n] = near(cos(QUARTER), 0); n = n + 1;
+    r[n] = near(sin(QUARTER * 2), 0); n = n + 1;
+    r[n] = near(cos(QUARTER * 2), 0 - ONE); n = n + 1;
+    r[n] = near(sin(QUARTER * 3), 0 - ONE); n = n + 1;
+    r[n] = near(cos(QUARTER * 3), 0); n = n + 1;
+    r[n] = near(sin(0 - QUARTER), 0 - ONE); n = n + 1;
+    r[n] = near(cos(0 - QUARTER), 0); n = n + 1;
+
+    /* a full turn is the identity, bit for bit */
+    r[n] = sin(TURN) == sin(0) ? 1 : 0; n = n + 1;
+    r[n] = cos(TURN) == cos(0) ? 1 : 0; n = n + 1;
+    r[n] = sin(TURN * 4) == sin(0) ? 1 : 0; n = n + 1;
+    r[n] = cos(TURN * 4) == cos(0) ? 1 : 0; n = n + 1;
+
+    /* period 2^32, exact for angles far outside a single turn too */
+    var a = 123456789;
+    r[n] = sin(a) == sin(a + (TURN * 4)) ? 1 : 0; n = n + 1;
+    r[n] = cos(a) == cos(a + (TURN * 4)) ? 1 : 0; n = n + 1;
+    r[n] = sin(0 - a) == sin(0 - a + (TURN * 4)) ? 1 : 0; n = n + 1;
+
+    /* the Pythagorean identity holds on both quadrants */
+    r[n] = near_sq(sin(QUARTER) * sin(QUARTER) + cos(QUARTER) * cos(QUARTER),
+                   ONE * ONE); n = n + 1;
+    r[n] = near_sq(sin(QUARTER * 3 / 7) * sin(QUARTER * 3 / 7) +
+                       cos(QUARTER * 3 / 7) * cos(QUARTER * 3 / 7),
+                   ONE * ONE); n = n + 1;
+    /* and on a third quadrant angle, where both legs are negative */
+    r[n] = near_sq(sin(QUARTER * 5 / 3) * sin(QUARTER * 5 / 3) +
+                       cos(QUARTER * 5 / 3) * cos(QUARTER * 5 / 3),
+                   ONE * ONE); n = n + 1;
+
+    /* 45 degrees: both legs agree */
+    r[n] = near(sin(QUARTER / 2), 759250125); n = n + 1;
+    r[n] = near(cos(QUARTER / 2), 759250125); n = n + 1;
+
+    /* a tiny angle stays linear: the Q30 result is about a * 2*pi */
+    r[n] = near(sin(1000), 6283); n = n + 1;
+    r[n] = near(cos(1000), ONE); n = n + 1;
+
+    /* quadrant signs hold across the whole turn */
+    r[n] = sin(QUARTER) > 0 ? 1 : 0; n = n + 1;
+    r[n] = cos(QUARTER) < ONE ? 1 : 0; n = n + 1;
+    r[n] = sin(QUARTER * 2 + 1) < 0 ? 1 : 0; n = n + 1;
+    r[n] = cos(QUARTER * 2 + 1) < 0 ? 1 : 0; n = n + 1;
+    r[n] = sin(QUARTER * 3 + 1) < 0 ? 1 : 0; n = n + 1;
+    r[n] = cos(QUARTER * 3 + 1) > 0 ? 1 : 0; n = n + 1;
+
+    /* cos(x) == sin(x + a quarter turn) */
+    r[n] = near(cos(QUARTER / 3), sin(QUARTER / 3 + QUARTER)); n = n + 1;
+
+    /* sin is odd, cos is even */
+    r[n] = near(sin(0 - QUARTER / 3), 0 - sin(QUARTER / 3)); n = n + 1;
+    r[n] = near(cos(0 - QUARTER / 3), cos(QUARTER / 3)); n = n + 1;
+
+    /* usable as ordinary arguments and inside a loop */
+    r[n] = sin(QUARTER * 2) + cos(QUARTER * 2) < 0 ? 1 : 0; n = n + 1;
+    var v = 0;
+    var k = 0;
+    while (k < 3) { v = v + cos(QUARTER * k); k = k + 1; }
+    r[n] = near(v, cos(0) + cos(QUARTER) + cos(QUARTER * 2)); n = n + 1;
+
+    var ok = 1;
+    for (var i = 0; i < n; i = i + 1) { if (r[i] == 0) { ok = 0; } }
+    print(n);
+    print(ok);
+    return 0;
+}

@@ -1,0 +1,13 @@
+// Imported by ../import_main.z. Paths resolve relative to the importing file,
+// so this is tests/imports/lib/math.z reached as "lib/math.z".
+const int SCALE = 3;
+
+int triple(int x) { return x * SCALE; }
+int square(int x) { return x * x; }
+
+struct Vec { int x; int y; }
+
+Vec add(Vec a, Vec b) {
+    var r = new Vec(a.x + b.x, a.y + b.y);
+    return r;
+}

@@ -133,8 +133,20 @@ system assembler — we do not write an ELF encoder.
 
 - **M0–M1 (done):** pipeline, expressions, control flow, functions, `int`/`bool`/`string`, `var`, `print`, diagnostics.
 - **M2 (done):** real type system, pointers (`&`/`*`), heap arrays (`new T[n]`, indexing, `.length`), `for`/`foreach`, `++`/`--`, string concatenation/`int`→string, **structs** (fields, nested, copy semantics, arrays of structs, by-pointer params), embedded runtime. **Later:** by-value struct pass/return (SysV classifier).
-- **M3:** C# sugar: properties, `$""` string interpolation, expression-bodied members, `operator` overloading, extension methods, `namespace`/`using`.
-- **M4:** modules/imports, richer checker, `Result<T,E>` + `?`.
+- **M3 (done):** C# sugar: properties, `$""` string interpolation, expression-bodied members, `operator` overloading, extension methods.
+- **M3.5 (done):** the everyday-language layer — `const`; bitwise `& | ^ ~ << >>` and the compound forms; `break`/`continue`; the `null` literal; lexicographic string comparison; integer built-ins `abs min max clamp sqrt` and `sin`/`cos` (fixed point, a full turn of `1 << 30`); opt-in `--bounds` range checking.
+- **M3.7 (done):** C interoperability — `extern` (implemented in C) and `export` (defined in Z, callable from C) in both directions, with linker arguments passed through. Every Z function is emitted under a private `z$` symbol, so it can no longer collide with a libc name, a runtime helper, or a word the assembler reserves.
+- **M3.8 (done):** first-class function pointers — `&f` yields a value typed by
+  the function's signature, `fn(params) -> ret` names the type, and calls through
+  a pointer are argument-checked. Not closures: there are no nested functions.
+- **M3.9 (done):** modules — `import "path.z";` splices a file's declarations
+  into the importing one, resolved relative to it, de-duplicated, cycle-checked,
+  and with per-file diagnostics.
+- **M3.10 (done):** bound method pointers — `&obj.M` yields a `method(...)`
+  value, a pointer to a GC cell holding `{ code, receiver }` so the receiver
+  stays alive; a virtual method binds through the vtable. Scalar representation,
+  so no aggregate copy machinery is involved.
+- **M4:** richer checker, `Result<T,E>` + `?`.
 - **M5 (done):** tracing GC — a conservative mark-sweep collector in the runtime (scans the C stack + spilled registers), triggered on heap growth; keeps live data, reclaims garbage.
 - **M6a (done):** enums / sum types (tagged unions) + **exhaustive** `match` with payload binding (compile error if a variant is unhandled).
 - **M6b (done):** generic functions via monomorphization (type inference, `T`/`T[]`/`T*` params, struct returns; no runtime generics). **Interfaces/traits** remain.
@@ -147,8 +159,10 @@ system assembler — we do not write an ELF encoder.
   (Granlund–Montgomery multiply-shift replacing 64-bit `idiv`, with a
   compile-time self-check that falls back to `idiv` if a magic can't be proven).
   Together these turn hot loops fully register-resident and ~2× faster end to
-  end, and beat `gcc -O0` on modulo-heavy code. Remaining: loop-invariant code
-  motion, three-address-code in-place evaluation, loop unrolling.
+  end, and beat `gcc -O0` on modulo-heavy code. Each `for` phase is a separate
+  liveness position, so a loop counter can no longer share a register with a
+  local declared in its body. Remaining: loop-invariant code motion,
+  three-address-code in-place evaluation, loop unrolling.
 
 ## Performance
 

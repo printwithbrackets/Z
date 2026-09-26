@@ -1,0 +1,34 @@
+// Built-in intrinsics: abs/min/max/clamp are inlined, sqrt calls the runtime.
+// A user function of the same name shadows the intrinsic.
+int min(int a, int b) { return a * b; }
+
+int main() {
+    print(abs(0 - 7)); print(abs(7)); print(abs(0));            // 7 7 0
+    print(abs(0 - 9223372036854775807));                       // 9223372036854775807
+
+    print(min(3, 9)); print(min(9, 3));                         // 3 3
+    print(max(3, 9)); print(max(9, 3));                         // 9 9
+    print(min(0 - 5, 0 - 9));                                   // -9
+
+    print(clamp(15, 0, 10)); print(clamp(0 - 5, 0, 10));       // 10 0
+    print(clamp(5, 0, 10)); print(clamp(0, 0, 10));            // 5 0
+    print(clamp(0 - 5, 0 - 5, 10)); print(clamp(20, 0 - 5, 10)); // -5 10
+
+    print(sqrt(0)); print(sqrt(1)); print(sqrt(2));             // 0 1 1
+    print(sqrt(3)); print(sqrt(4)); print(sqrt(15));            // 1 2 3
+    print(sqrt(16)); print(sqrt(17));                           // 4 4
+    print(sqrt(1000000));                                       // 1000
+    print(sqrt(0 - 4));                                         // -4  (n < 2 returns n)
+
+    /* usable inside expressions, not just as a top-level argument */
+    print(sqrt(9) + sqrt(16));                                  // 7
+    var a = new int[3];
+    a[0] = 4; a[1] = 9; a[2] = 16;
+    var s = 0;
+    foreach (v in a) { s = s + sqrt(v); }
+    print(s);                                                   // 2+3+4 = 9
+
+    /* a declaration named `min` shadows the intrinsic */
+    print(min(3, 4));                                           // 12
+    return 0;
+}

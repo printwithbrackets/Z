@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static char buf[1 << 20];
 
@@ -40,6 +41,9 @@ int main(int argc, char **argv) {
     const char *vela = argv[1];
     const char *case_dir = "tests/cases";
     const char *err_dir = "tests/errors";
+    const char *rt_dir = "tests/runtime";
+    const char *io_dir = "tests/interop";
+    const char *imp_dir = "tests/imports";
     int pass = 0, fail = 0;
 
     /* Golden cases. */
@@ -52,6 +56,7 @@ int main(int argc, char **argv) {
         "methods",  "props",      "ext",       "fatarrow", "opoverload",     "tern",
         "gc",       "enum_match", "constfold", "regalloc", "divmod",         "boolstr",
         "generics", "generics2",  "classes",   "classes2", "integration",
+        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -92,6 +97,8 @@ int main(int argc, char **argv) {
     static const char *errs[] = {
         "undefined_var", "type_mismatch",       "missing_semi", "unknown_func", "bad_condition",
         "arity",         "unterminated_string", "stray_char",   "return_type",  "undefined_type",
+        "too_many_params", "too_many_method_params", "bad_const", "dup_const",
+        "bitwise_on_string", "break_outside_loop", "continue_outside_loop", "intrinsic_arity", "intrinsic_arg_type", "compare_mixed", "extern_with_body", "extern_arity", "extern_argtype", "export_no_body", "fnptr_argcount", "fnptr_argtype", "fnptr_signature", "fnptr_order", "fnptr_arity_mismatch", "methodptr_struct_recv", "methodptr_no_method", "methodptr_struct_return",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -107,7 +114,9 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s 2>&1", vela, path);
+        /* Send the output somewhere outside the tree: without -o the compiler
+         * writes an executable named after the test into the repo root. */
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/vela_test_bin 2>&1", vela, path);
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -134,6 +143,110 @@ int main(int argc, char **argv) {
         } else {
             fail++;
         }
+    }
+
+    /* Runtime-abort cases: compiled with --bounds, the program must exit
+     * nonzero and every non-empty line of the sibling .expected must appear in
+     * its combined output. */
+    static const char *aborts[] = {
+        "bounds_read", "bounds_write", "bounds_negative", "bounds_runtime_len",
+    };
+    for (size_t i = 0; i < sizeof aborts / sizeof aborts[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s.z", rt_dir, aborts[i]);
+        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", rt_dir, aborts[i]);
+        char expected[1 << 16];
+        if (!slurp(exp_path, expected, sizeof expected)) {
+            fprintf(stderr, "FAIL %s (missing .expected)\n", aborts[i]);
+            fail++;
+            continue;
+        }
+        snprintf(cmd, sizeof cmd, "./%s run %s --bounds 2>&1", vela, path);
+        char actual[1 << 16];
+        int rc = run_cmd_capture(cmd, actual, sizeof actual);
+        if (rc == 0) {
+            fprintf(stderr, "FAIL %s (expected a runtime abort, got success)\n", aborts[i]);
+            fail++;
+            continue;
+        }
+        int ok = 1;
+        char *save = NULL;
+        for (char *line = strtok_r(expected, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            if (line[0] == 0)
+                continue;
+            if (!strstr(actual, line)) {
+                fprintf(stderr, "FAIL %s (missing %s)\n--- actual ---\n%s\n", aborts[i], line,
+                        actual);
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            printf("ok   %s (runtime)\n", aborts[i]);
+            pass++;
+        } else {
+            fail++;
+        }
+    }
+
+    /* Interop cases: a Z program plus the C file that satisfies its extern
+     * declarations, passed on the command line so the link step sees it. The
+     * sibling <name>.c is the C side. */
+    static const char *interop[] = {
+        "extern", "export",
+    };
+    for (size_t i = 0; i < sizeof interop / sizeof interop[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s.z", io_dir, interop[i]);
+        /* The C side is <name>.c when it exists, else the shared helper.c. */
+        snprintf(cmd, sizeof cmd, "%s/%s.c", io_dir, interop[i]);
+        if (access(cmd, R_OK) != 0)
+            snprintf(cmd, sizeof cmd, "%s/helper.c", io_dir);
+        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", io_dir, interop[i]);
+        char expected[1 << 16];
+        if (!slurp(exp_path, expected, sizeof expected)) {
+            fprintf(stderr, "FAIL %s (missing .expected)\n", interop[i]);
+            fail++;
+            continue;
+        }
+        char link[4096];
+        snprintf(link, sizeof link, "./%s run %s %s 2>&1", vela, path, cmd);
+        char actual[1 << 16];
+        if (run_cmd_capture(link, actual, sizeof actual) != 0 ||
+            strcmp(expected, actual) != 0) {
+            fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
+                    interop[i], expected, actual);
+            fail++;
+            continue;
+        }
+        printf("ok   %s (interop)\n", interop[i]);
+        pass++;
+    }
+
+    /* Module cases: the harness runs a program that pulls in sibling files, so
+     * the import graph is exercised end to end. */
+    static const char *modules[] = {
+        "import_main",
+    };
+    for (size_t i = 0; i < sizeof modules / sizeof modules[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s.z", imp_dir, modules[i]);
+        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", imp_dir, modules[i]);
+        char expected[1 << 16];
+        if (!slurp(exp_path, expected, sizeof expected)) {
+            fprintf(stderr, "FAIL %s (missing .expected)\n", modules[i]);
+            fail++;
+            continue;
+        }
+        snprintf(cmd, sizeof cmd, "./%s run %s 2>&1", vela, path);
+        char actual[1 << 16];
+        if (run_cmd_capture(cmd, actual, sizeof actual) != 0 ||
+            strcmp(expected, actual) != 0) {
+            fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
+                    modules[i], expected, actual);
+            fail++;
+            continue;
+        }
+        printf("ok   %s (modules)\n", modules[i]);
+        pass++;
     }
 
     printf("\n%d passed, %d failed\n", pass, fail);

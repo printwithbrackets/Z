@@ -1,0 +1,53 @@
+// const: a named compile-time constant. It occupies no frame slot -- a
+// reference is replaced by the literal while parsing -- so consts are free to
+// use in hot code. Initializers may be constant expressions over other
+// consts, and a const must be declared before use (like types, and unlike
+// functions, whose signatures are pre-scanned).
+const int MAX = 100;
+const int HALF = MAX / 2;
+const int FLAGS = 1 | 2 | 4;
+const int SHIFTED = 1 << 10;
+const int MASKED = FLAGS & 6;
+const int NEG = -7;
+const int WRAPPED = 1 << 40;
+const bool ON = true;
+const bool OFF = false;
+const string NAME = "vela";
+const int F_ALIVE = 1;
+const int F_ELITE = 4;
+
+int describe(int flags) {
+    if ((flags & F_ALIVE) != 0 && (flags & F_ELITE) == 0) { return 1; }
+    if ((flags & F_ELITE) != 0) { return 3; }
+    return 0;
+}
+
+int scaled(int n) { return n * MAX + HALF; }
+
+int main() {
+    print(MAX);        // 100
+    print(HALF);       // 50
+    print(FLAGS);      // 7
+    print(SHIFTED);    // 1024
+    print(MASKED);     // 6
+    print(NEG);        // -7
+    print(WRAPPED);    // 1099511627776
+    print(ON);         // true
+    print(OFF);        // false
+    print(NAME);       // vela
+    print(scaled(2));  // 250
+
+    print(describe(F_ALIVE));                    // 1
+    print(describe(F_ALIVE | F_ELITE));          // 3
+    print(describe(F_ELITE));                    // 3
+
+    /* A const works anywhere a literal does, including array sizes. */
+    var a = new int[MAX / 50];
+    a[0] = HALF;
+    print(a[0]);        // 50
+    print(a.length);    // 2
+
+    /* And consts are compile-time constant, so they fold. */
+    print(MAX / 4 + 1); // 26
+    return 0;
+}

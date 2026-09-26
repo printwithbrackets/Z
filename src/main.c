@@ -68,11 +68,198 @@ static int run_command(const char *cmd) {
     return 1;
 }
 
-static void usage(void) { fprintf(stderr, "usage: z <run|build> <file.z> [-o output]\n"); }
+static void usage(void) {
+    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [--bounds] [linker args...]\n");
+}
+
+/* ---- imports ----
+ *
+ * `import "path.z";` splices the named file's tokens into this one, ahead of
+ * the importing file's own, so its top-level declarations are visible exactly
+ * as if the text had been pasted in -- which is what a program had to do by
+ * hand before. Doing it on the token stream rather than by rewriting source
+ * means the parser is unchanged, and every token keeps the Span (and therefore
+ * the file name and line) it was lexed with, so a diagnostic in an imported
+ * file points at that file.
+ *
+ * Paths resolve relative to the importing file's directory. Each file is
+ * expanded at most once however many times it is imported, and a cycle is an
+ * error rather than a hang.
+ */
+
+static void die_oom(void) {
+    fprintf(stderr, "z: out of memory\n");
+    exit(1);
+}
+
+static char *strdup_or_die(const char *s);
+
+#define MAX_FILES 64
+static const char *loaded_path[MAX_FILES];  /* paths already expanded (arena-owned) */
+static const char *loading_path[MAX_FILES]; /* on the current expansion stack */
+static int n_loaded = 0, n_loading = 0;
+
+/* Directory part of `path`, as a fresh string ("." when there is none). */
+static char *dir_of(const char *path) {
+    const char *slash = strrchr(path, '/');
+    if (slash == NULL)
+        return strdup_or_die(".");
+    size_t n = (size_t)(slash - path);
+    if (n == 0)
+        n = 1; /* "/foo.z" -> "/" */
+    char *d = malloc(n + 1);
+    if (d == NULL)
+        die_oom();
+    memcpy(d, path, n);
+    d[n] = 0;
+    return d;
+}
+
+/* Joins the importing file's directory with a relative import path. */
+static char *resolve_import(const char *importer, const char *rel) {
+    if (rel[0] == '/')
+        return strdup_or_die(rel);
+    char *dir = dir_of(importer);
+    size_t need = strlen(dir) + 1 + strlen(rel) + 1;
+    char *out = malloc(need);
+    if (out == NULL)
+        die_oom();
+    snprintf(out, need, "%s/%s", dir, rel);
+    free(dir);
+    return out;
+}
+
+static char *strdup_or_die(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *out = malloc(n);
+    if (out == NULL)
+        die_oom();
+    memcpy(out, s, n);
+    return out;
+}
+
+static int path_listed(const char **list, int n, const char *p) {
+    for (int i = 0; i < n; i++)
+        if (strcmp(list[i], p) == 0)
+            return 1;
+    return 0;
+}
+
+/* Expands `path`'s tokens, recursing into its imports. Appends the result to
+ * `*out` / `*nout`, reallocating as needed. */
+static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
+                       StringTable *strings);
+
+/* Appends one token, growing the output array. */
+static void push_token(Arena *arena, Token **out, int *nout, int *capout, Token t) {
+    if (*nout == *capout) {
+        int ncap = *capout == 0 ? 64 : *capout * 2;
+        Token *na = arena_alloc_array(arena, (size_t)ncap, sizeof(Token));
+        if (*nout > 0)
+            memcpy(na, *out, (size_t)*nout * sizeof(Token));
+        *out = na;
+        *capout = ncap;
+    }
+    (*out)[(*nout)++] = t;
+}
+
+static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
+                       StringTable *strings) {
+    /* The path is copied into the arena because every token's Span points at
+     * it, and those spans are read long after this frame is gone. The strings
+     * resolve_import hands back are freed by the caller, so using one directly
+     * would leave the spans dangling -- and since malloc reuses the block, they
+     * would all end up naming whichever path was allocated last. */
+    char *stable = arena_strdup(arena, path);
+    path = stable;
+    if (n_loaded >= MAX_FILES || n_loading >= MAX_FILES) {
+        fprintf(stderr, "z: too many imported files (limit %d)\n", MAX_FILES);
+        return 1;
+    }
+    if (path_listed(loaded_path, n_loaded, path))
+        return 0; /* already in the unit; a second import is a no-op */
+    if (path_listed(loading_path, n_loading, path)) {
+        fprintf(stderr, "z: import cycle: %s imports itself, directly or indirectly\n", path);
+        return 1;
+    }
+    loading_path[n_loading++] = path; /* arena-owned */
+
+    long len = 0;
+    char *text = read_file(path, &len); /* reports the open failure itself */
+    if (text == NULL) {
+        n_loading--;
+        return 1;
+    }
+    /* Keep the text in the arena: diagnostics render an excerpt from it long
+     * after lexing, so freeing the read buffer here would leave them pointing
+     * at freed memory. arena_free then cleans up every imported file at once. */
+    char *kept = arena_alloc_array(arena, (size_t)len + 1, 1);
+    memcpy(kept, text, (size_t)len);
+    kept[len] = 0;
+    free(text);
+    text = kept;
+    diag_set_source(path, text);
+
+    int ntoks = 0;
+    Token *toks = lex_all_file(arena, text, (int)len, strings, &ntoks, path);
+    if (diag_error_count() > 0) {
+        n_loading--;
+        return 1;
+    }
+
+    /* Walk the tokens, recursing at each top-level `import "..." ;` and
+     * otherwise copying them through. */
+    int depth = 0;
+    for (int i = 0; i < ntoks; i++) {
+        Token *t = &toks[i];
+        if (t->kind == T_LBRACE) {
+            depth++;
+            push_token(arena, out, nout, capout, *t);
+            continue;
+        }
+        if (t->kind == T_RBRACE) {
+            depth--;
+            push_token(arena, out, nout, capout, *t);
+            continue;
+        }
+        /* lex_all terminates each file with T_EOF, and the parser stops at the
+         * first one, so the per-file sentinels are dropped here; a single one
+         * is appended after the whole unit is assembled. */
+        if (t->kind == T_EOF)
+            continue;
+        if (depth == 0 && t->kind == T_KW_IMPORT) {
+            if (i + 2 >= ntoks || toks[i + 1].kind != T_STRING || toks[i + 2].kind != T_SEMI) {
+                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\";`\n",
+                        t->span.file ? t->span.file : path, t->span.line, t->span.col);
+                n_loading--;
+                return 1;
+            }
+            char *rel = strings->items[toks[i + 1].str_id];
+            char *target = resolve_import(path, rel);
+            if (expand_file(arena, target, out, nout, capout, strings) != 0) {
+                free(target);
+                n_loading--;
+                return 1;
+            }
+            free(target);
+            /* Step over the string and the semicolon; the loop's own i++ then
+             * lands on whatever follows the statement. */
+            i += 2;
+            continue;
+        }
+        push_token(arena, out, nout, capout, *t);
+    }
+
+    n_loading--;
+    if (n_loaded < MAX_FILES)
+        loaded_path[n_loaded++] = path; /* arena-owned, freed with the arena */
+    return 0;
+}
 
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
  * links an executable. Returns the process exit status. */
-static int compile(const char *src, const char *exe, const char *asm_path) {
+static int compile(const char *src, const char *exe, const char *asm_path,
+                   int bounds_checks, const char *link_args) {
     long len = 0;
     char *text = read_file(src, &len);
     if (text == NULL)
@@ -85,13 +272,27 @@ static int compile(const char *src, const char *exe, const char *asm_path) {
     StringTable strings;
     string_table_init(&strings, &arena);
 
-    int ntoks = 0;
-    Token *toks = lex_all(&arena, text, (int)len, &strings, &ntoks);
-    if (diag_error_count() > 0) {
+    /* Expand `import`s into a single token stream. The root file is just
+     * another file to the expander, so imports nest to any depth. */
+    int ntoks = 0, tcap = 0;
+    Token *toks = NULL;
+    if (expand_file(&arena, src, &toks, &ntoks, &tcap, &strings) != 0 ||
+        diag_error_count() > 0) {
         arena_free(&arena);
         free(text);
         return 1;
     }
+    /* One terminator for the assembled unit. */
+    if (ntoks == tcap) {
+        Token *bigger = arena_alloc_array(&arena, (size_t)ntoks + 1, sizeof(Token));
+        if (ntoks > 0)
+            memcpy(bigger, toks, (size_t)ntoks * sizeof(Token));
+        toks = bigger;
+    }
+    memset(&toks[ntoks], 0, sizeof toks[ntoks]);
+    toks[ntoks].kind = T_EOF;
+    toks[ntoks].span.file = src;
+    ntoks++;
 
     Stmt *program = parse_program(&arena, toks, ntoks, &strings);
     if (diag_error_count() > 0) {
@@ -100,7 +301,9 @@ static int compile(const char *src, const char *exe, const char *asm_path) {
         return 1;
     }
 
-    char *asm_text = codegen_emit(&arena, program, &strings);
+    CodegenOptions copt;
+    copt.bounds_checks = bounds_checks;
+    char *asm_text = codegen_emit_opts(&arena, program, &strings, &copt);
 
     if (asm_path != NULL) {
         write_file(asm_path, asm_text);
@@ -138,8 +341,12 @@ static int compile(const char *src, const char *exe, const char *asm_path) {
         }
         fwrite(runtime_src, 1, strlen(runtime_src), rtf);
         fclose(rtf);
-        char cmd[1400];
-        snprintf(cmd, sizeof cmd, "cc -no-pie -o '%s' '%s' '%s' 2>&1", exe, apath, rt_path);
+        char cmd[4096];
+        /* Anything the caller passed after the source file is handed straight
+         * to the linker, so `z build main.z -o main -lm -L/opt/lib` works and an
+         * extern symbol can be satisfied by a plain .c or .o path. */
+        snprintf(cmd, sizeof cmd, "cc -no-pie -o '%s' '%s' '%s' %s 2>&1", exe, apath, rt_path,
+                 link_args != NULL ? link_args : "");
         status = run_command(cmd);
         remove(rt_path);
         if (status != 0)
@@ -165,9 +372,34 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     const char *src = argv[2];
     const char *out = NULL;
+    int bounds_checks = 0;
+    /* Everything the compiler does not recognize is collected verbatim and
+     * handed to the link step. */
+    char link_args[3072];
+    size_t la_len = 0;
+    link_args[0] = 0;
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
+        } else if (strcmp(argv[i], "--bounds") == 0) {
+            bounds_checks = 1;
+        } else {
+            const char *a = argv[i];
+            size_t need = strlen(a) + 1;
+            /* Single-quote so paths with spaces survive the shell. */
+            if (la_len + need + 3 < sizeof link_args) {
+                link_args[la_len++] = ' ';
+                if (strchr(a, '\'') == NULL) {
+                    link_args[la_len++] = '\'';
+                    memcpy(link_args + la_len, a, strlen(a));
+                    la_len += strlen(a);
+                    link_args[la_len++] = '\'';
+                } else {
+                    memcpy(link_args + la_len, a, strlen(a));
+                    la_len += strlen(a);
+                }
+                link_args[la_len] = 0;
+            }
         }
     }
 
@@ -188,7 +420,7 @@ int main(int argc, char **argv) {
                 *dot = '\0';
             out = default_out;
         }
-        int rc = compile(src, out, NULL) == 0 ? 0 : 1;
+        int rc = compile(src, out, NULL, bounds_checks, link_args) == 0 ? 0 : 1;
         free(default_out);
         return rc;
     }
@@ -196,7 +428,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL) != 0)
+        if (compile(src, exe, NULL, bounds_checks, link_args) != 0)
             return 1;
         char run_cmd[512];
         snprintf(run_cmd, sizeof run_cmd, "'%s'", exe);
@@ -207,7 +439,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
-        return compile(src, NULL, "/dev/stdout") == 0 ? 0 : 1;
+        return compile(src, NULL, "/dev/stdout", bounds_checks, link_args) == 0 ? 0 : 1;
     }
 
     usage();

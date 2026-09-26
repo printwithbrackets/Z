@@ -1,0 +1,3 @@
+int ident(int x) { return x; }
+int zero() { return 7; }
+int main() { print(&ident == &zero ? 1 : 0); return 0; }

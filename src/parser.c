@@ -2,6 +2,8 @@
 
 #include "diag.h"
 
+#include "limits.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,8 +30,23 @@ typedef struct {
     Type **ptypes;
     int nparams;
     int is_ext;     /* extension method: first param is the receiver */
+    /* Declared `extern`: implemented in C, so the assembly symbol is the name
+     * as written and is not put in the Z namespace. */
+    int is_extern;
+    /* Declared `export`: defined in Z, but the symbol keeps the written name
+     * and is emitted .globl so C can call it. */
+    int is_export;
     Type *ext_recv; /* receiver type of an extension method */
 } Sig;
+
+/* A `const` binding: a named compile-time constant. Consts never occupy a
+ * frame slot; a reference is replaced by the literal at parse time. */
+typedef struct {
+    char *name;
+    Type *type;
+    long long ival; /* TK_INT / TK_BOOL */
+    int str_id;     /* TK_STRING */
+} ConstDef;
 
 /* An active generic type-parameter binding: name -> resolved Type (either a
  * TK_TYPEPARAM placeholder while parsing the template, or a concrete type
@@ -74,6 +91,10 @@ typedef struct {
 
     Type *cur_ret; /* return type of the function being parsed */
     int foreach_counter;
+    int loop_depth; /* break/continue must sit inside a loop */
+    /* Set while parsing the operand of `&`, so a `.name` on a class receiver
+     * builds a bound method pointer instead of reporting a missing field. */
+    int take_method_addr;
     StringTable *strings;
     /* While parsing a struct method body: the enclosing struct and the `this`
      * receiver variable (an E_VAR for the hidden first parameter). */
@@ -85,6 +106,9 @@ typedef struct {
     int ntbind, tbind_cap;
     Generic *generics; /* registered generic function templates */
     int ngenerics, generic_cap;
+    ConstDef *consts;
+    int nconsts, const_cap;
+
     Stmt **pending; /* concrete instances awaiting append to program items */
     int npending, pending_cap;
     int in_instantiate; /* set while re-parsing a template for an instance */
@@ -97,6 +121,9 @@ static Stmt *parse_block(Parser *p);
 static Stmt *parse_func(Parser *p);
 static Type *parse_type_at(Parser *p, int i);
 static Expr *parse_match(Parser *p, Span start);
+static ConstDef *const_find(Parser *p, const char *name);
+static Expr *const_expr(Parser *p, ConstDef *c, Span span);
+static int const_fold_static(Parser *p, Expr *e, long long *out);
 
 /* ---- token helpers ---- */
 
@@ -166,7 +193,9 @@ static Type *base_type_from_token(Parser *p, TokenKind k) {
 }
 
 static int is_type_token(TokenKind k) {
-    return k == T_KW_INT || k == T_KW_BOOL || k == T_KW_STRING || k == T_KW_VOID;
+    /* `fn` starts a function type, so anywhere a type may begin it counts. */
+    return k == T_KW_INT || k == T_KW_BOOL || k == T_KW_STRING || k == T_KW_VOID ||
+           k == T_KW_FN || k == T_KW_METHOD;
 }
 
 /* Parses a type possibly followed by `*` stars and `[]` array suffixes.
@@ -190,7 +219,60 @@ static Type *base_type_or_name(Parser *p, Token *t) {
     return NULL;
 }
 
+static Type *parse_type(Parser *p);
+static Type *parse_type_at(Parser *p, int i);
+
+/* Reads a function type: `fn` "(" type ("," type)* ")" "->" type. A null
+ * parameter list means the function takes nothing. */
+static Type *parse_fn_type(Parser *p) {
+    /* `fn(...)` is a plain function pointer; `method(...)` is a bound method
+     * pointer. Same syntax, different value. */
+    int mptr = cur(p)->kind == T_KW_METHOD;
+    advance(p);
+    if (!match(p, T_LPAREN)) {
+        diag_error(cur(p)->span, "expected '(' after 'fn'");
+        return NULL;
+    }
+    /* Arena-allocated: the Type keeps this pointer, so it must outlive this
+     * function. A stack array would dangle the moment we return. */
+    Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+    int np = 0;
+    if (!at(p, T_RPAREN)) {
+        for (;;) {
+            if (np >= Z_MAX_ARGS) {
+                diag_error(cur(p)->span, "a function type may take at most %d parameters",
+                           Z_MAX_ARGS);
+                break;
+            }
+            Type *pt = parse_type(p);
+            if (pt == NULL) {
+                diag_error(cur(p)->span, "expected a parameter type in function type");
+                break;
+            }
+            ptypes[np++] = pt;
+            if (!match(p, T_COMMA))
+                break;
+        }
+    }
+    if (!match(p, T_RPAREN)) {
+        diag_error(cur(p)->span, "expected ')' to close the function type's parameters");
+        return NULL;
+    }
+    if (!match(p, T_ARROW)) {
+        diag_error(cur(p)->span, "expected '->' and a return type after the function type");
+        return NULL;
+    }
+    Type *ret = parse_type(p);
+    if (ret == NULL) {
+        diag_error(cur(p)->span, "expected a return type in function type");
+        return NULL;
+    }
+    return mptr ? type_mptr(&p->ty, ptypes, np, ret) : type_fnptr(&p->ty, ptypes, np, ret);
+}
+
 static Type *parse_type(Parser *p) {
+    if (at(p, T_KW_FN) || at(p, T_KW_METHOD))
+        return parse_fn_type(p);
     Type *t = base_type_or_name(p, cur(p));
     if (t == NULL)
         return NULL;
@@ -215,6 +297,44 @@ static Type *parse_type(Parser *p) {
 static Type *parse_type_at(Parser *p, int i) {
     if (i >= p->ntoks)
         return NULL;
+    /* A function type in a pre-scanned parameter list: the parameter types are
+     * separated by commas at depth 0 of the inner list, so a flat scan is
+     * enough -- the only thing that matters is how many there are. */
+    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD) {
+        int mptr = p->toks[i].kind == T_KW_METHOD;
+        int j = i + 1;
+        if (j < p->ntoks && p->toks[j].kind == T_LPAREN) {
+            j++;
+            Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+            int np = 0;
+            while (j < p->ntoks && p->toks[j].kind != T_RPAREN) {
+                if (np < Z_MAX_ARGS) {
+                    Type *pt = parse_type_at(p, j);
+                    if (pt == NULL)
+                        break;
+                    ptypes[np++] = pt;
+                }
+                while (j < p->ntoks && p->toks[j].kind != T_COMMA &&
+                       p->toks[j].kind != T_RPAREN)
+                    j++;
+                if (j < p->ntoks && p->toks[j].kind == T_COMMA)
+                    j++;
+            }
+            while (j < p->ntoks && p->toks[j].kind != T_RPAREN)
+                j++;
+            if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
+                j++; /* step past ')' so the '->' is the current token */
+            Type *ret = type_void(&p->ty);
+            if (j < p->ntoks && p->toks[j].kind == T_ARROW) {
+                Type *r = parse_type_at(p, j + 1);
+                if (r != NULL)
+                    ret = r;
+            }
+            return mptr ? type_mptr(&p->ty, ptypes, np, ret)
+                        : type_fnptr(&p->ty, ptypes, np, ret);
+        }
+        return NULL;
+    }
     Type *t = base_type_or_name(p, &p->toks[i]);
     if (t == NULL)
         return NULL;
@@ -301,8 +421,16 @@ static int declare_var(Parser *p, const char *name, Type *type) {
 
 /* ---- function signature table (pre-scan) ---- */
 
+static void add_sig_ex(Parser *p, const char *name, Type *ret, Type **ptypes, int nparams,
+                       int is_ext, int is_extern);
+
 static void add_sig(Parser *p, const char *name, Type *ret, Type **ptypes, int nparams,
                     int is_ext) {
+    add_sig_ex(p, name, ret, ptypes, nparams, is_ext, 0);
+}
+
+static void add_sig_ex(Parser *p, const char *name, Type *ret, Type **ptypes, int nparams,
+                       int is_ext, int is_extern) {
     if (p->nsigs == p->sig_cap) {
         int ncap = p->sig_cap == 0 ? 8 : p->sig_cap * 2;
         Sig *ns = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Sig));
@@ -316,6 +444,8 @@ static void add_sig(Parser *p, const char *name, Type *ret, Type **ptypes, int n
     s->ret = ret;
     s->nparams = nparams;
     s->is_ext = is_ext;
+    s->is_extern = is_extern;
+    s->is_export = 0;
     s->ext_recv = (is_ext && nparams > 0) ? ptypes[0] : NULL;
     s->ptypes = NULL;
     if (nparams > 0) {
@@ -333,9 +463,42 @@ static Sig *find_sig(Parser *p, const char *name) {
 }
 
 /* Given a token index that begins a type, returns the index just past it. */
+static int skip_type_tokens(Parser *p, int i);
+
+/* If `i` points at `fn`, returns the index just past the whole function type
+ * `fn(params) -> ret`, including any `*`/`[]` on the return type. Falls back to
+ * just past the keyword if the type is malformed, so a syntax error is reported
+ * by the real parser rather than here. */
+static int skip_fn_type(Parser *p, int i) {
+    i++; /* fn */
+    if (i >= p->ntoks || p->toks[i].kind != T_LPAREN)
+        return i;
+    int depth = 0;
+    for (; i < p->ntoks; i++) {
+        if (p->toks[i].kind == T_LPAREN)
+            depth++;
+        else if (p->toks[i].kind == T_RPAREN) {
+            depth--;
+            if (depth == 0) {
+                i++;
+                break;
+            }
+        }
+    }
+    if (i < p->ntoks && p->toks[i].kind == T_ARROW)
+        i++;
+    /* The return type may itself be a function type. */
+    if (i < p->ntoks &&
+        (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD))
+        return skip_fn_type(p, i);
+    return skip_type_tokens(p, i);
+}
+
 static int skip_type_tokens(Parser *p, int i) {
     if (i >= p->ntoks)
         return i;
+    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD)
+        return skip_fn_type(p, i);
     if (!is_type_token(p->toks[i].kind) && p->toks[i].kind != T_IDENT)
         return i;
     i++;
@@ -373,7 +536,10 @@ static int skip_generic_params(Parser *p, int i) {
 /* A top-level function starts with a (possibly pointer/array) type, a name,
  * and '('. A generic function is `name<T,...>(`. Uses absolute token indices. */
 static int at_func_decl(Parser *p) {
-    int j = skip_type_tokens(p, p->pos);
+    int j = p->pos;
+    if (j < p->ntoks && (p->toks[j].kind == T_KW_EXTERN || p->toks[j].kind == T_KW_EXPORT))
+        j++; /* `extern int f(...);` / `export int f(...) { }` */
+    j = skip_type_tokens(p, j);
     if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
         return 0;
     j++;
@@ -421,6 +587,68 @@ static void prescan_signatures(Parser *p) {
             depth--;
             i++;
             continue;
+        }
+        /* `extern int f(...);` declares a C symbol and `export int f(...) {...}`
+         * publishes a Z one. Both need their signature recorded here so calls
+         * type-check, and both make codegen use the name as written. */
+        if (depth == 0 && (t->kind == T_KW_EXTERN || t->kind == T_KW_EXPORT)) {
+            int kw_extern = t->kind == T_KW_EXTERN;
+            int j = skip_type_tokens(p, i + 1);
+            if (j + 1 < p->ntoks && p->toks[j].kind == T_IDENT &&
+                p->toks[j + 1].kind == T_LPAREN) {
+                j += 2;
+                Type *ptypes[16];
+                int np = 0;
+                while (j < p->ntoks && p->toks[j].kind != T_RPAREN) {
+                    if (is_type_token(p->toks[j].kind) || p->toks[j].kind == T_IDENT) {
+                        int k = skip_type_tokens(p, j);
+                        if (k < p->ntoks && p->toks[k].kind == T_IDENT) {
+                            if (np < 16)
+                                ptypes[np++] = parse_type_at(p, j);
+                            j = k + 1;
+                            while (j < p->ntoks && p->toks[j].kind != T_COMMA &&
+                                   p->toks[j].kind != T_RPAREN)
+                                j++;
+                            if (j < p->ntoks && p->toks[j].kind == T_COMMA)
+                                j++;
+                            continue;
+                        }
+                    }
+                    j++;
+                }
+                if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
+                    j++;
+                if (j < p->ntoks && p->toks[j].kind == T_SEMI && kw_extern) {
+                    Type *ret = parse_type_at(p, i + 1);
+                    add_sig_ex(p, p->toks[skip_type_tokens(p, i + 1)].text, ret, ptypes, np, 0, 1);
+                    i = j + 1;
+                    continue;
+                }
+                if (j < p->ntoks && p->toks[j].kind == T_LBRACE && !kw_extern) {
+                    /* Record the signature, then skip the body by brace
+                     * matching, exactly as the plain function path does. */
+                    Type *ret = parse_type_at(p, i + 1);
+                    add_sig_ex(p, p->toks[skip_type_tokens(p, i + 1)].text, ret, ptypes, np, 0, 0);
+                    Sig *ex = find_sig(p, p->toks[skip_type_tokens(p, i + 1)].text);
+                    if (ex != NULL)
+                        ex->is_export = 1;
+                    int d = 0;
+                    while (j < p->ntoks) {
+                        if (p->toks[j].kind == T_LBRACE)
+                            d++;
+                        else if (p->toks[j].kind == T_RBRACE) {
+                            d--;
+                            if (d == 0) {
+                                j++;
+                                break;
+                            }
+                        }
+                        j++;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
         }
         if (depth == 0 && (is_type_token(t->kind) || t->kind == T_IDENT)) {
             int j = skip_type_tokens(p, i);
@@ -502,24 +730,43 @@ static int binop_prec(TokenKind k) {
         return 1;
     case T_AND:
         return 2;
+    case T_PIPE:
+        return 3;
+    case T_CARET:
+        return 4;
+    case T_AMP:
+        return 5; /* binary &: shares its token with unary address-of */
     case T_EQ:
     case T_NE:
-        return 3;
+        return 6;
     case T_LT:
     case T_LE:
     case T_GT:
     case T_GE:
-        return 4;
+        return 7;
+    case T_SHL:
+    case T_SHR:
+        return 8;
     case T_PLUS:
     case T_MINUS:
-        return 5;
+        return 9;
     case T_STAR:
     case T_SLASH:
     case T_PERCENT:
-        return 6;
+        return 10;
     default:
         return 0;
     }
+}
+
+/* Arity of a built-in intrinsic, or 0 if the name is not one. */
+static int intrinsic_arity(const char *name) {
+#define Z_ARITY(n, k)                                                                       \
+    if (strcmp(name, n) == 0)                                                              \
+    return k;
+    Z_INTRINSIC_LIST(Z_ARITY)
+#undef Z_ARITY
+    return 0;
 }
 
 static int is_cmp_op(TokenKind k) {
@@ -587,6 +834,25 @@ static Expr *fold_int_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span
         if (b == 0)
             return NULL;
         r = a % b;
+        break;
+    case T_AMP:
+        r = a & b;
+        break;
+    case T_PIPE:
+        r = a | b;
+        break;
+    case T_CARET:
+        r = a ^ b;
+        break;
+    case T_SHL:
+        if (b < 0 || b > 63)
+            return NULL; /* undefined in C; leave it to the runtime check */
+        r = a << b;
+        break;
+    case T_SHR:
+        if (b < 0 || b > 63)
+            return NULL;
+        r = a >> b;
         break;
     case T_LT:
         r = a < b;
@@ -671,7 +937,7 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
                     if (!ok) {
                         Type *want =
                             is_kind(m->ptypes[0], TK_PTR) ? m->ptypes[0]->base : m->ptypes[0];
-                        diag_error(span, "operator '%s' expects '%s' but got '%s'",
+                        diag_error(span, "operator %s expects '%s' but got '%s'",
                                    token_kind_name(op), type_name(&p->ty, want),
                                    type_name(&p->ty, rhs->type));
                     }
@@ -721,9 +987,37 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
     int rparam = is_kind(rhs->type, TK_TYPEPARAM);
 
     if (is_cmp_op(op)) {
+        /* `p == null` / `p != null`: the literal carries no type of its own, so
+         * compare it against any reference-like operand. */
+        if ((lhs->kind == E_NULL || rhs->kind == E_NULL) && (op == T_EQ || op == T_NE)) {
+            e->type = type_bool(&p->ty);
+            return e;
+        }
+        /* Two function pointers can be compared for identity, but not
+         * ordered -- there is no meaningful "less than" for code addresses. */
+        if (is_kind(lhs->type, TK_FNPTR) || is_kind(rhs->type, TK_FNPTR)) {
+            int same = type_equals(lhs->type, rhs->type);
+            if (!same || (op != T_EQ && op != T_NE)) {
+                if (same) {
+                    diag_error(span, "function pointers support only '==' and '!='");
+                } else {
+                    diag_error(span, "cannot compare '%s' with '%s'",
+                               type_name(&p->ty, lhs->type), type_name(&p->ty, rhs->type));
+                }
+                e->type = NULL;
+                return e;
+            }
+            e->type = type_bool(&p->ty);
+            return e;
+        }
         int lok = is_kind(lhs->type, TK_INT) || is_kind(lhs->type, TK_BOOL) || lparam;
         int rok = is_kind(rhs->type, TK_INT) || is_kind(rhs->type, TK_BOOL) || rparam;
-        if (!lok || !rok || !type_equals(lhs->type, rhs->type)) {
+        /* Strings compare lexicographically in all six relational operators. */
+        int lstr = is_kind(lhs->type, TK_STRING);
+        int rstr = is_kind(rhs->type, TK_STRING);
+        int ok = (lstr && rstr) || ((lok || lstr) && (rok || rstr) &&
+                                    type_equals(lhs->type, rhs->type));
+        if (!ok) {
             diag_error(span, "cannot compare '%s' with '%s'", type_name(&p->ty, lhs->type),
                        type_name(&p->ty, rhs->type));
             e->type = NULL;
@@ -734,7 +1028,7 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
     }
 
     if ((!is_kind(lhs->type, TK_INT) && !lparam) || (!is_kind(rhs->type, TK_INT) && !rparam)) {
-        diag_error(span, "operator '%s' is not defined for '%s' and '%s'", token_kind_name(op),
+        diag_error(span, "operator %s is not defined for '%s' and '%s'", token_kind_name(op),
                    type_name(&p->ty, lhs->type), type_name(&p->ty, rhs->type));
         e->type = NULL;
         return e;
@@ -1005,6 +1299,32 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         return e;
     }
 
+    /* Built-in intrinsic. Checked only after the user-function lookup would
+     * have failed, so a declaration named `min` shadows the intrinsic. */
+    if (find_sig(p, name) == NULL && find_generic(p, name) == NULL) {
+        int arity = intrinsic_arity(name);
+        if (arity > 0) {
+            if (n != arity) {
+                diag_error(span, "'%s' expects %d argument%s but got %d", name, arity,
+                           arity == 1 ? "" : "s", n);
+                e->type = NULL;
+                return e;
+            }
+            for (int i = 0; i < n; i++) {
+                if (!is_kind(args[i]->type, TK_INT) && !is_unk(args[i]->type)) {
+                    diag_error(args[i]->span, "argument %d of '%s' expects 'int' but got '%s'",
+                               i + 1, name, type_name(&p->ty, args[i]->type));
+                }
+            }
+            Expr *in = new_expr(p, E_INTRINSIC, span);
+            in->name = arena_strdup(p->arena, name);
+            in->args = args;
+            in->nargs = n;
+            in->type = type_int(&p->ty);
+            return in;
+        }
+    }
+
     /* Generic function: infer type arguments from the call and instantiate. */
     Generic *g = find_generic(p, name);
     if (g != NULL) {
@@ -1049,6 +1369,12 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         e->type = NULL;
         return e;
     }
+    if (n > Z_MAX_ARGS) {
+        diag_error(span, "call to '%s' passes %d arguments but the limit is %d", name, n,
+                   Z_MAX_ARGS);
+        e->type = NULL;
+        return e;
+    }
     for (int i = 0; i < n; i++) {
         if (!is_unk(args[i]->type) && !is_unk(s->ptypes[i]) &&
             !type_equals(args[i]->type, s->ptypes[i])) {
@@ -1057,6 +1383,10 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         }
     }
     e->type = s->ret;
+    /* An `extern` target keeps its own symbol: the C definition is the one
+     * that has to be found at link time. An `export`ed one does too, so calls
+     * inside Z reach the same symbol C does. */
+    e->is_extern = s->is_extern || s->is_export;
     return e;
 }
 
@@ -1096,7 +1426,64 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             Type *st = e->type;
             if (is_kind(st, TK_PTR) && is_kind(st->base, TK_STRUCT))
                 st = st->base;
-            if (at(p, T_LPAREN) && is_kind(st, TK_STRUCT)) {
+            /* A field of function-pointer type, called like a method, is a call
+             * through that pointer rather than a missing method. Detect it here
+             * so the method-call block is skipped entirely and the field access
+             * below runs; the postfix loop then dispatches the call. */
+            int fp_field = 0;
+            if (is_kind(st, TK_STRUCT)) {
+                Field *fld0 = struct_find_field(st->sdef, name);
+                fp_field = fld0 != NULL && (is_kind(fld0->type, TK_FNPTR) ||
+                                            is_kind(fld0->type, TK_MPTR));
+            }
+            /* `&obj.M`: bind the receiver now and yield a callable. */
+            if (p->take_method_addr && is_kind(st, TK_STRUCT) && !fp_field &&
+                !at(p, T_LPAREN)) {
+                StructMethod *bm = struct_find_method(st->sdef, name);
+                if (bm == NULL) {
+                    diag_error(span, "type %s has no method '%s'", st->sdef->name, name);
+                    e = new_expr(p, E_INT, span);
+                    e->type = NULL;
+                    continue;
+                }
+                if (!st->sdef->is_class) {
+                    diag_error(span,
+                               "cannot take a method pointer to struct '%s': its methods take "
+                               "the receiver by value, so there is nothing to bind",
+                               st->sdef->name);
+                    e = new_expr(p, E_INT, span);
+                    e->type = NULL;
+                    continue;
+                }
+                /* A class variable already holds the object pointer, so it is
+                 * the receiver; `*p` on a class pointer yields the same. */
+                Expr *rcv = e;
+                if (is_kind(e->type, TK_PTR) && e->kind == E_DEREF)
+                    rcv = e->lhs;
+                /* A method's parameter list excludes the receiver, so nparams
+                 * and ptypes are exactly what a caller sees. */
+                int np = bm->nparams;
+                Type **pts = NULL;
+                if (np > 0) {
+                    pts = arena_alloc_array(p->arena, (size_t)np, sizeof(Type *));
+                    for (int i = 0; i < np; i++)
+                        pts[i] = bm->ptypes[i];
+                }
+                char *mang = arena_alloc(p->arena, strlen(st->sdef->name) + strlen(name) + 3);
+                snprintf(mang, strlen(st->sdef->name) + strlen(name) + 3, "%s__%s",
+                         st->sdef->name, name);
+                Expr *mp = new_expr(p, E_MPTR, span);
+                mp->name = mang;
+                mp->lhs = rcv;
+                /* A virtual method is bound through the object's vtable, so the
+                 * pointer dispatches on the runtime type rather than pinning the
+                 * implementation named here. */
+                mp->vtable_index = bm->is_virtual ? bm->vtable_index : -1;
+                mp->type = type_mptr(&p->ty, pts, np, bm->ret);
+                e = mp;
+                continue;
+            }
+            if (at(p, T_LPAREN) && is_kind(st, TK_STRUCT) && !fp_field) {
                 StructMethod *m = struct_find_method(st->sdef, name);
                 if (m == NULL) {
                     diag_error(span, "type %s has no method '%s'", type_name(&p->ty, st), name);
@@ -1275,7 +1662,7 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             advance(p);
             if (!is_lvalue(e) || !is_kind(e->type, TK_INT)) {
                 if (is_lvalue(e) && !is_unk(e->type)) {
-                    diag_error(span, "operator '%s' requires 'int'", token_kind_name(op));
+                    diag_error(span, "operator %s requires 'int'", token_kind_name(op));
                 }
                 e = new_expr(p, E_INT, span);
                 e->type = type_int(&p->ty);
@@ -1292,6 +1679,58 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             asg->rhs = one; /* `x = x op 1` */
             asg->type = type_int(&p->ty);
             e = asg;
+        } else if (at(p, T_LPAREN) &&
+                   (is_kind(e->type, TK_FNPTR) || is_kind(e->type, TK_MPTR))) {
+            /* A call through a function pointer reached by a postfix: a struct
+             * field, an array element, or a dereference. The bare-identifier
+             * case is handled in parse_primary, where the name is still
+             * current; here it is not. */
+            Span span = cur(p)->span;
+            Type *ft = e->type;
+            advance(p); /* '(' */
+            Expr **args = NULL;
+            int n = 0, cap = 0;
+            if (!at(p, T_RPAREN)) {
+                for (;;) {
+                    if (n == cap) {
+                        int ncap = cap == 0 ? 4 : cap * 2;
+                        Expr **na = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Expr *));
+                        if (args != NULL)
+                            memcpy(na, args, (size_t)n * sizeof(Expr *));
+                        args = na;
+                        cap = ncap;
+                    }
+                    args[n++] = parse_expr(p);
+                    if (!match(p, T_COMMA))
+                        break;
+                }
+            }
+            if (!match(p, T_RPAREN))
+                diag_error(cur(p)->span, "expected ')' after arguments");
+            if (n != ft->nparams) {
+                diag_error(span, "function pointer expects %d argument%s but got %d",
+                           ft->nparams, ft->nparams == 1 ? "" : "s", n);
+            } else {
+                for (int i = 0; i < n; i++) {
+                    if (!is_unk(args[i]->type) && !type_equals(args[i]->type, ft->ptypes[i]))
+                        diag_error(args[i]->span,
+                                   "argument %d expects '%s' but got '%s'", i + 1,
+                                   type_name(&p->ty, ft->ptypes[i]),
+                                   type_name(&p->ty, args[i]->type));
+                }
+            }
+            /* A bound receiver occupies rdi, which is also where a
+             * struct-returning call puts its result buffer. A plain function
+             * pointer has no receiver, so it returns a struct normally. */
+            if (is_kind(ft, TK_MPTR) &&
+                (is_kind(ft->ret, TK_STRUCT) || is_kind(ft->ret, TK_UNION)))
+                diag_error(span, "a method pointer cannot return a struct");
+            Expr *ic = new_expr(p, E_ICALL, span);
+            ic->lhs = e;
+            ic->args = args;
+            ic->nargs = n;
+            ic->type = ft->ret;
+            e = ic;
         } else {
             break;
         }
@@ -1302,6 +1741,18 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
 /* Parses a base type followed by `*` stars but NOT `[]` (used by `new T[n]`,
  * where the brackets are the element count). */
 static Type *parse_type_base(Parser *p) {
+    /* `new fn(int) -> int[3]` allocates an array of function pointers, so a
+     * function type is a valid element type here. */
+    if (at(p, T_KW_FN) || at(p, T_KW_METHOD)) {
+        Type *ft = parse_fn_type(p);
+        if (ft != NULL) {
+            while (at(p, T_STAR)) {
+                advance(p);
+                ft = type_ptr(&p->ty, ft);
+            }
+        }
+        return ft;
+    }
     Type *t = base_type_or_name(p, cur(p));
     if (t == NULL)
         return NULL;
@@ -1523,6 +1974,12 @@ static Expr *parse_primary(Parser *p) {
         th->type = p->cur_this->type;
         return parse_postfix(p, th);
     }
+    case T_KW_NULL: {
+        advance(p);
+        /* Type is deliberately unknown: the checker lets an unknown flow into
+         * any pointer slot, and codegen materializes it as a literal 0. */
+        return new_expr(p, E_NULL, t->span);
+    }
     case T_KW_TRUE:
     case T_KW_FALSE: {
         advance(p);
@@ -1534,7 +1991,70 @@ static Expr *parse_primary(Parser *p) {
     case T_IDENT: {
         char *name = t->text;
         Span span = t->span;
+        /* A local holding a function pointer is called through the pointer, so
+         * this is decided before the ordinary function lookup, which would
+         * report the name as undefined. */
+        /* lookup_var, not lookup_var_local: a function pointer held in an
+         * enclosing scope -- a parameter, most often -- is just as callable. */
+        Var *fplocal = lookup_var(p, name);
+        /* The identifier is still the current token here, so the '(' that
+         * follows it is one token ahead and whatever comes after that is two. */
+        int is_fp_call = peek(p, 1)->kind == T_LPAREN && peek(p, 2)->kind != T_KW_THIS &&
+                         fplocal != NULL &&
+                         (is_kind(fplocal->type, TK_FNPTR) || is_kind(fplocal->type, TK_MPTR));
         advance(p);
+        if (is_fp_call) {
+            Var *lv = fplocal;
+            {
+                advance(p); /* '(' */
+                Expr **args = NULL;
+                int n = 0, cap = 0;
+                if (!at(p, T_RPAREN)) {
+                    for (;;) {
+                        if (n == cap) {
+                            int ncap = cap == 0 ? 4 : cap * 2;
+                            Expr **na =
+                                arena_alloc_array(p->arena, (size_t)ncap, sizeof(Expr *));
+                            if (args != NULL)
+                                memcpy(na, args, (size_t)n * sizeof(Expr *));
+                            args = na;
+                            cap = ncap;
+                        }
+                        args[n++] = parse_expr(p);
+                        if (!match(p, T_COMMA))
+                            break;
+                    }
+                }
+                if (!match(p, T_RPAREN))
+                    diag_error(cur(p)->span, "expected ')' after arguments");
+                Type *ft = lv->type;
+                if (n != ft->nparams) {
+                    diag_error(span, "'%s' expects %d argument%s but got %d", name, ft->nparams,
+                               ft->nparams == 1 ? "" : "s", n);
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        if (!is_unk(args[i]->type) && !type_equals(args[i]->type, ft->ptypes[i]))
+                            diag_error(args[i]->span,
+                                       "argument %d of '%s' expects '%s' but got '%s'", i + 1,
+                                       name, type_name(&p->ty, ft->ptypes[i]),
+                                       type_name(&p->ty, args[i]->type));
+                    }
+                }
+                Expr *callee = new_expr(p, E_VAR, span);
+                callee->name = name;
+                callee->slot = lv->offset;
+                callee->type = lv->type;
+                if (is_kind(ft, TK_MPTR) &&
+                    (is_kind(ft->ret, TK_STRUCT) || is_kind(ft->ret, TK_UNION)))
+                    diag_error(span, "a method pointer cannot return a struct");
+                Expr *ic = new_expr(p, E_ICALL, span);
+                ic->lhs = callee;
+                ic->args = args;
+                ic->nargs = n;
+                ic->type = ft->ret;
+                return parse_postfix(p, ic);
+            }
+        }
         if (at(p, T_LPAREN)) {
             /* A bare variant name is a union constructor: `Circle(5)`. */
             UnionDef *owner = NULL;
@@ -1623,6 +2143,11 @@ static Expr *parse_primary(Parser *p) {
                     return call;
                 }
             }
+            {
+                ConstDef *c = const_find(p, name);
+                if (c != NULL)
+                    return parse_postfix(p, const_expr(p, c, span));
+            }
             diag_error(span, "undefined variable '%s'", name);
             Expr *e = new_expr(p, E_VAR, span);
             e->name = name;
@@ -1657,10 +2182,16 @@ static Expr *parse_primary(Parser *p) {
 
 static Expr *parse_unary(Parser *p) {
     Token *t = cur(p);
-    if (t->kind == T_MINUS || t->kind == T_NOT) {
+    if (t->kind == T_MINUS || t->kind == T_NOT || t->kind == T_TILDE) {
         advance(p);
         Expr *operand = parse_unary(p);
-        /* Fold unary minus / logical-not on literals. */
+        /* Fold unary minus / logical-not / bitwise-not on literals. */
+        if (t->kind == T_TILDE && operand->kind == E_INT) {
+            Expr *f = new_expr(p, E_INT, t->span);
+            f->ival = ~operand->ival;
+            f->type = type_int(&p->ty);
+            return f;
+        }
         if (t->kind == T_MINUS && operand->kind == E_INT) {
             Expr *f = new_expr(p, E_INT, t->span);
             f->ival = -operand->ival;
@@ -1676,9 +2207,10 @@ static Expr *parse_unary(Parser *p) {
         Expr *e = new_expr(p, E_UNARY, t->span);
         e->op = t->kind;
         e->lhs = operand;
-        if (t->kind == T_MINUS) {
+        if (t->kind == T_MINUS || t->kind == T_TILDE) {
+            const char *what = t->kind == T_MINUS ? "negate" : "apply '~' to";
             if (!is_unk(operand->type) && !is_kind(operand->type, TK_INT)) {
-                diag_error(t->span, "cannot negate '%s'", type_name(&p->ty, operand->type));
+                diag_error(t->span, "cannot %s '%s'", what, type_name(&p->ty, operand->type));
                 e->type = NULL;
             } else {
                 e->type = type_int(&p->ty);
@@ -1695,7 +2227,36 @@ static Expr *parse_unary(Parser *p) {
     }
     if (t->kind == T_AMP) { /* &expr */
         advance(p);
+        /* `&f` where f names a function is that function's address, typed by
+         * its signature. This has to be caught before the operand is parsed as
+         * an expression, because a bare function name is not a variable. */
+        if (at(p, T_IDENT) && peek(p, 1)->kind != T_LPAREN) {
+            Sig *fs = find_sig(p, cur(p)->text);
+            if (fs != NULL) {
+                Span fspan = cur(p)->span;
+                char *fname = cur(p)->text;
+                advance(p);
+                Expr *fe = new_expr(p, E_FNPTR, fspan);
+                fe->name = arena_strdup(p->arena, fname);
+                fe->is_extern = fs->is_extern || fs->is_export;
+                Type **pts = NULL;
+                if (fs->nparams > 0) {
+                    pts = arena_alloc_array(p->arena, (size_t)fs->nparams, sizeof(Type *));
+                    for (int i = 0; i < fs->nparams; i++)
+                        pts[i] = fs->ptypes[i];
+                }
+                fe->type = type_fnptr(&p->ty, pts, fs->nparams, fs->ret);
+                return fe;
+            }
+        }
+        int saved_take = p->take_method_addr;
+        p->take_method_addr = 1;
         Expr *operand = parse_unary(p);
+        p->take_method_addr = saved_take;
+        /* `&obj.M` is already the pointer; taking its address again would be
+         * nonsense, and it is not an lvalue. */
+        if (operand->kind == E_MPTR)
+            return operand;
         Expr *e = new_expr(p, E_ADDR, t->span);
         e->lhs = operand;
         if (!is_lvalue(operand)) {
@@ -1743,7 +2304,8 @@ static Expr *parse_binary(Parser *p, int min_prec) {
 
 static int at_assign_op(TokenKind k) {
     return k == T_ASSIGN || k == T_PLUS_EQ || k == T_MINUS_EQ || k == T_STAR_EQ ||
-           k == T_SLASH_EQ || k == T_PERCENT_EQ;
+           k == T_SLASH_EQ || k == T_PERCENT_EQ || k == T_AMP_EQ || k == T_PIPE_EQ ||
+           k == T_CARET_EQ || k == T_SHL_EQ || k == T_SHR_EQ;
 }
 
 static TokenKind base_op(TokenKind k) {
@@ -1758,6 +2320,16 @@ static TokenKind base_op(TokenKind k) {
         return T_SLASH;
     case T_PERCENT_EQ:
         return T_PERCENT;
+    case T_AMP_EQ:
+        return T_AMP;
+    case T_PIPE_EQ:
+        return T_PIPE;
+    case T_CARET_EQ:
+        return T_CARET;
+    case T_SHL_EQ:
+        return T_SHL;
+    case T_SHR_EQ:
+        return T_SHR;
     default:
         return T_ASSIGN;
     }
@@ -1787,7 +2359,7 @@ static Expr *parse_expr(Parser *p) {
         if (compound) {
             if (!is_kind(lhs->type, TK_INT) || !is_kind(rhs->type, TK_INT)) {
                 if (!is_unk(lhs->type) && !is_unk(rhs->type)) {
-                    diag_error(span, "operator '%s=' requires 'int' operands",
+                    diag_error(span, "operator %s= requires 'int' operands",
                                token_kind_name(bop));
                     e->type = NULL;
                     return e;
@@ -1850,6 +2422,188 @@ static void expect_semi(Parser *p) {
     }
 }
 
+/* Registers a compile-time constant. */
+static void const_define(Parser *p, char *name, Type *ty, long long ival, int str_id) {
+    for (int i = p->nconsts - 1; i >= 0; i--) {
+        if (strcmp(p->consts[i].name, name) == 0) {
+            diag_error(p->toks[p->pos].span, "const '%s' is already defined", name);
+            return;
+        }
+    }
+    if (p->nconsts == p->const_cap) {
+        int ncap = p->const_cap ? p->const_cap * 2 : 8;
+        ConstDef *nc = arena_alloc_array(p->arena, ncap, sizeof(ConstDef));
+        if (p->nconsts > 0)
+            memcpy(nc, p->consts, p->nconsts * sizeof(ConstDef));
+        p->consts = nc;
+        p->const_cap = ncap;
+    }
+    p->consts[p->nconsts].name = name;
+    p->consts[p->nconsts].type = ty;
+    p->consts[p->nconsts].ival = ival;
+    p->consts[p->nconsts].str_id = str_id;
+    p->nconsts++;
+}
+
+static ConstDef *const_find(Parser *p, const char *name) {
+    for (int i = p->nconsts - 1; i >= 0; i--)
+        if (strcmp(p->consts[i].name, name) == 0)
+            return &p->consts[i];
+    return NULL;
+}
+
+/* Materialises a const reference as a literal expression, so consts cost
+ * nothing at run time and can be used in constant expressions. */
+static Expr *const_expr(Parser *p, ConstDef *c, Span span) {
+    Expr *e = new_expr(p, is_kind(c->type, TK_STRING) ? E_STRING
+                                                      : (is_kind(c->type, TK_BOOL) ? E_BOOL : E_INT),
+                       span);
+    e->ival = c->ival;
+    e->str_id = c->str_id;
+    e->type = c->type;
+    return e;
+}
+
+/* Folds an expression that is built only from literals, so `const` initializers
+ * can be written as arithmetic rather than forcing a pre-computed number. */
+static int const_fold_static(Parser *p, Expr *e, long long *out) {
+    if (e == NULL)
+        return 0;
+    long long a, b;
+    switch (e->kind) {
+    case E_INT:
+    case E_BOOL:
+        *out = e->ival;
+        return 1;
+    case E_UNARY:
+        if (!const_fold_static(p, e->lhs, &a))
+            return 0;
+        if (e->op == T_MINUS) {
+            *out = -a;
+            return 1;
+        }
+        if (e->op == T_TILDE) {
+            *out = ~a;
+            return 1;
+        }
+        if (e->op == T_NOT) {
+            *out = !a;
+            return 1;
+        }
+        return 0;
+    case E_BINARY:
+        if (!const_fold_static(p, e->lhs, &a) || !const_fold_static(p, e->rhs, &b))
+            return 0;
+        switch (e->op) {
+        case T_PLUS: *out = a + b; return 1;
+        case T_MINUS: *out = a - b; return 1;
+        case T_STAR: *out = a * b; return 1;
+        case T_SLASH:
+            if (b == 0) return 0;
+            *out = a / b;
+            return 1;
+        case T_PERCENT:
+            if (b == 0) return 0;
+            *out = a % b;
+            return 1;
+        case T_AMP: *out = a & b; return 1;
+        case T_PIPE: *out = a | b; return 1;
+        case T_CARET: *out = a ^ b; return 1;
+        case T_SHL:
+            if (b < 0 || b > 63) return 0;
+            *out = a << b;
+            return 1;
+        case T_SHR:
+            if (b < 0 || b > 63) return 0;
+            *out = a >> b;
+            return 1;
+        case T_EQ: *out = a == b; return 1;
+        case T_NE: *out = a != b; return 1;
+        case T_LT: *out = a < b; return 1;
+        case T_LE: *out = a <= b; return 1;
+        case T_GT: *out = a > b; return 1;
+        case T_GE: *out = a >= b; return 1;
+        case T_AND: *out = a && b; return 1;
+        case T_OR: *out = a || b; return 1;
+        default: return 0;
+        }
+    case E_TERNARY:
+        if (!const_fold_static(p, e->lhs, &a))
+            return 0;
+        if (a) {
+            if (!const_fold_static(p, e->rhs, &b))
+                return 0;
+        } else {
+            if (!const_fold_static(p, e->args[0], &b))
+                return 0;
+        }
+        *out = b;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* `const T NAME = <compile-time constant>;`
+ *
+ * The initializer must fold to a constant; anything else is rejected so a
+ * const can never quietly become a runtime value. Like functions and types,
+ * a const is visible from its declaration onward, so it must be declared
+ * before use. */
+static Stmt *parse_const_decl(Parser *p) {
+    Span start = cur(p)->span;
+    advance(p); /* const */
+    Type *ty = parse_type(p);
+    if (ty == NULL) {
+        diag_error(cur(p)->span, "const needs a type");
+        while (!at(p, T_SEMI) && !at(p, T_EOF))
+            advance(p);
+        match(p, T_SEMI);
+        return new_stmt(p, S_EXPR, start);
+    }
+    if (!at(p, T_IDENT)) {
+        diag_error(cur(p)->span, "expected const name");
+        while (!at(p, T_SEMI) && !at(p, T_EOF))
+            advance(p);
+        match(p, T_SEMI);
+        return new_stmt(p, S_EXPR, start);
+    }
+    char *name = cur(p)->text;
+    Span name_span = cur(p)->span;
+    advance(p);
+    if (!match(p, T_ASSIGN)) {
+        diag_error(cur(p)->span, "const '%s' needs an initializer", name);
+        while (!at(p, T_SEMI) && !at(p, T_EOF))
+            advance(p);
+        match(p, T_SEMI);
+        return new_stmt(p, S_EXPR, start);
+    }
+    Expr *init = parse_expr(p);
+    expect_semi(p);
+
+    if (!is_unk(ty) && !is_unk(init->type) && !type_equals(ty, init->type)) {
+        diag_error(name_span, "const '%s' is '%s' but the initializer is '%s'", name,
+                   type_name(&p->ty, ty), type_name(&p->ty, init->type));
+        return new_stmt(p, S_EXPR, start);
+    }
+    /* Fold the initializer; only constants are allowed. */
+    if (init->kind == E_INT || init->kind == E_BOOL) {
+        const_define(p, name, ty, init->ival, 0);
+    } else if (init->kind == E_STRING) {
+        const_define(p, name, ty, 0, init->str_id);
+    } else if (init->kind == E_BINARY || init->kind == E_UNARY) {
+        long long v;
+        if (const_fold_static(p, init, &v)) {
+            const_define(p, name, ty, v, 0);
+        } else {
+            diag_error(name_span, "const '%s' needs a compile-time constant initializer", name);
+        }
+    } else {
+        diag_error(name_span, "const '%s' needs a compile-time constant initializer", name);
+    }
+    return new_stmt(p, S_EXPR, start);
+}
+
 static Stmt *parse_var_decl(Parser *p) {
     Span start = cur(p)->span;
     Type *declared = NULL;
@@ -1876,7 +2630,10 @@ static Stmt *parse_var_decl(Parser *p) {
         if (infer)
             t = init->type;
         if (t == NULL)
-            t = type_int(&p->ty);
+            /* A bare `null` carries no type, but `var p = null` is a pointer
+             * declaration in every other language; default to int* so the
+             * variable is assignable later. */
+            t = init->kind == E_NULL ? type_ptr(&p->ty, type_int(&p->ty)) : type_int(&p->ty);
         int slot = declare_var(p, name, t);
         expect_semi(p);
         Stmt *s = new_stmt(p, S_VAR, start);
@@ -1931,6 +2688,22 @@ static Stmt *parse_func(Parser *p) {
     int ntparams = 0;
     char **tparams = NULL;
     int saved_ntbind = p->ntbind;
+
+    /* An `extern` declaration names a symbol implemented in C. The body is
+     * optional (and forbidden for extern): the declaration exists so calls
+     * type-check and so codegen emits the symbol unmangled. */
+    int is_extern = 0;
+    if (at(p, T_KW_EXTERN)) {
+        is_extern = 1;
+        advance(p);
+    }
+    /* `export` is the mirror of `extern`: the body is here, but the symbol
+     * keeps the name as written and is made .globl so C can call it. */
+    int is_export = 0;
+    if (at(p, T_KW_EXPORT)) {
+        is_export = 1;
+        advance(p);
+    }
     {
         int j = skip_type_tokens(p, p->pos);
         if (j < p->ntoks && p->toks[j].kind == T_IDENT) {
@@ -2028,7 +2801,15 @@ static Stmt *parse_func(Parser *p) {
 
     /* A struct-returning function uses the SysV hidden-pointer convention: a
      * hidden first parameter holds the address of the caller's result buffer. */
-    if (is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION)) {
+    int ret_is_aggregate = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
+    int max_params = ret_is_aggregate ? Z_MAX_ARGS_STRUCT_RET : Z_MAX_ARGS;
+    if (pn > max_params) {
+        diag_error(start, "'%s' takes %d parameters but the limit is %d%s", name, pn, max_params,
+                   ret_is_aggregate ? " (a struct-returning function spends one on the result"
+                                          " buffer)"
+                                    : "");
+    }
+    if (ret_is_aggregate) {
         Expr **np = arena_alloc_array(p->arena, (size_t)(pn + 1), sizeof(Expr *));
         memcpy(np + 1, params, (size_t)pn * sizeof(Expr *));
         Expr *hidden = new_expr(p, E_VAR, start);
@@ -2046,6 +2827,26 @@ static Stmt *parse_func(Parser *p) {
     fn->params = params;
     fn->nparams = pn;
     fn->is_ext = is_ext;
+    fn->is_extern = is_extern;
+    fn->is_export = is_export;
+    if (is_export && at(p, T_SEMI))
+        diag_error(start, "'export' function '%s' needs a body; use 'extern' to declare a C "
+                          "function",
+                   name);
+    if (at(p, T_SEMI) || is_extern) {
+        /* Declaration only. Nothing is emitted; the pre-scan already recorded
+         * the signature. */
+        if (is_extern && at(p, T_LBRACE))
+            diag_error(start, "'extern' function '%s' cannot have a body", name);
+        else
+            expect_semi(p);
+        fn->fbody = NULL;
+        fn->is_extern = is_extern;
+        fn->locals_bytes = 0;
+        p->ntbind = saved_ntbind;
+        scope_pop(p);
+        return fn;
+    }
     if (match(p, T_FATARROW)) {
         /* Expression-bodied function: `int f(int a) => expr;` desugars to
          * `{ return expr; }`. */
@@ -2222,7 +3023,9 @@ static Stmt *parse_foreach(Parser *p, Span start) {
     Stmt *step = new_stmt(p, S_EXPR, start);
     step->expr = asg;
 
+    p->loop_depth++;
     Stmt *body = parse_stmt(p);
+    p->loop_depth--;
     scope_pop(p);
 
     Stmt **inner = arena_alloc_array(p->arena, 3, sizeof(Stmt *));
@@ -2312,6 +3115,16 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
         }
     }
     match(p, T_RPAREN);
+
+    {
+        int agg = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
+        int max_params = agg ? Z_MAX_ARGS_STRUCT_RET : Z_MAX_ARGS;
+        if (nexplicit > max_params) {
+            diag_error(start, "method '%s' takes %d parameters but the limit is %d%s", mname,
+                       nexplicit, max_params,
+                       agg ? " (a struct-returning method spends one on the result buffer)" : "");
+        }
+    }
 
     /* Struct-returning methods also use the hidden-pointer convention; the
      * hidden buffer pointer precedes `this` as the first argument. */
@@ -2779,7 +3592,9 @@ static Stmt *parse_stmt(Parser *p) {
         match(p, T_RPAREN);
         Stmt *s = new_stmt(p, S_WHILE, start);
         s->cond = cond;
+        p->loop_depth++;
         s->body = parse_stmt(p);
+        p->loop_depth--;
         return s;
     }
     case T_KW_FOR: {
@@ -2788,7 +3603,9 @@ static Stmt *parse_stmt(Parser *p) {
         match(p, T_LPAREN);
         Stmt *init = NULL;
         if (!at(p, T_SEMI)) {
-            if (at(p, T_KW_VAR) || is_type_token(cur(p)->kind)) {
+            if (at(p, T_KW_CONST)) {
+                init = parse_const_decl(p); /* consumes its ';' */
+            } else if (at(p, T_KW_VAR) || is_type_token(cur(p)->kind)) {
                 init = parse_var_decl(p); /* consumes its ';' */
             } else {
                 Expr *e = parse_expr(p);
@@ -2811,7 +3628,9 @@ static Stmt *parse_stmt(Parser *p) {
         s->for_init = init;
         s->cond = cond;
         s->for_step = step;
+        p->loop_depth++;
         s->body = parse_stmt(p);
+        p->loop_depth--;
         return s;
     }
     case T_KW_FOREACH:
@@ -2837,6 +3656,24 @@ static Stmt *parse_stmt(Parser *p) {
         return parse_block(p);
     case T_KW_VAR:
         return parse_var_decl(p);
+    case T_KW_CONST:
+        return parse_const_decl(p);
+    case T_KW_BREAK: {
+        Span bs = t->span;
+        advance(p);
+        expect_semi(p);
+        if (p->loop_depth == 0)
+            diag_error(bs, "'break' is only valid inside a loop");
+        return new_stmt(p, S_BREAK, bs);
+    }
+    case T_KW_CONTINUE: {
+        Span cs = t->span;
+        advance(p);
+        expect_semi(p);
+        if (p->loop_depth == 0)
+            diag_error(cs, "'continue' is only valid inside a loop");
+        return new_stmt(p, S_CONTINUE, cs);
+    }
     default:
         break;
     }
@@ -2902,6 +3739,11 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
             items[n++] = parse_struct_decl(&p, 0); /* a type decl, not a statement */
         } else if (at(&p, T_KW_ENUM)) {
             items[n++] = parse_enum_decl(&p); /* a type decl, not a statement */
+        } else if (at(&p, T_KW_CONST)) {
+            /* A top-level const is a declaration, not a top-level statement, so
+             * it may sit alongside an explicit main(). It folds to a literal
+             * and emits no code. */
+            items[n++] = parse_const_decl(&p);
         } else {
             items[n++] = parse_stmt(&p);
             top_stmts++;

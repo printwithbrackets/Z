@@ -1,0 +1,78 @@
+// Bound method pointers. `&obj.M` yields a callable with the receiver already
+// bound, typed by a `method(params) -> ret` annotation where a type is needed.
+// The value is a pointer to a GC-managed { code, receiver } cell, so the
+// receiver stays alive exactly as long as the pointer does.
+class Counter {
+    int n;
+    Counter(int a) { n = a; }
+    int get() { return n; }
+    int add(int x) { return n + x; }
+    int mul(int x) { return n * x; }
+    void bump(int by) { n = n + by; return; }
+    virtual int v() { return 1; }
+}
+
+class Sub : Counter {
+    Sub(int a) { base(a); }
+    override int v() { return 2; }
+}
+
+void take(method(int) -> int g) { print(g(10)); return; }
+
+int main() {
+    var c = new Counter(5);
+    var m = &c.add;
+    print(m(3));                       // 8
+    print(c.add(3));                   // 8   a direct call is unaffected
+
+    var g = &c.get;
+    print(g());                        // 5   no arguments
+    var mu = &c.mul;
+    print(mu(4));                      // 20
+
+    /* the receiver is bound now, so later mutation shows through */
+    c.bump(10);
+    print(m(0));                       // 15
+    print(g());                        // 15
+
+    /* two bindings to different methods of the same object coexist */
+    print(m(1) + mu(2));               // 16 + 30 = 46
+
+    /* passed as a parameter, and stored in an array */
+    take(&c.add);                      // 25  (n is 15 by now, so +10)
+    var arr = new method(int) -> int[2];
+    arr[0] = &c.add; arr[1] = &c.mul;
+    print(arr[0](1) + arr[1](2));      // 46
+
+    /* a virtual method dispatches on the runtime type, not the static one */
+    var s = new Sub(7);
+    var sv = &s.v;
+    print(sv());                       // 2
+    var cv = &c.v;
+    print(cv());                       // 1
+
+    /* the receiver is reachable only from the binding, so the collector has to
+     * trace the cell rather than free the object out from under it */
+    var km = keep();
+    print(churn(20000) > 0 ? 1 : 0);    // 1
+    print(km(1));                      // 8
+    print(km(2));                      // 9
+    return 0;
+}
+
+/* Returns a binding whose receiver is the only reference to the object. */
+method(int) -> int keep() {
+    var b = new Counter(7);
+    return &b.add;
+}
+
+/* Allocates enough garbage to force several collections. */
+int churn(int n) {
+    var s = 0;
+    for (var i = 0; i < n; i = i + 1) {
+        var junk = new int[64];
+        junk[0] = i;
+        s = s + junk[0];
+    }
+    return s;
+}

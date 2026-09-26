@@ -1,0 +1,37 @@
+// Constants wider than a sign-extended imm32. add/sub/imul/cmp only encode a
+// 32-bit immediate with a 64-bit register, so `x - ONE*ONE` used to emit
+// `sub rax, 1152921504606846976`, which the assembler rejects outright.
+const int ONE = 1 << 30;
+const int TWO60 = ONE * ONE;          /* 2^60 */
+const int TWO40 = 1 << 40;
+const int BIG = 4611686018427387904;   /* 2^62 */
+
+int main() {
+    /* every operator against an out-of-range immediate */
+    print(TWO60 - TWO40);              /* 1152920405095219200 */
+    print(TWO60 + TWO40);              /* 1152922604118474752 */
+    print(TWO40 * 2);                  /* 2199023255552 */
+    print(BIG / 2);                    /* 2305843009213693952 */
+    print(BIG % 1000);                 /* 904 */
+    print(0 - BIG);                    /* -4611686018427387904 */
+
+    /* comparisons against a wide constant, on both sides */
+    print(TWO60 > TWO40 ? 1 : 0);      /* 1 */
+    print(TWO40 > TWO60 ? 1 : 0);      /* 0 */
+    print(TWO60 == ONE * ONE ? 1 : 0); /* 1 */
+    print(TWO60 >= TWO40 ? 1 : 0);     /* 1 */
+    print(TWO40 <= TWO40 ? 1 : 0);     /* 1 */
+    print(BIG != BIG ? 1 : 0);         /* 0 */
+
+    /* a wide constant driving a loop condition and a branch */
+    var i = 0;
+    var n = 0;
+    while (i < TWO40) { i = i + TWO40; n = n + 1; }
+    print(n);                          /* 1 */
+    if (TWO60 == 0) { print(99); } else { print(98); }   /* 98 */
+
+    /* and the boundary: the largest encodable immediate still works */
+    print(TWO40 - 2147483647);         /* 1097364144129 */
+    print(TWO40 - 2147483648);         /* 1097364144128 */
+    return 0;
+}

@@ -18,6 +18,7 @@ typedef enum {
 
     /* Statement keywords */
     T_KW_VAR,
+    T_KW_CONST,
     T_KW_NEW,
     T_KW_STRUCT,
     T_KW_ENUM,
@@ -33,8 +34,16 @@ typedef enum {
     T_KW_FOREACH,
     T_KW_IN,
     T_KW_RETURN,
+    T_KW_BREAK,
+    T_KW_CONTINUE,
     T_KW_TRUE,
     T_KW_FALSE,
+    T_KW_NULL,
+    T_KW_EXTERN,
+    T_KW_EXPORT,
+    T_KW_FN,
+    T_KW_METHOD,
+    T_KW_IMPORT,
 
     /* Punctuation */
     T_LPAREN,
@@ -49,6 +58,7 @@ typedef enum {
     T_QUESTION,
     T_COLON,
     T_FATARROW,
+    T_ARROW,
 
     /* Operators */
     T_PLUS,
@@ -74,6 +84,16 @@ typedef enum {
     T_PERCENT_EQ,
     T_PLUSPLUS,
     T_MINUSMINUS,
+    T_PIPE,   /* |  */
+    T_CARET,  /* ^  */
+    T_TILDE,  /* ~  */
+    T_SHL,    /* << */
+    T_SHR,    /* >> */
+    T_AMP_EQ,
+    T_PIPE_EQ,
+    T_CARET_EQ,
+    T_SHL_EQ,
+    T_SHR_EQ,
 } TokenKind;
 
 typedef struct {

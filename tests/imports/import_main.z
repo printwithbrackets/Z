@@ -1,0 +1,23 @@
+// Modules. `import` splices a file's declarations into this one; a file is
+// expanded once however many times it is named, so the diamond below is fine.
+import "lib/math.z";
+import "lib/shapes.z";
+import "lib/math.z";
+
+int main() {
+    print(triple(4));                            // 12
+    print(square(5));                            // 25
+    print(SCALE);                                // 3
+
+    var v = add(new Vec(1, 2), new Vec(10, 20));
+    print(v.x);                                  // 11
+    print(v.y);                                  // 22
+
+    var r = new Rect(3, 4);
+    print(area(r));                              // 12
+    print(scaled_area(r));                       // 36
+
+    /* a struct, a const and a function all cross the boundary */
+    print(square(SCALE) + triple(2));            // 9 + 6 = 15
+    return 0;
+}

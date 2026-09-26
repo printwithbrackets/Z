@@ -1,0 +1,8 @@
+// Reading past the end of a heap array aborts under --bounds instead of
+// silently returning whatever happens to follow it in the GC heap.
+int main() {
+    var a = new int[3];
+    a[0] = 10;
+    print(a[5]);
+    return 0;
+}

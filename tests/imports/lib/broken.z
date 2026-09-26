@@ -1,0 +1,1 @@
+int bad() { return "x" + no_such_thing; }

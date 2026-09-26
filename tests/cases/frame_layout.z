@@ -1,0 +1,57 @@
+// Frame layout: a callee that needs several pool registers must not have its
+// own local slots overlap the registers it pushed to save. The caller keeps a
+// loop counter and a bound live in callee-saved registers across the call, so
+// a clobbered save slot shows up as wrong results rather than silent drift.
+int inner(int* a, int i, int k) {
+    var t0 = a[i];
+    var t1 = t0 + k;
+    var t2 = t1 * 2;
+    var t3 = t2 - k;
+    var t4 = t3 + t0;
+    a[i] = t4;
+    return t4;
+}
+
+int outer(int* a, int n, int k) {
+    var sum = 0;
+    var i = 0;
+    var lim = n;
+    while (i < lim) {
+        sum = sum + inner(a, i, k);
+        i = i + 1;
+    }
+    return sum;
+}
+
+int wide(int a, int b, int c, int d, int e, int f) {
+    var p = a + b;
+    var q = c + d;
+    var r = e + f;
+    var s = p * 2;
+    var t = q * 3;
+    var u = r * 5;
+    return s + t + u + p - q;
+}
+
+int chain(int n) {
+    if (n <= 0) { return 0; }
+    var acc = 0;
+    var k = n;
+    while (k > 0) {
+        acc = wide(acc, k, 1, 2, 3, k);
+        k = k - 1;
+    }
+    return acc;
+}
+
+int main() {
+    var a = new int[8];
+    for (var i = 0; i < 8; i = i + 1) { a[i] = 1; }
+    print(outer(&a[0], 8, 3));  // 48
+    print(wide(1, 2, 3, 4, 5, 6)); // 51
+    print(chain(4));            // reference below
+    var b = new int[4];
+    for (var j = 0; j < 4; j = j + 1) { b[j] = j; }
+    print(outer(&b[0], 4, 1));  // 20
+    return 0;
+}

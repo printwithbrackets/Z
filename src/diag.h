@@ -3,8 +3,10 @@
 
 #include "source.h"
 
-/* Registers the file name and full text so diagnostics can render a source
- * excerpt with a caret under the offending token. */
+/* Registers a file name and its full text so diagnostics can render a source
+ * excerpt with a caret under the offending token. A compilation unit may span
+ * several files once `import` is used, so sources are looked up per span
+ * rather than held in a single slot. */
 void diag_set_source(const char *file, const char *text);
 
 /* Number of errors reported so far; the driver uses this as its exit code. */

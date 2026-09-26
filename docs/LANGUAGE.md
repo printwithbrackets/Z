@@ -10,9 +10,13 @@ accepts today.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Integer literals: decimal digits (64-bit signed `int`).
 - String literals: `"..."` with escapes `\n \t \r \0 \\ \"`.
-- Keywords: `int bool string void var new struct enum match this if else while for foreach in return true false`.
-- Operators: `+ - * / %`, `== != < <= > >=`, `&& || ! &`, `= += -= *= /= %=`,
-  `++ --`, `( ) { } [ ] ; , .`.
+- Keywords: `int bool string void var const new struct enum class match this if
+  else while for foreach in return break continue true false null extern export
+  virtual override fn method import`.
+- Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ ~ << >>`,
+  `= += -= *= /= %= &= |= ^= <<= >>=`, `++ --`, `( ) { } [ ] ; , .`.
+- There are no hex, octal or binary literals; write decimal or build the value
+  with shifts.
 
 ## Types
 
@@ -25,12 +29,25 @@ accepts today.
 | `T[]` | array of `T` | pointer to first element; length stored at `ptr[-8]` |
 | `struct S` | user-defined value type | inline in the frame; fields at byte offsets |
 | `void` | no value | — |
+| `null` | the null pointer literal | `0`; assignable to any pointer |
+| `fn(P...) -> R` | function pointer | machine word: the code address |
+| `method(P...) -> R` | bound method pointer, from `&obj.M` | machine word: a pointer to a GC cell `{ code, receiver }` |
 
 Pointers and arrays compose (`int**`, `int*[]`). There are no implicit numeric
 conversions; `int` and `bool` are distinct. Arithmetic (`+ - * / %`) is
 `int`-only, except `+` which also concatenates when either side is a `string`
 (the other side may be `string` or `int`). Comparisons yield `bool`.
 `&&`/`||`/`!` are `bool`-only and short-circuit.
+
+`& | ^ ~ << >>` and their compound forms operate on the full 64-bit `int` and
+wrap on overflow, matching C. `& | ^ << >>` require `int` operands; `~` is
+unary. Shift counts follow C: a count at or above 64 yields 0 (or the sign bit
+for `>>`). Division by zero traps rather than being defined.
+
+The six relational operators also accept two `string`s, ordered
+lexicographically by unsigned byte value (the ordering C's `strcmp` gives).
+Comparing a `string` with an `int` is a type error. `==`/`!=` additionally
+accept `null` against any pointer.
 
 ## Structs
 
@@ -124,18 +141,39 @@ var v = a + b;   // -> Vec__op_Add(a, b)
 ## Declarations
 
 ```
-decl      := varDecl | funcDecl | statement
-varDecl   := "var" IDENT "=" expr ";"
-           | type IDENT "=" expr ";"
-type      := ("int" | "bool" | "string") "*"* "[]"*
-funcDecl  := type IDENT "(" params? ")" block
-params    := param ("," param)*
-param     := type IDENT
+decl        := varDecl | constDecl | funcDecl | statement
+varDecl     := "var" IDENT "=" expr ";"
+             | type IDENT "=" expr ";"
+constDecl   := "const" type IDENT "=" expr ";"
+type        := ("int" | "bool" | "string") "*"* "[]"*
+             | ("fn" | "method") "(" typeList? ")" "->" type
+funcDecl    := type IDENT "(" params? ")" block          // definition
+             | type IDENT "(" params? ")" ";"            // declaration only
+externDecl  := "extern" type IDENT "(" params? ")" ";"
+exportFunc  := "export" type IDENT "(" params? ")" block
+params      := param ("," param)*
+param       := type IDENT
 ```
 
 `var` infers the type from the initializer. Variables must be initialized.
 Redeclaring in the *same* scope is an error; shadowing an outer variable in a
 nested block is allowed.
+
+A `const` requires an explicit type, is visible only from its declaration
+onward, and occupies no frame slot: each reference is replaced by the literal
+during parsing. Its initializer may be a constant expression over other
+consts. A top-level `const` may sit next to `main`.
+
+A declaration without a body declares a function whose definition appears
+later. `extern` additionally means the body is in C: the symbol is used exactly
+as written and nothing is emitted. `export` means the opposite — the body is
+here, but the symbol keeps the name as written and is emitted `.globl` so C can
+call it. A function may take at most 6 parameters, or 5 when it returns a
+struct.
+
+Every function written in Z is emitted under a private `z$`-prefixed symbol, so
+it cannot collide with a libc symbol, a runtime helper, or a word the assembler
+reserves. `extern` and `export` are how a symbol is named deliberately.
 
 ## Pointers and arrays
 
@@ -143,12 +181,17 @@ nested block is allowed.
 - `new T[n]` allocates a heap array; its value is a pointer to the first
   element. Indexing `a[i]` and pointer arithmetic both scale by the element
   size. `a.length` reads the element count.
+- An array does not decay to a pointer: pass `&a[0]` where a `T*` is expected.
+- Indexing is unchecked unless the compiler is given `--bounds`, which range-
+  checks every array access against the header length and aborts on failure.
 
 ## Statements
 
 ```
 statement := block | ifStmt | whileStmt | forStmt | foreachStmt
-           | returnStmt | varDecl | exprStmt
+           | returnStmt | breakStmt | continueStmt | varDecl | exprStmt
+breakStmt    := "break" ";"
+continueStmt := "continue" ";"
 ifStmt    := "if" "(" expr ")" statement ("else" statement)?
 whileStmt := "while" "(" expr ")" statement
 forStmt   := "for" "(" (varDecl|exprStmt)? ";" expr? ";" expr? ")" statement
@@ -162,28 +205,88 @@ exprStmt  := expr ";"
 index-based `while` loop over the collection. `++`/`--` desugar to
 `x = x ± 1` (the value is the *new* value).
 
+`break` leaves the innermost enclosing loop and `continue` starts its next
+iteration; in a `for`, `continue` jumps to the step rather than the top of the
+body. Both are a compile error outside a loop.
+
 ## Expressions
 
 Precedence, loosest to tightest:
 
-1. assignment `= += -= *= /= %=` (right-associative; left side must be a variable)
+1. assignment `= += -= *= /= %= &= |= ^= <<= >>=` (right-associative; the left
+   side must be assignable)
 2. `||`
 3. `&&`
 4. `== !=`
 5. `< <= > >=`
-6. `+ -`
-7. `* / %`
-8. unary `- ! & *`
-9. primary: literals, `new T[n]`, `(` expr `)`, variable, `print(expr)`, `userfn(args...)`, postfix `[i]`, `.length`, `++`, `--`
+6. `|`
+7. `^`
+8. `&`
+9. `+ -`
+10. `* / %`
+11. `<< >>`
+12. unary `- ! & * ~`
+13. primary: literals, `new T[n]`, `(` expr `)`, variable, `print(expr)`, a
+    built-in (`abs min max clamp sqrt sin cos`), a user function, postfix
+    `[i]`, `.length`, `++`, `--`
+
+`&f` on a function name yields a `fn` value typed by that function's signature.
+Calling a `fn` value checks the argument count and types; `==`/`!=` compare
+identity, and the ordering operators are rejected. A function pointer is not a
+closure -- it captures nothing, and the language has no nested functions.
+
+`&obj.M` on a class yields a `method` value: a pointer to a garbage-collected
+cell holding the code address and the receiver, so the receiver is traced and
+stays alive as long as the pointer. The call spends `rdi` on the receiver and
+starts the declared arguments at `rsi`. A virtual method is bound through the
+object's vtable, so it dispatches on the runtime type. A struct receiver cannot
+be bound (its methods take the receiver by value), and a `method` value may not
+return a struct (the receiver occupies the register a struct result needs).
+
+The built-ins are `abs(x)`, `min(a,b)`, `max(a,b)`, `clamp(x,lo,hi)` and
+`sqrt(n)`, all on `int` and returning `int`. `sqrt` is an exact integer root.
+`sin(a)`/`cos(a)` are integer-only — there are no floats — with a full turn of
+`1 << 30` units and Q30 results, so `1.0` is `1 << 30`; angles wrap and the
+result is exactly periodic. A user function of the same name shadows a
+built-in.
 
 ## Functions & entry point
 
 - A program is a sequence of top-level declarations and statements.
+- `import "path.z";` splices the named file's tokens in ahead of the importing
+  file's, so its top-level declarations are in scope with no namespace. The path
+  is relative to the importing file; each file is expanded once however many
+  times it is named; a cycle is an error. Every token keeps the file it was lexed
+  from, so diagnostics quote the file the error is actually in.
 - If a function named `main` is defined, it is the entry point; combining it
   with top-level statements is an error.
 - Otherwise, top-level statements are wrapped in a synthesized `main` (like
   C# top-level programs).
 - `print` is a builtin: `print(int)`, `print(bool)`, `print(string)`.
+- See **Declarations** for `extern` (implemented in C) and `export` (defined in
+  Z, callable from C), and for the `z$` symbol namespace.
+
+## Interoperating with C
+
+Both directions are declared in the Z source, and the linker is invoked with
+whatever extra arguments follow the source file.
+
+```
+extern int c_add(int a, int b);          // body in C
+export int z_triple(int v) { ... }       // body here, callable from C
+```
+
+```
+./z run main.z host.c        # compile and link a C file
+./z build main.z -o main -lm # pass library flags through
+```
+
+Type mapping: Z `int` ↔ C `long` (both 64-bit), `bool` ↔ an `int` that is 0 or
+1, `string` ↔ `const char *`, aggregates ↔ a pointer to them. A struct cannot
+be returned by value across the boundary: Z returns every aggregate through a
+hidden result pointer, whereas the C ABI returns aggregates of 16 bytes or
+fewer in registers. Returning a struct from Z to Z is fine, since both sides
+agree there.
 
 ## Generics (monomorphization)
 
@@ -276,3 +379,13 @@ Code targets x86-64 Linux, System V AMD64 ABI. Integers/pointers/array-ptrs are
 passed in `rdi, rsi, rdx, rcx, r8, r9`; return values in `rax`. The compiler
 reserves `rbp` as the frame pointer and keeps the stack 16-byte aligned at
 every call.
+
+Two consequences of the 6-register limit are enforced rather than silently
+miscompiled: a function may not take more than 6 parameters, and an
+`add`/`sub`/`imul`/`cmp` against a constant too wide for a sign-extended
+`imm32` is routed through a register.
+
+Locals live at `[rbp-8]` and below. When callee-saved registers are pushed for
+register-allocated locals, `rbp` is rebased below them (`lea rbp, [rbp - 8*n]`)
+so the two regions cannot overlap, and the epilogue's pops line up again
+against the rebased frame.

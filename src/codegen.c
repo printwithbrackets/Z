@@ -78,10 +78,22 @@ typedef struct {
     int is_const;   /* const_cand && !reassigned => value is a compile-time constant */
 } LocalInfo;
 
+/* Innermost-loop-first stack of break/continue targets. The parser rejects
+ * break/continue outside a loop, so the top entry is always the right one. */
+#define MAX_LOOP_DEPTH 64
+typedef struct {
+    int brk;
+    int cont;
+} LoopCtx;
+
 typedef struct {
     Buf *out;
     StringTable *strings;
     int label_counter;
+    LoopCtx loops[MAX_LOOP_DEPTH];
+    int loop_depth;
+    int bounds_checks; /* emit a runtime range check on every array index */
+    Arena *arena;      /* for interned assembly symbol names */
     int temp_top;         /* current temporary high-water during emit */
     int temp_high;        /* max temp slots used in this function */
     int cur_locals_bytes; /* total frame bytes used by locals in current fn */
@@ -433,14 +445,20 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
         walk_alloc_block(cg, s->body, idx);
         break;
     case S_FOR:
+        /* Each phase needs its own statement index. A for-loop variable is
+         * defined in the init, read in the condition, and live all the way
+         * through the body to the step; giving the whole loop one index would
+         * make its interval [i,i] and let a body local share the register. */
         walk_alloc_stmt(cg, s->for_init, idx);
-        walk_alloc_expr(cg, s->cond, cur);
+        walk_alloc_expr(cg, s->cond, (*idx)++);
         walk_alloc_block(cg, s->body, idx);
-        walk_alloc_expr(cg, s->for_step, cur);
+        walk_alloc_expr(cg, s->for_step, (*idx)++);
         break;
     case S_BLOCK:
         walk_alloc_block(cg, s, idx);
         break;
+    case S_BREAK:
+    case S_CONTINUE:
     case S_FUNC:
     case S_STRUCT:
     case S_UNION:
@@ -514,6 +532,9 @@ static int const_fold_val(CG *cg, Expr *e, long long *out) {
     if (e == NULL)
         return 0;
     switch (e->kind) {
+    case E_NULL:
+        *out = 0;
+        return 1;
     case E_INT:
     case E_BOOL:
         *out = e->ival;
@@ -534,6 +555,10 @@ static int const_fold_val(CG *cg, Expr *e, long long *out) {
             return 0;
         if (e->op == T_MINUS) {
             *out = -v;
+            return 1;
+        }
+        if (e->op == T_TILDE) {
+            *out = ~v;
             return 1;
         }
         return 0;
@@ -579,6 +604,25 @@ static int const_fold_val(CG *cg, Expr *e, long long *out) {
             return 1;
         case T_NE:
             *out = a != b;
+            return 1;
+        case T_AMP:
+            *out = a & b;
+            return 1;
+        case T_PIPE:
+            *out = a | b;
+            return 1;
+        case T_CARET:
+            *out = a ^ b;
+            return 1;
+        case T_SHL:
+            if (b < 0 || b > 63)
+                return 0;
+            *out = a << b;
+            return 1;
+        case T_SHR:
+            if (b < 0 || b > 63)
+                return 0;
+            *out = a >> b;
             return 1;
         default:
             return 0;
@@ -647,6 +691,27 @@ static void gen_addr(CG *cg, Expr *e) {
         gen_expr(cg, e->lhs); /* base pointer */
         store_temp(cg, t);
         gen_expr(cg, e->rhs); /* index */
+        /* Arrays in Z are always heap allocations from vela_newarray, so a
+         * value of array type always has a valid length header at ptr[-8] and
+         * the index can be range-checked. A TK_PTR index has no header, so
+         * there is nothing to check against and it is left alone. */
+        if (cg->bounds_checks && is_kind(e->lhs->type, TK_ARRAY)) {
+            int ti = temp_alloc(cg);
+            int lbad = next_label(cg);
+            int lok = next_label(cg);
+            store_temp(cg, ti);              /* rax = index */
+            load_temp(cg, t, "r11");         /* r11 = base */
+            buf_printf(cg->out, "  cmp rax, 0\n  jl .L%d\n", lbad);
+            buf_printf(cg->out, "  mov rcx, QWORD PTR [r11 - 8]\n");
+            buf_printf(cg->out, "  cmp rax, rcx\n  jge .L%d\n", lbad);
+            load_temp(cg, ti, "rax");
+            buf_printf(cg->out, "  jmp .L%d\n", lok);
+            buf_printf(cg->out, ".L%d:\n", lbad);
+            buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, rcx\n");
+            buf_printf(cg->out, "  call vela_bounds_fail\n");
+            buf_printf(cg->out, ".L%d:\n", lok);
+            cg->temp_top = ti;
+        }
         if (esz != 1)
             buf_printf(cg->out, "  imul rax, %d\n", esz);
         load_temp(cg, t, "r11");
@@ -669,6 +734,44 @@ static void gen_addr(CG *cg, Expr *e) {
 }
 
 /* Emits an arithmetic or comparison combining lhs (in rax) with rhs (in r11). */
+/* True for the six relational operators. Mirrors the parser's set; codegen
+ * needs its own copy because the two are separate translation units. */
+static const char *z_sym(CG *cg, const char *name);
+static void gen_icall(CG *cg, Expr *e);
+static void gen_mptr(CG *cg, Expr *e);
+
+static int is_cmp_op(TokenKind k) {
+    return k == T_EQ || k == T_NE || k == T_LT || k == T_LE || k == T_GT || k == T_GE;
+}
+
+/* Reduces the three-way result in r11 to a bool, for a comparison whose
+ * operands were not plain integers (string ordering). */
+static void emit_cmp_zero(CG *cg, TokenKind op) {
+    switch (op) {
+    case T_EQ:
+        buf_printf(cg->out, "  cmp r11, 0\n  sete al\n  movzx rax, al\n");
+        break;
+    case T_NE:
+        buf_printf(cg->out, "  cmp r11, 0\n  setne al\n  movzx rax, al\n");
+        break;
+    case T_LT:
+        buf_printf(cg->out, "  cmp r11, 0\n  setl al\n  movzx rax, al\n");
+        break;
+    case T_LE:
+        buf_printf(cg->out, "  cmp r11, 0\n  setle al\n  movzx rax, al\n");
+        break;
+    case T_GT:
+        buf_printf(cg->out, "  cmp r11, 0\n  setg al\n  movzx rax, al\n");
+        break;
+    case T_GE:
+        buf_printf(cg->out, "  cmp r11, 0\n  setge al\n  movzx rax, al\n");
+        break;
+    default:
+        buf_printf(cg->out, "  cmp r11, 0\n  sete al\n  movzx rax, al\n");
+        break;
+    }
+}
+
 static void emit_binop_op(CG *cg, TokenKind op) {
     switch (op) {
     case T_PLUS:
@@ -685,6 +788,21 @@ static void emit_binop_op(CG *cg, TokenKind op) {
         break;
     case T_PERCENT:
         buf_printf(cg->out, "  cqo\n  idiv r11\n  mov rax, rdx\n");
+        break;
+    case T_AMP:
+        buf_printf(cg->out, "  and rax, r11\n");
+        break;
+    case T_PIPE:
+        buf_printf(cg->out, "  or rax, r11\n");
+        break;
+    case T_CARET:
+        buf_printf(cg->out, "  xor rax, r11\n");
+        break;
+    case T_SHL:
+        buf_printf(cg->out, "  mov rcx, r11\n  shl rax, cl\n");
+        break;
+    case T_SHR:
+        buf_printf(cg->out, "  mov rcx, r11\n  sar rax, cl\n");
         break;
     case T_EQ:
         buf_printf(cg->out, "  cmp rax, r11\n  sete al\n  movzx rax, al\n");
@@ -744,7 +862,7 @@ static void gen_call(CG *cg, Expr *e) {
     if (sret) {
         buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
     }
-    buf_printf(cg->out, "  call %s\n", e->name);
+    buf_printf(cg->out, "  call %s\n", e->is_extern ? e->name : z_sym(cg, e->name));
     if (sret) {
         /* The result value is the address of the buffer. Keep the buffer
          * reserved for the rest of the statement so a later nested call does
@@ -756,9 +874,93 @@ static void gen_call(CG *cg, Expr *e) {
     }
 }
 
+/* A call through a function pointer. The target is evaluated into a frame temp
+ * first, because evaluating the arguments would otherwise clobber rax before
+ * the call. */
+/* Builds a bound method pointer: a two-word GC cell holding { code, receiver }.
+ * The value yielded is the cell's address, an ordinary eight-byte pointer, so
+ * the receiver is kept alive by the collector for as long as the pointer is. */
+static void gen_mptr(CG *cg, Expr *e) {
+    int t = temp_alloc(cg);
+    gen_expr(cg, e->lhs); /* the receiver: a class object pointer */
+    store_temp(cg, t);
+    load_temp(cg, t, "rsi");
+    if (e->vtable_index >= 0) {
+        /* Virtual: read the implementation out of the receiver's vtable so the
+         * binding dispatches on the runtime type. */
+        buf_printf(cg->out, "  mov r11, QWORD PTR [rsi]\n");
+        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + %d]\n", e->vtable_index * 8);
+    } else {
+        buf_printf(cg->out, "  lea rdi, [rip + %s]\n", z_sym(cg, e->name));
+    }
+    buf_printf(cg->out, "  call vela_newbinding\n");
+    cg->temp_top = t;
+}
+
+/* A call through a function or method pointer. The target is evaluated into a
+ * frame temp first, because evaluating the arguments would otherwise clobber
+ * rax before the call. */
+static void gen_icall(CG *cg, Expr *e) {
+    int sret = is_aggregate(e->type);
+    int rt_nt = sret ? (type_size(e->type) + 7) / 8 : 0;
+    if (rt_nt < 1)
+        rt_nt = 1;
+    int rt_base = sret ? temp_alloc_many(cg, rt_nt) : 0;
+    int rt_addr = sret ? temp_off(cg, rt_base + rt_nt - 1) : 0;
+    /* The parser rejects a bound pointer returning a struct, so a struct
+     * result buffer and a bound receiver never both claim rdi here. */
+    int bound = is_kind(e->lhs->type, TK_MPTR);
+    int tf = temp_alloc(cg);
+    gen_expr(cg, e->lhs); /* the callable */
+    store_temp(cg, tf);
+    int base = cg->temp_top;
+    cg->temp_top += e->nargs;
+    if (cg->temp_top > cg->temp_high)
+        cg->temp_high = cg->temp_top;
+    for (int i = 0; i < e->nargs; i++) {
+        gen_expr(cg, e->args[i]);
+        store_temp(cg, base + i);
+    }
+    /* A bound pointer's receiver occupies rdi, so the declared arguments start
+     * one register higher. */
+    int regoff = (sret || bound) ? 1 : 0;
+    for (int i = 0; i < e->nargs && i + regoff < 6; i++)
+        load_temp(cg, base + i, ARG_REGS[i + regoff]);
+    if (sret)
+        buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
+    load_temp(cg, tf, "r11");
+    if (bound) {
+        /* r11 is the binding cell: { code, receiver }. */
+        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
+    }
+    buf_printf(cg->out, "  call r11\n");
+    if (sret) {
+        buf_printf(cg->out, "  lea rax, [rbp - %d]\n", rt_addr);
+        cg->temp_top = rt_base + rt_nt;
+    } else {
+        cg->temp_top = tf;
+    }
+}
+
 /* Emits `rax = rax <op> imm` when the right operand is a literal. Mirrors
  * emit_binop_op but uses x86 immediate forms (no r11 round-trip). */
+/* True when `v` fits the sign-extended imm32 that add/sub/imul/and/or/xor/cmp
+ * accept with a 64-bit register operand. Anything wider has to go through a
+ * register: `sub rax, 1152921504606846976` is not an encodable instruction, and
+ * the assembler rejects it outright rather than picking a wider form. */
+static int fits_imm32(long long v) {
+    return v >= -2147483648LL && v <= 2147483647LL;
+}
+
 static void emit_binop_imm(CG *cg, TokenKind op, long long imm) {
+    /* Out-of-range constants take the register path. mov r11, imm64 is always
+     * encodable, so this stays correct at the cost of one instruction. */
+    if (!fits_imm32(imm)) {
+        buf_printf(cg->out, "  mov r11, %lld\n", imm);
+        emit_binop_op(cg, op);
+        return;
+    }
     switch (op) {
     case T_PLUS:
         buf_printf(cg->out, "  add rax, %lld\n", imm);
@@ -866,12 +1068,64 @@ static void gen_accum(CG *cg, Expr *e, const char *reg) {
     gen_accum(cg, e->lhs, reg);
     const char *ins = e->op == T_PLUS ? "add" : e->op == T_MINUS ? "sub" : "imul";
     long long cr;
-    if (const_fold_val(cg, e->rhs, &cr))
+    if (const_fold_val(cg, e->rhs, &cr) && !fits_imm32(cr))
+        buf_printf(cg->out, "  mov r11, %lld\n  %s %s, r11\n", cr, ins, reg);
+    else if (const_fold_val(cg, e->rhs, &cr))
         buf_printf(cg->out, "  %s %s, %lld\n", ins, reg, cr);
     else {
         gen_leaf_to_reg(cg, e->rhs, "r11");
         buf_printf(cg->out, "  %s %s, r11\n", ins, reg);
     }
+}
+
+/* Lowers a built-in intrinsic. abs/min/max/clamp are a handful of
+ * instructions and are emitted inline; sqrt calls the runtime, whose integer
+ * root is exact where a Newton iteration in Z itself would not be. */
+static void gen_intrinsic(CG *cg, Expr *e) {
+    if (strcmp(e->name, "sin") == 0 || strcmp(e->name, "cos") == 0) {
+        gen_expr(cg, e->args[0]);
+        buf_printf(cg->out, "  mov rdi, rax\n  mov esi, %d\n  call vela_trig\n",
+                   e->name[0] == 'c' ? 1 : 0);
+        return;
+    }
+    if (strcmp(e->name, "sqrt") == 0) {
+        gen_expr(cg, e->args[0]);
+        buf_printf(cg->out, "  mov rdi, rax\n  call vela_isqrt\n");
+        return;
+    }
+    if (strcmp(e->name, "abs") == 0) {
+        gen_expr(cg, e->args[0]);
+        /* rax holds -x, rcx the original; keep the negated value when the
+         * original was negative, otherwise take the original back. */
+        buf_printf(cg->out, "  mov rcx, rax\n  neg rax\n");
+        buf_printf(cg->out, "  cmp rcx, 0\n  cmovg rax, rcx\n");
+        return;
+    }
+    if (strcmp(e->name, "min") == 0 || strcmp(e->name, "max") == 0) {
+        int want_lt = e->name[1] == 'i'; /* "min" selects the smaller */
+        int t = temp_alloc(cg);
+        gen_expr(cg, e->args[1]);
+        store_temp(cg, t);
+        gen_expr(cg, e->args[0]);
+        load_temp(cg, t, "r11");
+        buf_printf(cg->out, "  cmp rax, r11\n");
+        buf_printf(cg->out, want_lt ? "  cmovg rax, r11\n" : "  cmovl rax, r11\n");
+        cg->temp_top = t;
+        return;
+    }
+    /* clamp(x, lo, hi) */
+    int t = temp_alloc(cg);
+    int t2 = temp_alloc(cg);
+    gen_expr(cg, e->args[1]);
+    store_temp(cg, t);
+    gen_expr(cg, e->args[2]);
+    store_temp(cg, t2);
+    gen_expr(cg, e->args[0]);
+    load_temp(cg, t, "r11");
+    buf_printf(cg->out, "  cmp rax, r11\n  cmovl rax, r11\n");
+    load_temp(cg, t2, "r11");
+    buf_printf(cg->out, "  cmp rax, r11\n  cmovg rax, r11\n");
+    cg->temp_top = t;
 }
 
 static void gen_expr(CG *cg, Expr *e) {
@@ -881,6 +1135,9 @@ static void gen_expr(CG *cg, Expr *e) {
         break;
     case E_BOOL:
         buf_printf(cg->out, "  mov rax, %d\n", e->ival ? 1 : 0);
+        break;
+    case E_NULL:
+        buf_printf(cg->out, "  mov rax, 0\n");
         break;
     case E_STRING:
         buf_printf(cg->out, "  lea rax, [rip + .Lstr%d]\n", e->str_id);
@@ -1056,9 +1313,26 @@ static void gen_expr(CG *cg, Expr *e) {
         gen_expr(cg, e->lhs);
         if (e->op == T_MINUS) {
             buf_printf(cg->out, "  neg rax\n");
+        } else if (e->op == T_TILDE) {
+            buf_printf(cg->out, "  not rax\n");
         } else {
             buf_printf(cg->out, "  cmp rax, 0\n  sete al\n  movzx rax, al\n");
         }
+        break;
+    case E_INTRINSIC:
+        gen_intrinsic(cg, e);
+        break;
+    case E_FNPTR:
+        /* The address of a function is its label; lea rax, [rip + sym] is the
+         * position-independent way to take it. */
+        buf_printf(cg->out, "  lea rax, [rip + %s]\n",
+                   e->is_extern ? e->name : z_sym(cg, e->name));
+        break;
+    case E_ICALL:
+        gen_icall(cg, e);
+        break;
+    case E_MPTR:
+        gen_mptr(cg, e);
         break;
     case E_BINARY: {
         long long cf;
@@ -1095,6 +1369,21 @@ static void gen_expr(CG *cg, Expr *e) {
             load_temp(cg, t0, "rdi");
             load_temp(cg, t1, "rsi");
             buf_printf(cg->out, "  call vela_concat\n");
+            cg->temp_top = t0;
+        } else if (is_kind(e->lhs->type, TK_STRING) && is_cmp_op(e->op)) {
+            /* String ordering. vela_strcmp gives a three-way result, which the
+             * relational operator then reduces to a bool. */
+            int t0 = temp_alloc(cg);
+            int t1 = temp_alloc(cg);
+            gen_expr(cg, e->lhs);
+            store_temp(cg, t0);
+            gen_expr(cg, e->rhs);
+            store_temp(cg, t1);
+            load_temp(cg, t0, "rdi");
+            load_temp(cg, t1, "rsi");
+            buf_printf(cg->out, "  call vela_strcmp\n");
+            buf_printf(cg->out, "  mov r11, rax\n");
+            emit_cmp_zero(cg, e->op);
             cg->temp_top = t0;
         } else if (e->op == T_AND) {
             int lfalse = next_label(cg);
@@ -1249,7 +1538,7 @@ static void gen_expr(CG *cg, Expr *e) {
             load_temp(cg, ot, "rdi");
             for (int i = 0; i < n && i + 1 < 6; i++)
                 load_temp(cg, base + i, ARG_REGS[i + 1]);
-            buf_printf(cg->out, "  call %s\n", e->name);
+            buf_printf(cg->out, "  call %s\n", e->is_extern ? e->name : z_sym(cg, e->name));
             cg->temp_top = base;
         }
         load_temp(cg, ot, "rax"); /* result = object pointer */
@@ -1276,9 +1565,21 @@ static int is_pure_expr(Expr *e) {
     if (e == NULL)
         return 0;
     switch (e->kind) {
+    case E_NULL:
     case E_INT:
     case E_BOOL:
         return 1;
+    case E_FNPTR:
+        return 1;
+    case E_MPTR:
+        return is_pure_expr(e->lhs);
+    case E_INTRINSIC:
+    case E_ICALL: {
+        for (int i = 0; i < e->nargs; i++)
+            if (!is_pure_expr(e->args[i]))
+                return 0;
+        return 1;
+    }
     case E_VAR:
         return !e->agg_param && !is_aggregate(e->type);
     case E_UNARY:
@@ -1310,12 +1611,17 @@ static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
             lreg = local_reg(cg, cond->lhs->slot);
         if (lreg != NULL)
             lhs_direct = 1; /* compare the register directly, no rax copy */
-        if (lhs_direct == 1 && const_fold_val(cg, cond->rhs, &cr)) {
+        if (lhs_direct == 1 && const_fold_val(cg, cond->rhs, &cr) && fits_imm32(cr)) {
             buf_printf(cg->out, "  cmp %s, %lld\n", lreg, cr);
         } else {
-            if (const_fold_val(cg, cond->rhs, &cr)) {
+            if (const_fold_val(cg, cond->rhs, &cr) && fits_imm32(cr)) {
                 gen_expr(cg, cond->lhs);
                 buf_printf(cg->out, "  cmp rax, %lld\n", cr);
+            } else if (const_fold_val(cg, cond->rhs, &cr)) {
+                /* Too wide for a cmp immediate: compare against a register. */
+                gen_expr(cg, cond->lhs);
+                buf_printf(cg->out, "  mov r11, %lld\n", cr);
+                buf_printf(cg->out, "  cmp rax, r11\n");
             } else if (is_leaf_expr(cond->rhs)) {
                 gen_expr(cg, cond->lhs);
                 gen_leaf_to_reg(cg, cond->rhs, "r11");
@@ -1376,8 +1682,13 @@ static void gen_void_expr(CG *cg, Expr *e) {
                                       : e->op == T_MINUS ? "sub"
                                       : e->op == T_STAR  ? "imul"
                                                          : NULL;
-                    if (ins != NULL) {
+                    /* A constant wider than imm32 has to travel in a register. */
+                    if (ins != NULL && fits_imm32(cr)) {
                         buf_printf(cg->out, "  %s %s, %lld\n", ins, lreg, cr);
+                        return;
+                    }
+                    if (ins != NULL) {
+                        buf_printf(cg->out, "  mov r11, %lld\n  %s %s, r11\n", cr, ins, lreg);
                         return;
                     }
                 } else if (is_leaf_expr(e->rhs)) {
@@ -1402,6 +1713,19 @@ static void gen_void_expr(CG *cg, Expr *e) {
         }
     }
     gen_expr(cg, e);
+}
+
+static void loop_push(CG *cg, int brk, int cont) {
+    if (cg->loop_depth < MAX_LOOP_DEPTH) {
+        cg->loops[cg->loop_depth].brk = brk;
+        cg->loops[cg->loop_depth].cont = cont;
+    }
+    cg->loop_depth++;
+}
+
+static void loop_pop(CG *cg) {
+    if (cg->loop_depth > 0)
+        cg->loop_depth--;
 }
 
 static void gen_stmt(CG *cg, Stmt *s) {
@@ -1461,7 +1785,9 @@ static void gen_stmt(CG *cg, Stmt *s) {
         int lend = next_label(cg);
         buf_printf(cg->out, ".L%d:\n", lstart);
         gen_cond_branch(cg, s->cond, lend);
+        loop_push(cg, lend, lstart);
         gen_stmt(cg, s->body);
+        loop_pop(cg);
         buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lstart, lend);
         break;
     }
@@ -1469,16 +1795,30 @@ static void gen_stmt(CG *cg, Stmt *s) {
         if (s->for_init != NULL)
             gen_stmt(cg, s->for_init);
         int lstart = next_label(cg);
+        int lcont = next_label(cg);
         int lend = next_label(cg);
         buf_printf(cg->out, ".L%d:\n", lstart);
         if (s->cond != NULL)
             gen_cond_branch(cg, s->cond, lend);
+        loop_push(cg, lend, lcont);
         gen_stmt(cg, s->body);
+        loop_pop(cg);
+        buf_printf(cg->out, ".L%d:\n", lcont);
         if (s->for_step != NULL)
             gen_void_expr(cg, s->for_step);
         buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lstart, lend);
         break;
     }
+    case S_BREAK:
+        /* The parser rejects break/continue outside a loop, so the top of the
+         * stack always belongs to the innermost enclosing loop. */
+        if (cg->loop_depth > 0)
+            buf_printf(cg->out, "  jmp .L%d\n", cg->loops[cg->loop_depth - 1].brk);
+        break;
+    case S_CONTINUE:
+        if (cg->loop_depth > 0)
+            buf_printf(cg->out, "  jmp .L%d\n", cg->loops[cg->loop_depth - 1].cont);
+        break;
     case S_BLOCK:
         gen_block_items(cg, s);
         break;
@@ -1491,10 +1831,45 @@ static void gen_stmt(CG *cg, Stmt *s) {
 
 static int align16(int n) { return (n + 15) & ~15; }
 
+/* Every Z-level function is emitted under a reserved prefix.
+ *
+ * Bare Z names are not safe as assembly symbols. Under `.intel_syntax`, GAS
+ * reads `near`, `far`, `byte`, `word`, `dword` and `qword` as keywords, so a
+ * Z function called `near` assembled into a branch to an absolute address with
+ * no diagnostic from the assembler or the linker -- the program just jumped
+ * into the weeds. `short` and `offset` are outright directives and failed to
+ * assemble. A prefix also keeps a Z function from colliding with a libc symbol
+ * or one of the runtime's own vela_* helpers.
+ *
+ * The separator is `$`, which the assembler accepts in a symbol but which
+ * cannot appear in a Z identifier. That makes the collision impossible rather
+ * than merely unlikely: no program can define a function whose name already
+ * occupies this namespace, so `rnd` and an `export`ed `z_rnd` can coexist.
+ * An identifier-shaped prefix such as `z_` cannot promise that.
+ *
+ * Every Z-level name is prefixed unconditionally. A C symbol is reached by
+ * declaring it `extern`, and a Z symbol meant to be visible to C by declaring
+ * it `export`; both bypass this function. */
+#define Z_SYM_PREFIX "z$"
+
+static const char *z_sym(CG *cg, const char *name) {
+    if (name == NULL)
+        return Z_SYM_PREFIX "<null>";
+    size_t n = strlen(name);
+    char *out = arena_alloc(cg->arena, n + sizeof Z_SYM_PREFIX);
+    memcpy(out, Z_SYM_PREFIX, sizeof Z_SYM_PREFIX);
+    memcpy(out + sizeof Z_SYM_PREFIX - 1, name, n + 1);
+    return out;
+}
+
 /* Emits one function. The body is generated twice: once to measure peak
  * temporary-slot usage (to size the stack frame), then for real. */
 static void emit_function(CG *cg, Stmt *fn) {
-    const char *sym = fn->is_entry ? "vela_main" : fn->fname;
+    /* The synthesized entry keeps its runtime-style name; an `export`ed
+     * function keeps the name as written so C can find it; everything else the
+     * user writes is mangled into the Z namespace. */
+    const char *sym = fn->is_entry ? "vela_main"
+                                   : (fn->is_export ? fn->fname : z_sym(cg, fn->fname));
     cg->cur_locals_bytes = fn->locals_bytes;
     /* Struct-returning functions store the caller's buffer pointer in the
      * hidden first parameter (name "$ret"). */
@@ -1519,7 +1894,13 @@ static void emit_function(CG *cg, Stmt *fn) {
 
     /* Locals occupy [rbp-8-locals_bytes, rbp-9]; temporaries sit below that,
      * so the frame must cover 8 + locals + temps bytes. */
-    int frame = align16(8 + cg->cur_locals_bytes + cg->temp_high * 8);
+    /* temp_off puts the last temporary at 8 + locals + 8*temp_high, and that
+     * slot occupies the eight bytes above it, so the frame has to reach one
+     * slot further. Sizing it to exactly that offset left a function with, say,
+     * 24 bytes of locals and two temporaries writing 8 bytes below its own
+     * stack pointer -- align16 only concealed it when the total was not already
+     * 16-aligned. */
+    int frame = align16(8 + cg->cur_locals_bytes + 8 * (cg->temp_high + 1));
     /* Each pushed pool register shifts rsp by 8; keep the frame 16-aligned at
      * call sites by adding 8 when an odd number of pool registers is used. */
     int npool_used = 0;
@@ -1529,23 +1910,30 @@ static void emit_function(CG *cg, Stmt *fn) {
     if (npool_used & 1)
         frame += 8;
 
+    /* An exported symbol has to be visible outside this translation unit. */
+    if (fn->is_export)
+        buf_printf(cg->out, "  .globl %s\n", sym);
     buf_printf(cg->out, "%s:\n", sym);
     buf_printf(cg->out, "  push rbp\n  mov rbp, rsp\n");
     for (int r = 0; r < NPOOL; r++)
         if (cg->pool_mask & (1 << r))
             buf_printf(cg->out, "  push %s\n", POOL_REGS[r]);
+    /* Local and temporary slots are numbered from rbp-8 downwards, which is
+     * exactly where the pool registers just landed. Rebase rbp below them so
+     * the two regions cannot overlap; the saved registers are then reachable
+     * as [rbp+8] .. [rbp+8*N] and the epilogue's pops line up again. */
+    if (npool_used > 0)
+        buf_printf(cg->out, "  lea rbp, [rbp - %d]\n", 8 * npool_used);
     if (frame > 0)
         buf_printf(cg->out, "  sub rsp, %d\n", frame);
     for (int i = 0; i < fn->nparams; i++) {
         buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot, ARG_REGS[i]);
     }
     gen_block_items(cg, fn->fbody);
-    /* The saved pool registers sit just below rbp ([rbp-8] .. [rbp-8*N]).
-     * Reset rsp to the top of that block and pop them in reverse push order.
-     * The return value stays in rax. */
+    /* rsp is already at the deepest saved pool register once rbp is rebased,
+     * so pop them in reverse push order and then rbp. The return value stays
+     * in rax. */
     buf_printf(cg->out, ".Lret_%s:\n  mov rsp, rbp\n", sym);
-    if (npool_used > 0)
-        buf_printf(cg->out, "  sub rsp, %d\n", 8 * npool_used);
     for (int r = NPOOL - 1; r >= 0; r--)
         if (cg->pool_mask & (1 << r))
             buf_printf(cg->out, "  pop %s\n", POOL_REGS[r]);
@@ -1582,14 +1970,17 @@ static void emit_escaped(CG *cg, const char *s) {
     }
 }
 
-char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings) {
-    (void)arena;
+char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
+                        const CodegenOptions *opts) {
     Buf out;
     memset(&out, 0, sizeof out);
     CG cg;
     memset(&cg, 0, sizeof cg);
     cg.out = &out;
     cg.strings = strings;
+    cg.arena = arena;
+    if (opts != NULL)
+        cg.bounds_checks = opts->bounds_checks;
 
     buf_puts(&out, "  .intel_syntax noprefix\n  .text\n");
 
@@ -1601,7 +1992,10 @@ char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings) {
     }
 
     for (int i = 0; i < program->nitems; i++) {
-        if (program->items[i]->kind == S_FUNC && !program->items[i]->is_generic_template)
+        /* fbody == NULL is a declaration with no definition: a forward
+         * declaration, or an `extern` whose body lives in C. */
+        if (program->items[i]->kind == S_FUNC && program->items[i]->fbody != NULL &&
+            !program->items[i]->is_generic_template)
             emit_function(&cg, program->items[i]);
     }
 
@@ -1639,7 +2033,8 @@ char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings) {
             continue;
         buf_printf(&out, ".Lvt_%s:\n", sd->name);
         for (int v = 0; v < sd->nvtable; v++)
-            buf_printf(&out, "  .quad %s\n", sd->vtable_impl[v] ? sd->vtable_impl[v] : "0");
+            buf_printf(&out, "  .quad %s\n",
+                       sd->vtable_impl[v] ? z_sym(&cg, sd->vtable_impl[v]) : "0");
     }
     /* 64-bit magic multipliers and divisors referenced by [rip + .Lro<i>]. */
     for (int i = 0; i < cg.nrodata; i++)
@@ -1663,4 +2058,8 @@ char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings) {
     free(cg.locals);
     free(cg.rodata);
     return out.data;
+}
+
+char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings) {
+    return codegen_emit_opts(arena, program, strings, NULL);
 }

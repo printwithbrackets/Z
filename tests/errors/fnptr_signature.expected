@@ -1,0 +1,1 @@
+cannot compare 'fn(int) -> int' with 'fn() -> int'

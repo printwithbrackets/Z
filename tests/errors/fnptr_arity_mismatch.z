@@ -1,0 +1,4 @@
+int ident(int x) { return x; }
+int zero() { return 7; }
+void want(fn(int) -> int g) { return; }
+int main() { want(&zero); return 0; }

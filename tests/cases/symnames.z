@@ -1,0 +1,47 @@
+// User function names are emitted into a reserved namespace, so a Z function
+// may be called anything -- including the words GAS reads as Intel-syntax
+// keywords. Before namespacing, `near` assembled to a branch to an absolute
+// address with no diagnostic from the assembler or the linker, and the program
+// jumped into the weeds.
+int near(int a) { return a + 1; }
+int far(int a) { return a * 2; }
+int byte(int a) { return a - 1; }
+int word(int a) { return a + a; }
+int dword(int a) { return a * a; }
+int qword(int a) { return 0 - a; }
+int short(int a) { return a + 100; }
+int offset(int a) { return a + 200; }
+int size(int a) { return a + 300; }
+int length(int a) { return a + 400; }
+
+struct S { int v; }
+int seg(int a) { return a + 500; }
+
+/* Names that already look namespaced are still prefixed, so a program may
+ * define both `rnd` and `z_rnd` without the two colliding. */
+int rnd(int a) { return a + 1; }
+int z_rnd(int a) { return a * 2; }
+
+int main() {
+    print(rnd(3));        // 4
+    print(z_rnd(3));      // 6
+    print(near(1));       // 2
+    print(far(3));        // 6
+    print(byte(9));       // 8
+    print(word(4));       // 8
+    print(dword(5));      // 25
+    print(qword(7));      // -7
+    print(short(1));      // 101
+    print(offset(1));     // 201
+    print(size(1));       // 301
+    print(length(1));     // 401
+    print(seg(1));        // 501
+
+    /* a method and a virtual slot go through the same mangling */
+    var s = new S(3);
+    print(s.v);           // 3
+
+    /* recursion through a mangled name */
+    print(near(near(near(0))));  // 3
+    return 0;
+}

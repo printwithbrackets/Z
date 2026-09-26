@@ -1,0 +1,6 @@
+int main() {
+    var a = new int[2];
+    a[0] = 1;
+    a[7] = 99;
+    return 0;
+}

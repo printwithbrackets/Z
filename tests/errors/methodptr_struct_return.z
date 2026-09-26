@@ -1,0 +1,3 @@
+struct P { int a; int b; }
+class A { int v; A(int a) { v = a; } P pair() { var p = new P(1, 2); return p; } }
+int main() { var a = new A(1); var m = &a.pair; var r = m(); return 0; }

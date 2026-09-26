@@ -14,6 +14,12 @@ typedef enum {
     TK_ARRAY, /* base[len] */
     TK_STRUCT,
     TK_UNION,     /* tagged sum: a leading int tag + variant payloads */
+    TK_FNPTR,     /* fn(params) -> ret: a function pointer, carries its signature */
+    /* A bound method pointer, `&obj.M`. Eight bytes: a pointer to a
+     * garbage-collected cell holding { code, receiver }. Keeping it a scalar
+     * rather than a two-word aggregate means it lives in a register and is
+     * passed like an int, so none of the struct copy machinery applies. */
+    TK_MPTR,
     TK_TYPEPARAM, /* a generic type parameter (substituted during monomorphization) */
 } TypeKind;
 
@@ -70,6 +76,11 @@ struct Type {
     StructDef *sdef;   /* TK_STRUCT */
     UnionDef *udef;    /* TK_UNION */
     const char *pname; /* TK_TYPEPARAM */
+    /* TK_FNPTR: the signature, so a call through the pointer can be checked
+     * and the right number of arguments marshalled. */
+    Type **ptypes;
+    int nparams;
+    Type *ret;
 };
 
 /* Owns all Type/StructDef objects for one compilation (arena-backed). */
@@ -95,6 +106,12 @@ Type *type_bool(TypeCtx *ctx);
 Type *type_string(TypeCtx *ctx);
 Type *type_ptr(TypeCtx *ctx, Type *base);
 Type *type_array(TypeCtx *ctx, Type *elem, int len);
+
+/* A function type. `ptypes` is borrowed, not copied. */
+Type *type_fnptr(TypeCtx *ctx, Type **ptypes, int nparams, Type *ret);
+
+/* A bound method pointer with the same signature shape. */
+Type *type_mptr(TypeCtx *ctx, Type **ptypes, int nparams, Type *ret);
 
 /* Declares a struct type (not yet complete). Returns NULL if the name is
  * already in use. */

@@ -1,0 +1,59 @@
+// break/continue, including out of nested loops and inside foreach. continue
+// in a `for` runs the step, not the top of the body.
+int main() {
+    var i = 0;
+    while (true) {
+        i = i + 1;
+        if (i > 5) { break; }
+    }
+    print(i);                                  // 6
+
+    var s = 0;
+    for (var k = 0; k < 10; k = k + 1) {
+        if (k < 3) { continue; }
+        s = s + k;
+    }
+    print(s);                                  // 42
+
+    /* break leaves the innermost loop only */
+    var n = 0;
+    for (var a = 0; a < 3; a = a + 1) {
+        for (var b = 0; b < 3; b = b + 1) {
+            if (b == 1) { break; }
+            n = n + 1;
+        }
+    }
+    print(n);                                  // 3
+
+    var t = 0;
+    var m = 0;
+    while (m < 10) {
+        m = m + 1;
+        if (m % 2 == 0) { continue; }
+        t = t + m;
+    }
+    print(t);                                  // 25
+
+    var u = 0;
+    var arr = new int[4];
+    foreach (v in arr) {
+        u = u + 1;
+        if (u == 2) { break; }
+    }
+    print(u);                                  // 2
+
+    /* a loop with no exit condition other than break */
+    var w = 0;
+    while (w < 100) { w = w + 7; if (w > 40) { break; } }
+    print(w);                                  // 42
+
+    /* break/continue inside a switch-free if chain, and a do-once body */
+    var z = 0;
+    for (var q = 0; q < 5; q = q + 1) {
+        if (q == 2) { continue; }
+        if (q == 4) { break; }
+        z = z + q;
+    }
+    print(z);                                  // 0+1+3 = 4
+    return 0;
+}

@@ -1,0 +1,41 @@
+// `null` as a null-pointer literal: comparable against any reference type,
+// assignable to any pointer slot, and the default type of `var p = null`.
+struct P { int x; int y; }
+int* nothing() { return null; }
+class C { int v; C(int a) { v = a; } }
+C* noC() { return null; }
+
+int find(int* a, int n, int want) {
+    for (var i = 0; i < n; i = i + 1) { if (a[i] == want) { return i; } }
+    return -1;
+}
+
+int main() {
+    var a = new int[3];
+    a[0] = 5; a[1] = 9; a[2] = 2;
+
+    var p = null;
+    if (p == null) { print(1); } else { print(2); }          // 1
+    var q = &a[0];
+    if (q != null) { print(3); } else { print(4); }          // 3
+
+    /* a variable first set to null, then to a real pointer */
+    var s = null;
+    if (s == null) { print(5); } else { print(6); }          // 5
+    s = q;
+    if (s == null) { print(7); } else { print(8); }          // 8
+
+    if (null == null) { print(9); } else { print(10); }      // 9
+    print(nothing() == null ? 11 : 12);                      // 11
+    var c = noC();
+    if (c == null) { print(13); } else { print(14); }        // 13
+
+    /* null into a struct pointer slot, then used */
+    var pt = null;
+    if (pt == null) { print(15); } else { print(16); }        // 15
+
+    /* null is a plain 0 under the hood, so it round-trips through a helper */
+    print(find(&a[0], 3, 9));                                 // 1
+    print(find(&a[0], 3, 7));                                 // -1
+    return 0;
+}

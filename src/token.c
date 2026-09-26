@@ -22,6 +22,12 @@ const char *token_kind_name(TokenKind kind) {
         return "'void'";
     case T_KW_VAR:
         return "'var'";
+    case T_KW_CONST:
+        return "'const'";
+    case T_KW_BREAK:
+        return "'break'";
+    case T_KW_CONTINUE:
+        return "'continue'";
     case T_KW_IF:
         return "'if'";
     case T_KW_ELSE:
@@ -60,10 +66,24 @@ const char *token_kind_name(TokenKind kind) {
         return "'?'";
     case T_COLON:
         return "':'";
+    case T_ARROW:
+        return "->";
     case T_FATARROW:
         return "'=>'";
     case T_KW_RETURN:
         return "'return'";
+    case T_KW_IMPORT:
+        return "import";
+    case T_KW_METHOD:
+        return "method";
+    case T_KW_FN:
+        return "fn";
+    case T_KW_EXPORT:
+        return "export";
+    case T_KW_EXTERN:
+        return "extern";
+    case T_KW_NULL:
+        return "null";
     case T_KW_TRUE:
         return "'true'";
     case T_KW_FALSE:
@@ -126,6 +146,26 @@ const char *token_kind_name(TokenKind kind) {
         return "'++'";
     case T_MINUSMINUS:
         return "'--'";
+    case T_PIPE:
+        return "'|'";
+    case T_CARET:
+        return "'^'";
+    case T_TILDE:
+        return "'~'";
+    case T_SHL:
+        return "'<<'";
+    case T_SHR:
+        return "'>>'";
+    case T_AMP_EQ:
+        return "'&='";
+    case T_PIPE_EQ:
+        return "'|='";
+    case T_CARET_EQ:
+        return "'^='";
+    case T_SHL_EQ:
+        return "'<<='";
+    case T_SHR_EQ:
+        return "'>>='";
     }
     return "token";
 }

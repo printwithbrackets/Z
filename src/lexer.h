@@ -23,4 +23,9 @@ int string_intern(StringTable *table, const char *bytes, int len);
  * arena array of tokens; `out_count` receives the token count. */
 Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int *out_count);
 
+/* As lex_all, but stamps `file` onto every span so diagnostics name the right
+ * file. Used for each file of a multi-file compilation unit. */
+Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings, int *out_count,
+                    const char *file);
+
 #endif /* VELA_LEXER_H */

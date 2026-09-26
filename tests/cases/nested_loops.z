@@ -1,0 +1,40 @@
+// Register allocation across nested loops. Each `for` phase is a separate
+// liveness position, so an outer loop counter cannot share a register with a
+// loop variable declared inside its body -- which silently hung the program
+// before the allocator was taught to span the body.
+int main() {
+    var n = 0;
+    for (var a = 0; a < 3; a = a + 1) {
+        var lim = 1;
+        for (var b = 0; b < lim; b = b + 1) { n = n + 1; }
+    }
+    print(n);                                  // 3
+
+    /* three deep, all counters live at once */
+    var m = 0;
+    for (var i = 0; i < 2; i = i + 1) {
+        for (var j = 0; j < 2; j = j + 1) {
+            for (var k = 0; k < 2; k = k + 1) { m = m + 1; }
+        }
+    }
+    print(m);                                  // 8
+
+    /* an outer counter and an inner one that also accumulates */
+    var total = 0;
+    for (var x = 0; x < 4; x = x + 1) {
+        var inner = 0;
+        for (var y = 0; y < 3; y = y + 1) { inner = inner + y; }
+        total = total + inner + x;
+    }
+    print(total);                              // 3+4+5+6 = 18
+
+    /* a nested while inside a for, with a local live across both */
+    var acc = 0;
+    for (var p = 0; p < 3; p = p + 1) {
+        var g = p * 2;
+        var w = 0;
+        while (w < g) { w = w + 1; acc = acc + 1; }
+    }
+    print(acc);                                // 0+2+4 = 6
+    return 0;
+}

@@ -9,6 +9,11 @@
 typedef enum {
     E_INT,
     E_BOOL,
+    E_NULL,   /* the null pointer literal; type is left unknown */
+    E_INTRINSIC, /* a built-in: abs/min/max/clamp/sqrt, resolved at parse time */
+    E_FNPTR,     /* &f: the address of a function, typed by its signature */
+    E_ICALL,     /* f(args) where f is a function pointer */
+    E_MPTR,      /* &obj.M: the address of a { code, receiver } binding cell */
     E_STRING,
     E_VAR,
     E_UNARY,
@@ -53,6 +58,7 @@ struct Expr {
     int vtable_index; /* E_VCALL: slot index into the receiver's vtable */
     TokenKind op;     /* E_UNARY, E_BINARY; base op for compound E_ASSIGN */
     int compound;     /* E_ASSIGN: nonzero for += -= *= /= %= */
+    int is_extern;    /* E_CALL to an `extern` function: symbol used verbatim */
     Expr *lhs;
     Expr *rhs;
     Expr **args;
@@ -69,6 +75,8 @@ typedef enum {
     S_WHILE,
     S_FOR,
     S_RETURN,
+    S_BREAK,
+    S_CONTINUE,
     S_BLOCK,
     S_FUNC,
     S_STRUCT,
@@ -113,6 +121,8 @@ struct Stmt {
     int nparams;
     int locals_bytes;        /* total bytes of the function's frame locals (params + locals) */
     int is_entry;            /* the program's entry function */
+    int is_extern;           /* declared `extern`: the symbol is C's, used verbatim */
+    int is_export;           /* declared `export`: keep the name, make it .globl */
     int is_ext;              /* extension method (first param is the receiver) */
     int is_generic_template; /* generic function placeholder: not emitted directly */
 

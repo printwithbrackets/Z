@@ -46,9 +46,14 @@ static int is_alpha(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 
 
 static int is_alnum(int c) { return is_alpha(c) || is_digit(c); }
 
+/* The file currently being lexed. Stamped onto every span so a diagnostic can
+ * name the file the token actually came from, which matters once a compilation
+ * unit spans several files through `import`. */
+static const char *g_lex_file = NULL;
+
 static Span span_at(int start, int len) {
     Span s;
-    s.file = NULL;
+    s.file = g_lex_file;
     s.start = start;
     s.len = len;
     s.line = 0;
@@ -69,14 +74,16 @@ typedef struct {
 static const Keyword KEYWORDS[] = {
     {"int", T_KW_INT},         {"bool", T_KW_BOOL},
     {"string", T_KW_STRING},   {"void", T_KW_VOID},
-    {"var", T_KW_VAR},         {"new", T_KW_NEW},
+    {"var", T_KW_VAR},         {"const", T_KW_CONST},
+    {"new", T_KW_NEW},
     {"struct", T_KW_STRUCT},   {"enum", T_KW_ENUM},
     {"match", T_KW_MATCH},     {"this", T_KW_THIS},
     {"if", T_KW_IF},           {"else", T_KW_ELSE},
     {"while", T_KW_WHILE},     {"for", T_KW_FOR},
     {"foreach", T_KW_FOREACH}, {"in", T_KW_IN},
-    {"return", T_KW_RETURN},   {"true", T_KW_TRUE},
-    {"false", T_KW_FALSE},     {"class", T_KW_CLASS},
+    {"return", T_KW_RETURN},   {"break", T_KW_BREAK},
+    {"continue", T_KW_CONTINUE},
+    {"true", T_KW_TRUE},      {"null", T_KW_NULL},      {"extern", T_KW_EXTERN},   {"export", T_KW_EXPORT},   {"fn", T_KW_FN},        {"method", T_KW_METHOD},        {"import", T_KW_IMPORT},    {"false", T_KW_FALSE},     {"class", T_KW_CLASS},
     {"virtual", T_KW_VIRTUAL}, {"override", T_KW_OVERRIDE},
 };
 
@@ -131,7 +138,9 @@ static void skip_trivia(Lexer *lx) {
 }
 
 /* Tokenizes the entire source into an arena array. */
-Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int *out_count) {
+Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings, int *out_count,
+                    const char *file) {
+    g_lex_file = file;
     Lexer lx;
     lx.src = src;
     lx.len = len;
@@ -312,12 +321,15 @@ Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int
         } else {
             /* Operators and punctuation, longest match first. */
             static const Op OPS[] = {
-                {"=>", T_FATARROW}, {"==", T_EQ},         {"!=", T_NE},       {"<=", T_LE},
+                {"=>", T_FATARROW}, {"->", T_ARROW}, {"==", T_EQ},         {"!=", T_NE},       {"<=", T_LE},
                 {">=", T_GE},       {"&&", T_AND},        {"||", T_OR},       {"+=", T_PLUS_EQ},
                 {"-=", T_MINUS_EQ}, {"*=", T_STAR_EQ},    {"/=", T_SLASH_EQ}, {"%=", T_PERCENT_EQ},
                 {"++", T_PLUSPLUS}, {"--", T_MINUSMINUS}, {"+", T_PLUS},      {"-", T_MINUS},
                 {"*", T_STAR},      {"/", T_SLASH},       {"%", T_PERCENT},   {"=", T_ASSIGN},
-                {"<", T_LT},        {">", T_GT},          {"!", T_NOT},       {"&", T_AMP},
+                {"<<=", T_SHL_EQ},  {">>=", T_SHR_EQ},  {"<<", T_SHL},     {">>", T_SHR},
+                {"&=", T_AMP_EQ},   {"|=", T_PIPE_EQ},  {"^=", T_CARET_EQ},        {"<", T_LT},        {">", T_GT},
+                {"!", T_NOT},       {"&", T_AMP},         {"|", T_PIPE},      {"^", T_CARET},
+                {"~", T_TILDE},
                 {"(", T_LPAREN},    {")", T_RPAREN},      {"{", T_LBRACE},    {"}", T_RBRACE},
                 {"[", T_LBRACKET},  {"]", T_RBRACKET},    {";", T_SEMI},      {",", T_COMMA},
                 {".", T_DOT},       {"?", T_QUESTION},    {":", T_COLON},
@@ -351,4 +363,10 @@ Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int
 
     *out_count = count;
     return toks;
+}
+
+Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int *out_count) {
+    Token *t = lex_all_file(arena, src, len, strings, out_count, NULL);
+    g_lex_file = NULL;
+    return t;
 }

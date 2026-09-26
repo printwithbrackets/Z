@@ -1,0 +1,2 @@
+struct S { int M(int a, int b, int c, int d, int e, int f, int g) { return a + g; } }
+int main() { var s = new S(); return 0; }

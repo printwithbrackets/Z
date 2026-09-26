@@ -1,0 +1,8 @@
+// The length is read from the array header, so a length only known at runtime
+// is still checked exactly.
+int main() {
+    var n = 4;
+    var a = new int[n];
+    print(a[n]);
+    return 0;
+}

@@ -1,0 +1,8 @@
+// Imports lib/math.z as well, so importing both this and math.z must not
+// define anything twice.
+import "math.z";
+
+struct Rect { int w; int h; }
+
+int area(Rect r) { return r.w * r.h; }
+int scaled_area(Rect r) { return triple(area(r)); }

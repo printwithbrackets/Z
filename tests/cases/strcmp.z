@@ -1,0 +1,38 @@
+// Strings support all six relational operators, ordered lexicographically.
+int main() {
+    print("hello" == "hello" ? 1 : 0);        // 1
+    print("hello" == "world" ? 1 : 0);        // 0
+    print("hello" != "world" ? 1 : 0);        // 1
+
+    var a = "apple";
+    var b = "banana";
+    print(a < b ? 1 : 0);                     // 1
+    print(b < a ? 1 : 0);                     // 0
+    print("abc" <= "abc" ? 1 : 0);            // 1
+    print("abc" < "abd" ? 1 : 0);             // 1
+    print("b" > "a" ? 1 : 0);                 // 1
+
+    /* prefix ordering: shorter sorts first, like C's strcmp */
+    print("ab" < "abc" ? 1 : 0);              // 1
+    print("abc" < "ab" ? 1 : 0);              // 0
+
+    /* case and digits order by byte value */
+    print("B" < "a" ? 1 : 0);                 // 1
+    print("a" < "b" ? 1 : 0);                 // 1
+    print("1" < "2" ? 1 : 0);                 // 1
+
+    var x = "z";
+    var y = "z";
+    print(x == y ? 1 : 0);                    // 1
+    print(x != y ? 1 : 0);                    // 0
+
+    /* usable directly as a condition, and in both operand positions */
+    if ("q" == "q") { print(99); }            // 99
+    if ("q" > "p") { print(98); }             // 98
+
+    /* a computed string, not just literals */
+    var s1 = "foo";
+    var s2 = "f" + "oo";
+    print(s1 == s2 ? 1 : 0);                  // 1
+    return 0;
+}

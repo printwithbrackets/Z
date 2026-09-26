@@ -1,0 +1,79 @@
+// Function pointers. `&f` takes a function's address, typed by its signature;
+// the type `fn(params) -> ret` appears wherever a type is expected. Calling
+// through a pointer checks the argument count and types just like a direct
+// call.
+int ident(int x) { return x; }
+int add1(int x) { return x + 1; }
+int add2(int x) { return x + 2; }
+int dbl(int x) { return x * 2; }
+int neg(int x) { return 0 - x; }
+int zero() { return 7; }
+string greet(string who) { return "hi " + who; }
+int fact(int n) { if (n < 2) { return 1; } return n * fact(n - 1); }
+
+struct P { int a; int b; }
+P mkpair(int a, int b) { var p = new P(a, b); return p; }
+
+struct Holder { fn(int) -> int f; int tag; }
+
+void apply_twice(fn(int) -> int f, int v) { print(f(f(v))); return; }
+int pick(int k, fn(int) -> int a, fn(int) -> int b) {
+    if (k == 0) { return a(10); }
+    return b(10);
+}
+int relay(fn(int) -> int g, int v) { return g(v); }
+
+int main() {
+    var a = &add1;
+    var b = &add2;
+    print(a(1)); print(b(1));               // 2 3
+
+    /* a pointer to a function is a value like any other */
+    print(a == b ? 1 : 0);                 // 0
+    print(a == a ? 1 : 0);                 // 1
+    print(a != b ? 1 : 0);                 // 1
+
+    /* passed and returned through parameters */
+    apply_twice(&dbl, 3);                  // 12
+    print(pick(0, &add1, &add2));          // 11
+    print(pick(1, &add1, &add2));          // 12
+    print(pick(1, &neg, &dbl));            // 20
+    print(relay(&ident, 1));               // 1
+
+    /* a no-argument function */
+    var z = &zero;
+    print(z());                            // 7
+
+    /* a non-int signature, including string */
+    var gs = &greet;
+    print(gs("bob"));                      // hi bob
+
+    /* recursion reached through the pointer */
+    var fa = &fact;
+    print(fa(5));                          // 120
+
+    /* a struct returned by value through the pointer */
+    var mp = &mkpair;
+    var pr = mp(3, 4);
+    print(pr.a + pr.b);                    // 7
+
+    /* an array of function pointers */
+    var fs = new fn(int) -> int[3];
+    fs[0] = &add1; fs[1] = &add2; fs[2] = &dbl;
+    var s = 0;
+    foreach (g in fs) { s = s + g(10); }
+    print(s);                              // 11 + 12 + 20 = 43
+    print(fs[0](1));                       // 2
+
+    /* a function pointer held in a struct field, called through the field */
+    var h = new Holder(&ident, 9);
+    print(h.f(3));                         // 3
+    print(h.tag);                          // 9
+    h.f = &dbl;
+    print(h.f(4));                         // 8
+
+    /* reassignment */
+    var g2 = &ident;
+    print(g2(2) + a(3));                   // 2 + 4 = 6
+    return 0;
+}

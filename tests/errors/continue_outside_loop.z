@@ -1,0 +1,2 @@
+int f() { continue; return 0; }
+int main() { return f(); }

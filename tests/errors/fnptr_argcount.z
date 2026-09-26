@@ -1,0 +1,2 @@
+int ident(int x) { return x; }
+int main() { var f = &ident; print(f(1, 2)); return 0; }
