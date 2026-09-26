@@ -34,6 +34,18 @@ Code is compiled with `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 ./z asm   hello.z          # print the generated x86-64 assembly
 ```
 
+## Editor support
+
+`vim/` holds Vim/Neovim runtime files: `syntax/z.vim` (highlighting, including
+`$"..."` interpolation holes), `ftplugin/z.vim` (comments, formatting and a
+brace/`match`-aware indent), `ftdetect/z.vim` (`*.z`) and `compiler/z.vim`, so
+`:make` builds the current file and puts compiler errors in the quickfix list.
+Point any plugin manager at that directory, e.g. with lazy.nvim:
+
+```lua
+{ dir = "/path/to/z/vim" }
+```
+
 ## Quick tour
 
 ```csharp
