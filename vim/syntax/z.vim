@@ -24,7 +24,7 @@ syn case match
 syn match zDelimiter "[][{}();,]"
 " Never use `\=` in this pattern: it is the optional atom, so it would match
 " the empty string and win at every column, eating the whole file.
-syn match zOperator "[-+*/%]=\|==\|!=\|<=\|>=\|=>\|&&\|||\|[-+*/%]\|++\|--\|!\|[<>=!&|?:]"
+syn match zOperator "<<=\|>>=\|[-+*/%&|^]=\|==\|!=\|<=\|>=\|=>\|->\|&&\|||\|<<\|>>\|++\|--\|[-+*/%&|^~]\|[<>=!?:]"
 
 " Literals and names {{{1
 syn match   zNumber   "\<\d\+\>"
@@ -67,15 +67,21 @@ syn region  zComment start="/\*" end="\*/" contains=zTodo,@Spell fold
 syn match   zComment "//.*$" contains=zTodo,@Spell
 
 " Highest priority: keywords {{{1
-syn keyword zType        int bool string void
-syn keyword zBoolean     true false
-syn keyword zStorageClass var
+" `fn`/`method` are type constructors -- `fn(int) -> int` reads as a type --
+" and must be keywords rather than the call rule below, which would otherwise
+" match `fn(` as a call. `null` sits with the other literals. `break`/`continue`
+" leave the current construct like `return` does. `const` declares storage the
+" way `var` does, and `extern`/`export` modify a declaration the way
+" `virtual`/`override` do.
+syn keyword zType        int bool string void fn method
+syn keyword zBoolean     true false null
+syn keyword zStorageClass var const
 syn keyword zConditional if else
 syn keyword zRepeat      while for foreach
 syn keyword zStatement   in match
-syn keyword zReturn      return
-syn keyword zModifier    virtual override
-syn keyword zKeyword     new struct class enum this
+syn keyword zReturn      return break continue
+syn keyword zModifier    virtual override extern export
+syn keyword zKeyword     new struct class enum this import
 
 syn sync minlines=50
 syn sync maxlines=200
