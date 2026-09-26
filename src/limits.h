@@ -1,5 +1,5 @@
-#ifndef VELA_LIMITS_H
-#define VELA_LIMITS_H
+#ifndef Z_LIMITS_H
+#define Z_LIMITS_H
 
 /* System V AMD64 passes integers in rdi, rsi, rdx, rcx, r8, r9 and the first
  * six floating registers. Everything past that has to spill to the stack,
@@ -23,4 +23,4 @@
     X("sin", 1)                                                                              \
     X("cos", 1)
 
-#endif /* VELA_LIMITS_H */
+#endif /* Z_LIMITS_H */

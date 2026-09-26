@@ -1,5 +1,5 @@
-#ifndef VELA_AST_H
-#define VELA_AST_H
+#ifndef Z_AST_H
+#define Z_AST_H
 
 #include "arena.h"
 #include "source.h"
@@ -131,4 +131,4 @@ struct Stmt {
     UnionDef *udef;
 };
 
-#endif /* VELA_AST_H */
+#endif /* Z_AST_H */

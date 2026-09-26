@@ -32,7 +32,7 @@ void *arena_alloc(Arena *arena, size_t size) {
         size_t block = need > ARENA_MIN_BLOCK ? need : ARENA_MIN_BLOCK;
         ArenaBlock *nb = malloc(sizeof *nb + header_size() + block);
         if (nb == NULL) {
-            fprintf(stderr, "vela: out of memory\n");
+            fprintf(stderr, "z: out of memory\n");
             exit(1);
         }
         nb->next = arena->head;
@@ -52,7 +52,7 @@ void *arena_alloc_array(Arena *arena, size_t count, size_t size) {
     if (count == 0 || size == 0)
         return NULL;
     if (count > SIZE_MAX / size) {
-        fprintf(stderr, "vela: allocation size overflow\n");
+        fprintf(stderr, "z: allocation size overflow\n");
         exit(1);
     }
     return arena_alloc(arena, count * size);

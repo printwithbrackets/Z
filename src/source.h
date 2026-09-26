@@ -1,5 +1,5 @@
-#ifndef VELA_SOURCE_H
-#define VELA_SOURCE_H
+#ifndef Z_SOURCE_H
+#define Z_SOURCE_H
 
 /* A location in a source file. `line` and `col` are 1-based for display;
  * `start` and `len` are byte offsets used to render the source excerpt. */
@@ -11,4 +11,4 @@ typedef struct {
     int len;
 } Span;
 
-#endif /* VELA_SOURCE_H */
+#endif /* Z_SOURCE_H */

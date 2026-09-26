@@ -118,7 +118,7 @@ The compiler is a classic multi-pass pipeline, each pass in its own module:
 | Types | `src/types.c` | pointer-based `Type` graph, sizes/alignment, struct defs |
 | Codegen | `src/codegen.c` | typed AST → x86-64 assembly (System V AMD64 ABI), lvalue/rvalue |
 | Driver | `src/main.c` | orchestrates passes, embeds + links the runtime, invokes `cc` |
-| Runtime | `runtime/vela_rt.c` | conservative mark-sweep GC + heap array alloc, string concat/itoa; embedded in the binary |
+| Runtime | `runtime/z_rt.c` | conservative mark-sweep GC + heap array alloc, string concat/itoa; embedded in the binary |
 | Types | `src/types.c` | pointer-based `Type` graph: scalars, pointers, arrays, structs, tagged unions, type params |
 | Arena | `src/arena.c` | bump allocator — all compiler memory freed in one call |
 | Diag | `src/diag.c` | `file:line:col: error: …` with a caret under the token |

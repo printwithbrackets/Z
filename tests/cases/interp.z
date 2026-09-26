@@ -1,4 +1,4 @@
-var name = "Vela";
+var name = "Z";
 var n = 3;
 print($"Hello, {name}!");
 print($"n={n}, n*n={n*n}");

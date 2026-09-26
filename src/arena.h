@@ -1,5 +1,5 @@
-#ifndef VELA_ARENA_H
-#define VELA_ARENA_H
+#ifndef Z_ARENA_H
+#define Z_ARENA_H
 
 #include <stddef.h>
 
@@ -34,4 +34,4 @@ void arena_free(Arena *arena);
 /* Total bytes currently held by the arena (diagnostics only). */
 size_t arena_bytes_used(const Arena *arena);
 
-#endif /* VELA_ARENA_H */
+#endif /* Z_ARENA_H */

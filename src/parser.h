@@ -1,5 +1,5 @@
-#ifndef VELA_PARSER_H
-#define VELA_PARSER_H
+#ifndef Z_PARSER_H
+#define Z_PARSER_H
 
 #include "arena.h"
 #include "ast.h"
@@ -12,4 +12,4 @@
  * non-zero diag_error_count(). */
 Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings);
 
-#endif /* VELA_PARSER_H */
+#endif /* Z_PARSER_H */

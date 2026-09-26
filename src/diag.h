@@ -1,5 +1,5 @@
-#ifndef VELA_DIAG_H
-#define VELA_DIAG_H
+#ifndef Z_DIAG_H
+#define Z_DIAG_H
 
 #include "source.h"
 
@@ -18,4 +18,4 @@ int diag_error_count(void);
  *         <caret>^ */
 void diag_error(Span span, const char *fmt, ...);
 
-#endif /* VELA_DIAG_H */
+#endif /* Z_DIAG_H */

@@ -1,5 +1,5 @@
-#ifndef VELA_TOKEN_H
-#define VELA_TOKEN_H
+#ifndef Z_TOKEN_H
+#define Z_TOKEN_H
 
 #include "source.h"
 
@@ -107,4 +107,4 @@ typedef struct {
 /* Human-readable token name, for error messages ("';'" vs "identifier"). */
 const char *token_kind_name(TokenKind kind);
 
-#endif /* VELA_TOKEN_H */
+#endif /* Z_TOKEN_H */

@@ -1,5 +1,5 @@
-#ifndef VELA_LEXER_H
-#define VELA_LEXER_H
+#ifndef Z_LEXER_H
+#define Z_LEXER_H
 
 #include "arena.h"
 #include "token.h"
@@ -28,4 +28,4 @@ Token *lex_all(Arena *arena, const char *src, int len, StringTable *strings, int
 Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings, int *out_count,
                     const char *file);
 
-#endif /* VELA_LEXER_H */
+#endif /* Z_LEXER_H */

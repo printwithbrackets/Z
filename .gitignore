@@ -2,9 +2,8 @@
 *.o
 *.d
 /z
-/vela
 /tests/run
-# Generated from runtime/vela_rt.c by the Makefile
+# Generated from runtime/z_rt.c by the Makefile
 /src/runtime_src.h
 
 # Compiler output

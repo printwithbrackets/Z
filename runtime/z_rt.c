@@ -1,9 +1,9 @@
-/* Vela runtime: a conservative mark-sweep tracing garbage collector plus the
+/* Z runtime: a conservative mark-sweep tracing garbage collector plus the
  * array/string helpers the compiler emits calls to.
  *
  * The collector is *conservative*: it scans the machine stack and the spilled
  * register set for words that look like pointers into the managed heap. This
- * means the compiler needs no shadow-stack bookkeeping — every live Vela
+ * means the compiler needs no shadow-stack bookkeeping — every live Z
  * pointer is, by construction, a machine word somewhere on the stack or in a
  * callee-saved register. It is linked into every compiled program. */
 #include <setjmp.h>
@@ -102,8 +102,8 @@ static void gc_collect(void) {
 
 /* Records the high-water mark of the C stack. The compiler calls this at
  * program entry (in the generated entry function) so the conservative root
- * scan covers every live Vela frame, not just the deepest allocation site. */
-void vela_gc_init(void) {
+ * scan covers every live Z frame, not just the deepest allocation site. */
+void z_gc_init(void) {
     char probe;
     gc_stack_base = &probe;
 }
@@ -119,7 +119,7 @@ static void *gc_alloc(size_t size) {
         gc_collect();
     GcBlock *b = (GcBlock *)malloc(sizeof(GcBlock) + size);
     if (b == NULL) {
-        fprintf(stderr, "vela: out of memory\n");
+        fprintf(stderr, "z: out of memory\n");
         exit(1);
     }
     b->size = size;
@@ -182,7 +182,7 @@ static void trig_cordic(long zq, long *sinq, long *cosq) {
 
 /* `want_cos` selects cos over sin. One runtime entry serves both so the two
  * intrinsics share the argument reduction. */
-long vela_trig(long a, int want_cos) {
+long z_trig(long a, int want_cos) {
     long t = a % TRIG_TURN;
     if (t < 0)
         t += TRIG_TURN;
@@ -207,7 +207,7 @@ long vela_trig(long a, int want_cos) {
 /* Allocates the cell a bound method pointer refers to: the code address and
  * the receiver, side by side. GC-managed, so the receiver is traced and stays
  * alive for as long as the pointer does. */
-void *vela_newbinding(void *code, void *recv) {
+void *z_newbinding(void *code, void *recv) {
     void **cell = (void **)gc_alloc(2 * sizeof(void *));
     cell[0] = code;
     cell[1] = recv;
@@ -217,7 +217,7 @@ void *vela_newbinding(void *code, void *recv) {
 /* Floor of the integer square root. A doubling loop brackets the root and a
  * binary search closes in: exact for every n, and all integer arithmetic so
  * the result does not depend on the host's floating point. */
-long vela_isqrt(long n) {
+long z_isqrt(long n) {
     if (n < 2)
         return n;
     long hi = 1;
@@ -236,7 +236,7 @@ long vela_isqrt(long n) {
 
 /* Lexicographic three-way string compare, the ordering Z's <, <=, > and >=
  * use on strings. Backs out to C's strcmp, whose sign convention matches. */
-long vela_strcmp(const char *a, const char *b) {
+long z_strcmp(const char *a, const char *b) {
     if (a == NULL)
         a = "";
     if (b == NULL)
@@ -247,7 +247,7 @@ long vela_strcmp(const char *a, const char *b) {
 /* Reports an out-of-range array access and aborts. Only reachable from code
  * compiled with bounds checking enabled, so a Z program cannot scribble past
  * the end of a heap array. */
-void vela_bounds_fail(long idx, long len) {
+void z_bounds_fail(long idx, long len) {
     fflush(stdout);
     fprintf(stderr, "runtime error: array index %ld out of bounds (length %ld)\n", idx,
             len);
@@ -257,7 +257,7 @@ void vela_bounds_fail(long idx, long len) {
 
 /* Heap array with an 8-byte length header; the returned pointer points at the
  * first element and the element count lives at ptr[-8]. */
-void *vela_newarray(long count, long elemsize) {
+void *z_newarray(long count, long elemsize) {
     if (count < 0)
         count = 0;
     unsigned char *base =
@@ -267,7 +267,7 @@ void *vela_newarray(long count, long elemsize) {
 }
 
 /* Allocates a zero-initialized class object of `size` bytes (GC-managed). */
-void *vela_newobj(long size) {
+void *z_newobj(long size) {
     if (size < 0)
         size = 0;
     unsigned char *p = (unsigned char *)gc_alloc((size_t)size);
@@ -276,7 +276,7 @@ void *vela_newobj(long size) {
     return p;
 }
 
-char *vela_concat(char *a, char *b) {
+char *z_concat(char *a, char *b) {
     size_t la = strlen(a);
     size_t lb = strlen(b);
     char *out = (char *)gc_alloc(la + lb + 1);
@@ -286,7 +286,7 @@ char *vela_concat(char *a, char *b) {
     return out;
 }
 
-char *vela_itoa(long v) {
+char *z_itoa(long v) {
     char buf[24];
     int n = 0;
     int neg = v < 0;
@@ -307,4 +307,4 @@ char *vela_itoa(long v) {
 }
 
 /* Explicit collection hook (the collector also runs automatically on growth). */
-void vela_gc(void) { gc_collect(); }
+void z_gc(void) { gc_collect(); }

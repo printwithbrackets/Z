@@ -14,7 +14,7 @@ typedef struct {
 } Buf;
 
 static void die_oom(void) {
-    fprintf(stderr, "vela: out of memory building assembly\n");
+    fprintf(stderr, "z: out of memory building assembly\n");
     exit(1);
 }
 
@@ -691,7 +691,7 @@ static void gen_addr(CG *cg, Expr *e) {
         gen_expr(cg, e->lhs); /* base pointer */
         store_temp(cg, t);
         gen_expr(cg, e->rhs); /* index */
-        /* Arrays in Z are always heap allocations from vela_newarray, so a
+        /* Arrays in Z are always heap allocations from z_newarray, so a
          * value of array type always has a valid length header at ptr[-8] and
          * the index can be range-checked. A TK_PTR index has no header, so
          * there is nothing to check against and it is left alone. */
@@ -708,7 +708,7 @@ static void gen_addr(CG *cg, Expr *e) {
             buf_printf(cg->out, "  jmp .L%d\n", lok);
             buf_printf(cg->out, ".L%d:\n", lbad);
             buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, rcx\n");
-            buf_printf(cg->out, "  call vela_bounds_fail\n");
+            buf_printf(cg->out, "  call z_bounds_fail\n");
             buf_printf(cg->out, ".L%d:\n", lok);
             cg->temp_top = ti;
         }
@@ -893,7 +893,7 @@ static void gen_mptr(CG *cg, Expr *e) {
     } else {
         buf_printf(cg->out, "  lea rdi, [rip + %s]\n", z_sym(cg, e->name));
     }
-    buf_printf(cg->out, "  call vela_newbinding\n");
+    buf_printf(cg->out, "  call z_newbinding\n");
     cg->temp_top = t;
 }
 
@@ -1084,13 +1084,13 @@ static void gen_accum(CG *cg, Expr *e, const char *reg) {
 static void gen_intrinsic(CG *cg, Expr *e) {
     if (strcmp(e->name, "sin") == 0 || strcmp(e->name, "cos") == 0) {
         gen_expr(cg, e->args[0]);
-        buf_printf(cg->out, "  mov rdi, rax\n  mov esi, %d\n  call vela_trig\n",
+        buf_printf(cg->out, "  mov rdi, rax\n  mov esi, %d\n  call z_trig\n",
                    e->name[0] == 'c' ? 1 : 0);
         return;
     }
     if (strcmp(e->name, "sqrt") == 0) {
         gen_expr(cg, e->args[0]);
-        buf_printf(cg->out, "  mov rdi, rax\n  call vela_isqrt\n");
+        buf_printf(cg->out, "  mov rdi, rax\n  call z_isqrt\n");
         return;
     }
     if (strcmp(e->name, "abs") == 0) {
@@ -1224,7 +1224,7 @@ static void gen_expr(CG *cg, Expr *e) {
     case E_NEW: {
         int esz = type_size(e->type->base);
         gen_expr(cg, e->lhs); /* count */
-        buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, %d\n  call vela_newarray\n", esz);
+        buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, %d\n  call z_newarray\n", esz);
         break;
     }
     case E_UNIONLIT: {
@@ -1344,13 +1344,13 @@ static void gen_expr(CG *cg, Expr *e) {
         }
         if (e->op == T_PLUS && is_kind(e->type, TK_STRING)) {
             /* Concatenation. Each operand is materialized as a string (int
-             * operands go through vela_itoa, bools become "true"/"false") then
-             * vela_concat(a, b). */
+             * operands go through z_itoa, bools become "true"/"false") then
+             * z_concat(a, b). */
             int t0 = temp_alloc(cg);
             int t1 = temp_alloc(cg);
             gen_expr(cg, e->lhs);
             if (is_kind(e->lhs->type, TK_INT)) {
-                buf_printf(cg->out, "  mov rdi, rax\n  call vela_itoa\n");
+                buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->lhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
                            "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
@@ -1359,7 +1359,7 @@ static void gen_expr(CG *cg, Expr *e) {
             store_temp(cg, t0);
             gen_expr(cg, e->rhs);
             if (is_kind(e->rhs->type, TK_INT)) {
-                buf_printf(cg->out, "  mov rdi, rax\n  call vela_itoa\n");
+                buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->rhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
                            "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
@@ -1368,10 +1368,10 @@ static void gen_expr(CG *cg, Expr *e) {
             store_temp(cg, t1);
             load_temp(cg, t0, "rdi");
             load_temp(cg, t1, "rsi");
-            buf_printf(cg->out, "  call vela_concat\n");
+            buf_printf(cg->out, "  call z_concat\n");
             cg->temp_top = t0;
         } else if (is_kind(e->lhs->type, TK_STRING) && is_cmp_op(e->op)) {
-            /* String ordering. vela_strcmp gives a three-way result, which the
+            /* String ordering. z_strcmp gives a three-way result, which the
              * relational operator then reduces to a bool. */
             int t0 = temp_alloc(cg);
             int t1 = temp_alloc(cg);
@@ -1381,7 +1381,7 @@ static void gen_expr(CG *cg, Expr *e) {
             store_temp(cg, t1);
             load_temp(cg, t0, "rdi");
             load_temp(cg, t1, "rsi");
-            buf_printf(cg->out, "  call vela_strcmp\n");
+            buf_printf(cg->out, "  call z_strcmp\n");
             buf_printf(cg->out, "  mov r11, rax\n");
             emit_cmp_zero(cg, e->op);
             cg->temp_top = t0;
@@ -1519,7 +1519,7 @@ static void gen_expr(CG *cg, Expr *e) {
         StructDef *sd = e->type->base->sdef;
         int size = type_size(e->type->base);
         int ot = temp_alloc(cg);
-        buf_printf(cg->out, "  mov rdi, %d\n  call vela_newobj\n", size);
+        buf_printf(cg->out, "  mov rdi, %d\n  call z_newobj\n", size);
         store_temp(cg, ot);
         load_temp(cg, ot, "r11");
         buf_printf(cg->out, "  lea rdx, [rip + .Lvt_%s]\n", sd->name);
@@ -1839,7 +1839,7 @@ static int align16(int n) { return (n + 15) & ~15; }
  * no diagnostic from the assembler or the linker -- the program just jumped
  * into the weeds. `short` and `offset` are outright directives and failed to
  * assemble. A prefix also keeps a Z function from colliding with a libc symbol
- * or one of the runtime's own vela_* helpers.
+ * or one of the runtime's own z_* helpers.
  *
  * The separator is `$`, which the assembler accepts in a symbol but which
  * cannot appear in a Z identifier. That makes the collision impossible rather
@@ -1868,7 +1868,7 @@ static void emit_function(CG *cg, Stmt *fn) {
     /* The synthesized entry keeps its runtime-style name; an `export`ed
      * function keeps the name as written so C can find it; everything else the
      * user writes is mangled into the Z namespace. */
-    const char *sym = fn->is_entry ? "vela_main"
+    const char *sym = fn->is_entry ? "z_main"
                                    : (fn->is_export ? fn->fname : z_sym(cg, fn->fname));
     cg->cur_locals_bytes = fn->locals_bytes;
     /* Struct-returning functions store the caller's buffer pointer in the
@@ -2010,13 +2010,13 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
         }
     }
 
-    /* The C runtime calls main(); our entry point is renamed vela_main so it
+    /* The C runtime calls main(); our entry point is renamed z_main so it
      * never collides with the user's own `main`. The `push rbp` realigns the
      * stack for the ABI. */
     if (entry != NULL) {
         /* Initialize the GC's stack base at the top of the stack, then enter. */
         buf_puts(&out, "  .globl main\nmain:\n  push rbp\n  mov rbp, rsp\n");
-        buf_puts(&out, "  call vela_gc_init\n  call vela_main\n");
+        buf_puts(&out, "  call z_gc_init\n  call z_main\n");
         if (!is_kind(entry->ret_type, TK_INT))
             buf_puts(&out, "  xor eax, eax\n");
         buf_puts(&out, "  pop rbp\n  ret\n");

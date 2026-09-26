@@ -12,7 +12,7 @@ const int NEG = -7;
 const int WRAPPED = 1 << 40;
 const bool ON = true;
 const bool OFF = false;
-const string NAME = "vela";
+const string NAME = "z";
 const int F_ALIVE = 1;
 const int F_ELITE = 4;
 
@@ -34,7 +34,7 @@ int main() {
     print(WRAPPED);    // 1099511627776
     print(ON);         // true
     print(OFF);        // false
-    print(NAME);       // vela
+    print(NAME);       // z
     print(scaled(2));  // 250
 
     print(describe(F_ALIVE));                    // 1

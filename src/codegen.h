@@ -1,5 +1,5 @@
-#ifndef VELA_CODEGEN_H
-#define VELA_CODEGEN_H
+#ifndef Z_CODEGEN_H
+#define Z_CODEGEN_H
 
 #include "arena.h"
 #include "ast.h"
@@ -19,4 +19,4 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
                         const CodegenOptions *opts);
 char *codegen_emit(Arena *arena, Stmt *program, StringTable *strings);
 
-#endif /* VELA_CODEGEN_H */
+#endif /* Z_CODEGEN_H */

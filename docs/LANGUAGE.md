@@ -365,8 +365,8 @@ The type checker reports, with source spans and carets:
 ## Runtime & GC
 
 A small C runtime (embedded in the compiler, linked into every program) provides
-`vela_newarray` (heap arrays with a length header), `vela_concat`, and
-`vela_itoa`. All heap allocation goes through a **conservative mark-sweep
+`z_newarray` (heap arrays with a length header), `z_concat`, and
+`z_itoa`. All heap allocation goes through a **conservative mark-sweep
 garbage collector**: it scans the C stack and spilled registers for words that
 point into the managed heap, marks reachable objects transitively, and frees
 the rest. Collection runs automatically when the heap grows past a threshold

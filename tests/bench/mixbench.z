@@ -1,5 +1,5 @@
 // Loop-carried dependency: sum = sum*31 + i, no closed form, resists
-// vectorization. Both vela and C must actually execute the loop.
+// vectorization. Both z and C must actually execute the loop.
 int main() {
     var sum = 1; var i = 0;
     while (i < 10000000) { sum = (sum * 31 + i) % 1000000007; i = i + 1; }

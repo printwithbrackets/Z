@@ -1,5 +1,5 @@
-#ifndef VELA_TYPES_H
-#define VELA_TYPES_H
+#ifndef Z_TYPES_H
+#define Z_TYPES_H
 
 #include "arena.h"
 
@@ -182,4 +182,4 @@ int type_is_scalar(Type *t);               /* 8-byte value that fits in rax */
 /* Renders a type for diagnostics, e.g. "int*", "int[]", "Point". */
 const char *type_name(TypeCtx *ctx, Type *t);
 
-#endif /* VELA_TYPES_H */
+#endif /* Z_TYPES_H */

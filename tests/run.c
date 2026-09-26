@@ -1,4 +1,4 @@
-/* Golden + diagnostic test runner for the Vela compiler.
+/* Golden + diagnostic test runner for the Z compiler.
  *
  * Each tests/cases/<name>.z is compiled and run; its stdout must match the
  * sibling <name>.expected byte for byte. Each tests/errors/<name>.z must fail
@@ -38,7 +38,7 @@ static int run_cmd_capture(const char *cmd, char *out, int cap) {
 
 int main(int argc, char **argv) {
     (void)argc;
-    const char *vela = argv[1];
+    const char *zc = argv[1];
     const char *case_dir = "tests/cases";
     const char *err_dir = "tests/errors";
     const char *rt_dir = "tests/runtime";
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/vela_test_bin 2>&1", vela, path);
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin 2>&1", zc, path);
         char build_err[1 << 16];
         int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
         if (rc != 0) {
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
             continue;
         }
         char actual[1 << 16];
-        int prc = run_cmd_capture("/tmp/vela_test_bin", actual, sizeof actual);
+        int prc = run_cmd_capture("/tmp/z_test_bin", actual, sizeof actual);
         (void)prc; /* the program's own exit code is not part of golden output */
         if (strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
         }
         /* Send the output somewhere outside the tree: without -o the compiler
          * writes an executable named after the test into the repo root. */
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/vela_test_bin 2>&1", vela, path);
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin 2>&1", zc, path);
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s --bounds 2>&1", vela, path);
+        snprintf(cmd, sizeof cmd, "./%s run %s --bounds 2>&1", zc, path);
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -209,7 +209,7 @@ int main(int argc, char **argv) {
             continue;
         }
         char link[4096];
-        snprintf(link, sizeof link, "./%s run %s %s 2>&1", vela, path, cmd);
+        snprintf(link, sizeof link, "./%s run %s %s 2>&1", zc, path, cmd);
         char actual[1 << 16];
         if (run_cmd_capture(link, actual, sizeof actual) != 0 ||
             strcmp(expected, actual) != 0) {
@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s 2>&1", vela, path);
+        snprintf(cmd, sizeof cmd, "./%s run %s 2>&1", zc, path);
         char actual[1 << 16];
         if (run_cmd_capture(cmd, actual, sizeof actual) != 0 ||
             strcmp(expected, actual) != 0) {
