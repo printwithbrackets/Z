@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
         "methods",  "props",      "ext",       "fatarrow", "opoverload",     "tern",
         "gc",       "enum_match", "constfold", "regalloc", "divmod",         "boolstr",
         "generics", "generics2",  "classes",   "classes2", "integration",
-        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib", "floats", "closures", "closures_toplevel", "nested_fn", "typed_locals", "local_types", "unroll", "closedform", "result", "interfaces",
+        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib", "floats", "closures", "closures_toplevel", "nested_fn", "typed_locals", "local_types", "unroll", "closedform", "inliner", "result", "interfaces",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);

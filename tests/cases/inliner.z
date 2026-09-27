@@ -1,0 +1,80 @@
+// Inlining, at every optimization level above -O0.
+//
+// A function is inlined either as an expression, when its body is a single
+// `return`, or spliced in as statements, when the body is longer and the result
+// is left in a hidden local. The two paths have separate plumbing and separate
+// ways of being wrong, so both are exercised here, along with the cases the pass
+// deliberately declines: a body that builds a closure names the frame it was
+// written in, and a closure cannot survive being spliced somewhere else.
+
+// --- the expression path: one `return`, no locals ---
+int twice(int x) { return x * 2; }
+int negate(int x) { return -x; }
+
+// --- the statement path: locals, several statements, more than one return ---
+int clamp(int v, int lo, int hi) {
+    var out = v;
+    if (v < lo) { out = lo; }
+    if (v > hi) { out = hi; }
+    return out;
+}
+
+// A body whose result is discarded, so the hidden local is written and never read.
+void bump(int* p) {
+    *p = *p + 1;
+    return;
+}
+
+// --- a local that is never read back, which is the one declaration the slot
+// --- remap has to claim for itself
+int declared_only(int x) {
+    var ignored = x + 1;
+    return x * 10;
+}
+
+// --- a method, where the receiver occupies the first parameter slot but not the
+// --- first written argument
+class Box {
+    int v;
+    Box(int a) { v = a; }
+    int get() { return v; }
+    int plus(int k) { return v + k; }
+    int scaled(int k) {
+        var t = v * k;
+        return t + 1;
+    }
+}
+
+int fib(int n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+int main() {
+    print(twice(21));                 // 42
+    print(negate(negate(7)));         // 7
+    print(twice(twice(twice(3))));    // 24
+
+    print(clamp(0, 1, 3));            // 1, under the low bound
+    print(clamp(5, 1, 3));            // 3, over the high bound
+    print(clamp(5, 1, 9));            // 5, inside
+    print(clamp(5, 6, 9));            // 6, on the low bound
+    print(declared_only(4));          // 40
+
+    var n = 41;
+    bump(&n);
+    print(n);                         // 42
+
+    var b = new Box(10);
+    print(b.plus(5));                 // 15
+    print(b.scaled(4));               // 41
+    b.v = 3;
+    print(b.get());                   // 3
+
+    // The inliner recurses into a call it has itself inlined, up to its depth
+    // limit and no further, so the answer must not depend on which side of that
+    // limit a given call lands.
+    print(fib(10));                   // 55
+    print(twice(fib(9)) + negate(1)); // 2 * 34 - 1 = 67
+    return 0;
+}

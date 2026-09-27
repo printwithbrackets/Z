@@ -109,6 +109,11 @@ typedef enum {
     S_FUNC,
     S_STRUCT,
     S_UNION,
+    /* End of an inlined function body: jump to the label its wrapper block
+     * carries. A `return` inside an inlined body becomes an assignment to the
+     * caller's hidden result local followed by one of these, which is what lets
+     * a function with several returns be inlined at all. */
+    S_LEAVE,
 } StmtKind;
 
 struct Stmt {
@@ -137,6 +142,11 @@ struct Stmt {
     /* S_BLOCK and the top-level program */
     Stmt **items;
     int nitems;
+    /* S_BLOCK: when nonzero, codegen emits this label after the block's items,
+     * and it is what an S_LEAVE inside the block jumps to. Zero on every block
+     * that is not an inlined body. */
+    int inl_label;
+
     /* LICM: loop-invariant subexpressions hoisted out of this loop, computed
      * once before the loop and read from a frame slot inside it. */
     int *hoist_slots;

@@ -144,6 +144,7 @@ typedef struct {
 
 /* How deep inlined bodies may nest. Shared with the parser, which enforces the
  * same limit, so the two agree on what the emitter can hold. */
+#define INLINE_MAX_DEPTH 4
 
 /* Innermost-loop-first stack of break/continue targets. The parser rejects
  * break/continue outside a loop, so the top entry is always the right one. */
@@ -167,6 +168,10 @@ typedef struct {
      * during the emit pass and written out at the end of the file. */
     ItabUse itabs[MAX_ITABS];
     int nitabs;
+    /* The label each enclosing inlined body ends at, innermost last. An
+     * S_LEAVE jumps to the top of this. */
+    int inl_label[INLINE_MAX_DEPTH + 2];
+    int inl_depth;
     int emitting_hoist;/* 1 while emitting a hoisted node's own value */
     Arena *arena;      /* for interned assembly symbol names */
     int temp_top;         /* current temporary high-water during emit */
@@ -889,6 +894,8 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
         return;
     int cur = (*idx)++;
     switch (s->kind) {
+    case S_LEAVE:
+        return; /* a jump: no definition, no use */
     case S_VAR:
         if (s->init != NULL)
             walk_alloc_expr(cg, s->init, cur);
@@ -3150,6 +3157,16 @@ static void gen_stmt(CG *cg, Stmt *s) {
      * the instructions to the line the user wrote them on. */
     dbg_loc(cg, s->span);
     switch (s->kind) {
+    case S_LEAVE:
+        /* End of an inlined body. The label is whatever block encloses it, found
+         * through the inlining stack, so a `return` from several levels of
+         * nesting inside the copy still lands at the right place. */
+        if (cg->inl_depth > 0) {
+            int lbl = cg->inl_label[cg->inl_depth - 1];
+            if (lbl > 0)
+                buf_printf(cg->out, "  jmp .L%d\n", lbl);
+        }
+        break;
     case S_VAR:
         if (s->init != NULL) {
             LocalInfo *li = s->slot > 0 ? li_lookup(cg, s->slot) : NULL;
@@ -3265,6 +3282,8 @@ static void gen_stmt(CG *cg, Stmt *s) {
         /* A block that wraps an inlined body carries the label its `return`s
          * jump to, emitted after the last item so reaching the end of the body
          * and returning from it are the same thing. */
+        if (s->inl_label > 0)
+            buf_printf(cg->out, ".L%d:\n", s->inl_label);
         break;
     case S_FUNC:
     case S_STRUCT:
