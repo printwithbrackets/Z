@@ -10,8 +10,10 @@ pointers, heap arrays, structs with methods and properties, `for`/`foreach`,
 the C#-style sugar layer (string interpolation, expression-bodied members,
 struct methods/properties, extension methods, operator overloading, ternary),
 enums with exhaustive pattern matching, monomorphized generics, classes with
-vtables and inheritance, a tracing garbage collector for the heap, and a
-register-allocating, constant-folding, strength-reducing backend. See
+vtables and inheritance, a tracing garbage collector for the heap, IEEE-754
+`float`, closures, nested functions, interfaces, a standard library, warnings, DWARF
+debug info, and a register-allocating, constant-folding, strength-reducing
+backend. See
 [TUTORIAL.md](docs/TUTORIAL.md) to learn the language and [Roadmap](#roadmap) for
 what's next.
 
@@ -19,7 +21,8 @@ what's next.
 
 ```sh
 make          # build ./z
-make test     # golden + diagnostic test suite
+make test     # golden + diagnostic + warning test suite at -O1
+make test-all # the same suite at -O0, -O1, -O2 and -O3
 make clean
 ```
 
@@ -32,7 +35,13 @@ Code is compiled with `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 ./z run   hello.z          # compile to a temp binary and run it
 ./z build hello.z -o hello # compile to ./hello
 ./z asm   hello.z          # print the generated x86-64 assembly
+./z build hello.z -o hello -g   # ...with DWARF, for gdb
 ```
+
+Optimization levels are spelled like gcc's (`-O0`..`-O3`), and `-O2` turns on
+loop-invariant code motion. `--bounds` range-checks array indexing, `-w`
+silences warnings, and `-Werror` makes them fail the build. Anything the
+compiler does not recognize is passed through to the linker.
 
 ## Editor support
 
@@ -138,7 +147,23 @@ system assembler — we do not write an ELF encoder.
 - **M3.7 (done):** C interoperability — `extern` (implemented in C) and `export` (defined in Z, callable from C) in both directions, with linker arguments passed through. Every Z function is emitted under a private `z$` symbol, so it can no longer collide with a libc name, a runtime helper, or a word the assembler reserves.
 - **M3.8 (done):** first-class function pointers — `&f` yields a value typed by
   the function's signature, `fn(params) -> ret` names the type, and calls through
-  a pointer are argument-checked. Not closures: there are no nested functions.
+  a pointer are argument-checked.
+- **M3.11 (done):** **closures** — `(params) => expr` or `(params) => { ... }` as
+  an expression, capturing anything in scope where it is written. A closure is a
+  GC cell of `{ code, env }`; captured variables are boxed, so a closure that
+  outlives the frame it was written in keeps working and every closure over the
+  same variable sees each write. A function returning one declares
+  `closure(params) -> ret`, kept distinct from `fn` because the hidden
+  environment changes the calling convention. One nesting level: a lambda may
+  not be written inside another lambda.
+- **M3.12 (done):** **nested functions** — a function declared inside another
+  one, written where a statement goes. Hoisted out and emitted under a symbol
+  derived from the enclosing function, so the same name in two bodies does not
+  collide; recursive, since its signature is filed as it is read. It does *not*
+  capture: it has its own frame, and frame slots are numbered per function, so
+  reading a variable declared beside it would read the wrong slot. That rule now
+  applies at the top level too, where a function reading a top-level variable
+  used to compile and silently return 0.
 - **M3.9 (done):** modules — `import "path.z";` splices a file's declarations
   into the importing one, resolved relative to it, de-duplicated, cycle-checked,
   and with per-file diagnostics.
@@ -146,23 +171,157 @@ system assembler — we do not write an ELF encoder.
   value, a pointer to a GC cell holding `{ code, receiver }` so the receiver
   stays alive; a virtual method binds through the vtable. Scalar representation,
   so no aggregate copy machinery is involved.
-- **M4:** richer checker, `Result<T,E>` + `?`.
+- **M4 (done):** `Result<T,E>` + `?`. A `Result` is a two-variant union, so `match`,
+  payload binding and the exhaustiveness check all apply to it. `?` on a
+  `Result` inside a function returning a `Result` with the same error type yields
+  the `Ok` payload and returns the `Err` from the function, so a chain of
+  fallible calls reads as straight-line code. Both parameters must be one word,
+  which keeps every `Result` the same sixteen bytes and makes the propagated
+  error a copy rather than a conversion.
 - **M5 (done):** tracing GC — a conservative mark-sweep collector in the runtime (scans the C stack + spilled registers), triggered on heap growth; keeps live data, reclaims garbage.
 - **M6a (done):** enums / sum types (tagged unions) + **exhaustive** `match` with payload binding (compile error if a variant is unhandled).
 - **M6b (done):** generic functions via monomorphization (type inference, `T`/`T[]`/`T*` params, struct returns; no runtime generics). **Interfaces/traits** remain.
+- **Match arms shared one scope,** so two arms binding the same payload name collided. Each arm is now its own scope, and `_` is accepted as a binding that is deliberately not read.
+- **M6d (done):** **interfaces** — a named set of method signatures that a type
+  satisfies simply by having them, so a `struct` (which has no vtable) and a
+  `class` and a subclass of a different hierarchy can sit in one array and be
+  called through. An interface value is a pointer to a `{ itab, receiver }` cell,
+  so it passes, stores and compares like a pointer and `null` means something.
+  The itab is a static array of code pointers in the interface's declaration
+  order; a struct's entries point straight at its methods, a class's are
+  trampolines through the vtable so a subclass still calls the override.
 - **M6c (done):** opt-in `class` with vtables — inheritance, `virtual`/`override`, constructors + `base()`, `new C()` heap objects, polymorphic dynamic dispatch.
-- **M7 (in progress):** optimizations + register allocation. Done: compile-time
-  constant folding & propagation; a liveness-based **local register allocator**;
+- **M7 (done):** optimizations + register allocation. Done: compile-time
+  constant folding & propagation; **function inlining**; a liveness-based
+  **local register allocator**;
   leaf- and immediate-operand binary ops (no temp round-trip); direct
   register/immediate compares and branch-on-flags for conditions; in-place
-  compound assignment; and **constant division/modulo strength reduction**
+  compound assignment; **constant division/modulo strength reduction**
   (Granlund–Montgomery multiply-shift replacing 64-bit `idiv`, with a
-  compile-time self-check that falls back to `idiv` if a magic can't be proven).
-  Together these turn hot loops fully register-resident and ~2× faster end to
-  end, and beat `gcc -O0` on modulo-heavy code. Each `for` phase is a separate
-  liveness position, so a loop counter can no longer share a register with a
-  local declared in its body. Remaining: loop-invariant code motion,
-  three-address-code in-place evaluation, loop unrolling.
+  compile-time self-check that falls back to `idiv` if a magic can't be proven);
+  and **loop-invariant code motion** at `-O2`. Together these turn hot loops
+  fully register-resident and ~2× faster end to end, and beat `gcc -O0` on
+  modulo-heavy code. Each `for` phase is a separate liveness position, so a loop
+  counter can no longer share a register with a local declared in its body.
+  `-O3` adds **loop unrolling**: a loop with a condition and a body of at most 24
+  statements is emitted four times over, testing the condition before each copy
+  so the body still runs exactly as many times as it did rolled. The last copy
+  branches back to the top and the rest fall through, so three-quarters of the
+  loop-back branches go and consecutive iterations sit together for the
+  prefetcher; each copy carries its own continuation label, so `continue` runs
+  the step of the copy it is in and `break` leaves the loop from any of them.
+  `mathbench` is ~3x faster at `-O3` than at `-O2`.
+  **Function inlining** runs from `-O1` up: a call to a same-file function is
+  replaced by its body, as an expression when the body is a single `return` and
+  as statements otherwise, following nested calls up to four levels deep. The
+  body's locals take slots in the caller's frame, so the callee's frame, its
+  argument setup and its call and return all go away. A call carrying an
+  argument that might act or cost something (`f().add(3)`, `1/den`) is left
+  alone, since substitution is textual and would repeat it. So is anything whose
+  meaning depends on the frame it was written in -- a body containing a closure
+  or a nested function, whose environment names that frame's slots -- along with
+  recursion, externs, aggregate parameters and results, and bodies over 24
+  statements.
+  A **counted loop whose body only accumulates loop-invariant amounts** is
+  solved rather than run: `while (i < 20000000) { sum = sum + 82; i = i + 1; }`
+  becomes `sum = sum + 82 * 20000000`. This is the limit of what LICM reaches on
+  its own -- it hoists the pieces, and this notices there is nothing left to run.
+  It runs as a parser-level tree rewrite, so the register allocator, the folder
+  and the strength reducer all see the finished statement and optimize it again.
+  The pattern is narrow on purpose (constant stride, constant bound, integer
+  accumulate only, no call or early exit), because a wrong rewrite is a wrong
+  answer rather than a missed speedup. `loopbench` goes from 24 ms to 4 ms, which
+  is within 1.3x of gcc -O2 on a loop both compilers delete entirely.
+  An operand that is *already* in a register is now named directly rather than
+  copied into a scratch register first, so `a + b` with both in registers is two
+  instructions instead of three. Naming the operand's own register is safe for
+  every operator including the shifts, and correct when both sides happen to be
+  the same register (`add rbx, rbx`).
+  Remaining: full three-address evaluation, which only shows up when an operand
+  is itself a call — that still needs a temp, because its value has to exist
+  before the operator can read it.
+- **M9 (done):** **`float`** — IEEE-754 binary64, in XMM registers. Literals
+  (`1.5`, `1e3`, `2E-2`), arithmetic, IEEE-correct comparison (a NaN is false
+  against everything, including itself), explicit casts, float parameters and
+  return values under the System V ABI, float fields, and C interop where Z's
+  `float` is C's `double`. `int` widens to `float` implicitly because that
+  conversion is lossless; the reverse is never implicit. Float locals stay in the
+  frame rather than joining the general-purpose register pool, which costs a
+  load and a store per access and buys not having to teach every optimizer pass
+  about a second register class.
+- **M8 (done):** developer experience — warnings (`unused-local`,
+  `shadowed-local`, `unreachable`) with `-w`/`-Werror`/`-Wno-<name>`; a standard
+  library (string and integer built-ins, type-checked like ordinary calls);
+  literals in every radix with `_` separators plus `\xNN`/`\uXXXX` escapes;
+  and DWARF debug info behind `-g`, so a debugger can break on a line, walk a
+  backtrace, and read parameters.
+
+### Known miscompiles found and fixed
+
+Recorded because each was invisible at the default optimization level, and
+`make test` only ran `-O1`:
+
+- **LICM hoisted expressions out of the loop that varied them.** The pass was
+  handed a loop's body but never its step, so an induction variable looked
+  invariant and `p * 2` was computed once, before the loop, and reused for every
+  iteration. `nested_loops` *hung* at `-O2` and was correct at `-O1`. The pass
+  now takes the step, and `make test-all` runs the whole suite at every level so
+  a pass that only runs at a higher level cannot hide again.
+- **`foreach` over a `T*` compiled and read unrelated memory.** The parser
+  accepted a pointer, the desugaring always read `.length`, and a pointer has no
+  length header — so the pointer's own address became the iteration count. It is
+  now a diagnostic.
+- **`\{` in an interpolated string was an error.** The lexer decoded the escape
+  to a bare brace, which the parser then read as a hole delimiter.
+- **A constructor or virtual method with a `float` parameter read the receiver's
+  address as a double.** Both are calls with a hidden first argument, so their
+  declared arguments arrive in the integer sequence — but the call site staged
+  every argument with `gen_expr`, which leaves a float in `xmm0` and saved `rax`
+  instead. The value came back as a denormal around `4.8e-315`. Float arguments
+  are now staged with `gen_float`; a plain call still uses the ABI's two
+  independent register sequences.
+- **A call with two or more `float` arguments passed them all in the same
+  register.** The argument assignment filled in a register *name* by pointing at
+  a `char[8]` that went out of scope at the end of the loop iteration, so every
+  float read back whichever name that stack slot happened to end up holding --
+  `f(1.5, 2.0)` passed both in `xmm1`, and `add3(1.5, 2.0, 2.5)` returned 7.5
+  instead of 6. Register names now come from a table, which is also how they
+  should have been written the first time.
+- **A virtual call called the receiver instead of the method.** The resolved
+  target has to survive the argument placement, which uses `r11` as its scratch,
+  so it is stashed in a frame temp and reloaded. The stash saved the *receiver*
+  rather than the address in `r11`, so every virtual call jumped into the object
+  and crashed -- and every class with a `virtual` method was broken.
+- **A union variant with a `float` payload stored the wrong register.** The
+  payload was written from `rax` after `gen_expr`, but a float is left in an XMM
+  register, so the variant carried whatever `rax` happened to hold and read back
+  as a denormal built out of an unrelated register. A variant with a struct
+  payload was wrong too: the binding was loaded as eight bytes rather than
+  given the payload's address.
+- **A type had to be declared before it was used.** The pre-scan that lets a
+  signature name a struct registered only its *name*; the fields and the size
+  were filled in by the real parser, in source order. So `new Pt(3, 4)` and
+  `p.x` in a function written above `struct Pt` read a struct with no fields.
+  The pre-scan now gives every struct, class and enum its full layout, and the
+  real parser starts the field list over when it arrives.
+- **A local could not be declared with a named type.** `P r = new P(3, 4);` was
+  unreachable: a statement beginning with an identifier was reported as an
+  unknown type *without a lookup*, so the one spelling a struct is used with was
+  the one spelling that did not work — while `int x = 5;`, a keyword, went
+  through a different path. `P* q = &r;` slipped past even that and was read as
+  an expression, a variable named `P`. A statement that begins with a type is now
+  resolved as a declaration, which also brought back `T r = a;` inside a generic
+  function.
+- **A function could read a variable declared outside it.** Frame slots are
+  numbered per function, so `var g = 5; int f() { return g; }` resolved `g` and
+  then read f's own frame: it compiled and printed 0. Name lookup now stops at a
+  function body's outermost scope, which is also what makes a nested function
+  non-capturing by construction.
+- **The ninth queued function replaced the first eight with garbage.**
+  `add_pending` grew its array by allocating a new block and never copying the
+  old contents, so a program with eight lambdas worked and one with nine crashed
+  the compiler rather than failing at the point of the bug. The generic
+  instantiation path shared it.
 
 ## Performance
 
@@ -182,13 +341,19 @@ strength reduction matters:
 
 | | time |
 |---|---|
-  | Z | ~95 ms |
-| `gcc -O2` | ~59 ms |
-| `gcc -O0` | ~108 ms |
+  | Z `-O2` | ~89 ms |
+| `gcc -O2` | ~54 ms |
+| `gcc -O0` | ~148 ms |
 
-Z now beats `gcc -O0` and is ~1.6× off `gcc -O2`; the residual gap is
-loop-invariant code motion, three-address-code in-place evaluation, and loop
-unrolling.
+Z beats `gcc -O0` by ~1.7x and is ~1.6x off `gcc -O2`. The loop is already fully
+register-resident and its hot loop body is 6 instructions; the residual gap is
+the strength-reduced modulo, which is a multiply-high-and-subtract rather than a
+divide, and the lack of an inliner.
+
+On `loopbench`, Z is at parity with gcc: both delete the loop entirely, Z in
+4 ms and gcc in 3 ms, neither of which executes the 20 million iterations. This loop is deliberately
+unfriendly to vectorization, so the comparison is like for like -- both compilers
+execute all ten million iterations.
 
 ## Design
 
@@ -197,4 +362,4 @@ rationale (focus, constraints, memory model) in the project docs.
 
 ## License
 
-MIT (add a LICENSE file to formalize).
+MIT. See [LICENSE](LICENSE).

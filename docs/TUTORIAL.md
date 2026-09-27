@@ -2,9 +2,9 @@
 
 Z is a small, statically-typed, C#-flavored language that compiles to native
 x86-64 machine code. It has a real type system, value types (structs),
-reference types (classes) with inheritance and dynamic dispatch, monomorphized
-generics, pattern matching, a tracing garbage collector, and a modern optimizing
-backend — with no runtime dependency beyond libc.
+reference types (classes) with inheritance and dynamic dispatch, interfaces,
+closures and nested functions, monomorphized generics, pattern matching, a tracing garbage
+collector, and a modern optimizing backend — with no runtime dependency beyond libc.
 
 This tutorial walks through the whole language. Every example is runnable and
 verified against the compiler in this repo.
@@ -56,20 +56,41 @@ Use `var` to let the type be inferred, or name the type explicitly:
 
 ```csharp
 var a = 42;          // int
-var b = 3.5;         // (not a thing — no floats; see Note below)
+var b = 3.5;         // (not a thing — there is no float type; see the note below)
 ```
 
-Z has no floating-point type yet. Here are valid declarations:
+Z has four types. Here are valid declarations:
 
 ```csharp
-var count = 10;        // int
-var ok = true;         // bool
-var name = "Zeta";     // string
-int explicit_int = 5;  // explicit type
+var count = 10;          // int
+var ok = true;           // bool
+var ratio = 0.5;         // float
+var name = "Zeta";       // string
+int explicit_int = 5;    // explicit type
 bool flag = false;
+float explicit = 2.5;
 ```
 
+`float` is IEEE-754 binary64 -- the same 8-byte format C calls `double`. It is
+named `float` here to match C#, not because it is 32 bits.
+
 Every `var` binding must be initialized where it is declared.
+
+The explicit form is not limited to the built-in types — a struct, union, or
+generic type parameter works there too, which is how you get a local of a type
+the compiler could not have inferred:
+
+```csharp
+struct P { int x; int y; }
+
+P r = new P(3, 4);      // a struct local
+P* q = &r;              // a pointer to one
+P copy = r;             // copies by value
+P[] rows = new P[2];    // an array of them
+```
+
+`P copy = r;` is a copy: setting `copy.x` leaves `r.x` alone. Use `P* q = &r;`
+when you want both names to mean the same thing.
 
 ### `const`
 
@@ -91,6 +112,78 @@ A const must be declared **before** it is used, the same way types must be. That
 is different from functions, whose signatures are all known before the body of
 anything is compiled, so a function may be called before it is written. Consts
 may sit at the top level next to `main`.
+
+---
+
+### Floats
+
+A `float` literal needs either a `.` or an exponent. A `.` only starts a
+fraction when a digit follows it, which is why `21.Twice()` below still means
+"call the extension method on 21":
+
+```csharp
+print(1.5);      // 1.5
+print(1e3);      // 1000
+print(2E-2);     // 0.02
+print(21.Twice());  // 42  -- the '.' belongs to the member access
+```
+
+Arithmetic is `+ - * /`. There is no `%` for a float, because a non-integer has
+no remainder, and none of the bitwise operators either.
+
+```csharp
+var x = 1.5;
+print(x * 2.0);      // 3
+print(x + 2);        // 3.5   an int operand widens, and the result is a float
+print("v = " + 1.5); // v = 1.5
+```
+
+**The one conversion Z does on its own** is `int` to `float`. Every `int` is
+exactly representable as a float, so nothing is lost. The other direction is
+never implicit, because it does lose something:
+
+```csharp
+var n = 0;
+n = 2.5;             // error: cannot assign 'float' to 'int' without losing
+                     // precision; write '(int)' if that is what you want
+print((int)3.9);     // 3   a cast truncates toward zero; it does not round
+print((int)-3.9);    // -3
+print((int)0.5);     // 0
+```
+
+### Floats follow IEEE-754, which surprises people
+
+Division by zero does not trap. It gives an infinity, because that is what
+floating-point division is specified to do:
+
+```csharp
+float recip(float x) { return 1.0 / x; }
+print(recip(0.0));   // inf
+print(recip(-0.0));  // -inf
+```
+
+And a NaN -- "not a number", which you can make with `0.0 / 0.0` -- compares
+**false against everything in every direction, including itself**:
+
+```csharp
+var nan = 0.0 / 0.0;
+print(nan == nan);   // false   ...it is not equal to itself
+print(nan != nan);   // true    ...so the two are "different"
+print(nan < 1.0);    // false
+print(nan > 1.0);    // false
+print(nan <= 1.0);   // false
+print(nan >= 1.0);   // false
+```
+
+The last four are the ones worth internalizing: a comparison against a NaN is
+never true, so `if (x != y)` is *not* a safe way to ask whether two floats are
+the same value. This is not a quirk of this compiler; it is IEEE-754, and every
+other language with floats behaves the same way.
+
+A float also prints with `%g`, so a whole-valued float looks like an integer:
+`print(100.0)` prints `100`, and `0.1 + 0.2` prints `0.3` rather than
+`0.30000000000000004`. Six significant digits, trading exact digits for
+readable ones.
 
 ---
 
@@ -150,8 +243,14 @@ flags ^= 4;      // clear bit 2
 print(flags);    // 0
 ```
 
-There are no hex or binary literals, and no octal; write the decimal value, or
-build it with shifts (`1 << 20`).
+Literals come in every radix, and `_` is a digit separator:
+
+```csharp
+print(0xff);            // 255
+print(0o755);           // 493   (octal)
+print(0b1010_0110);     // 166   (binary, grouped)
+print(1_000_000);       // 1000000
+```
 
 **Note on division:** division and modulo by a *constant* are strength-reduced
 by the compiler into a multiply–shift (much faster than a hardware divide), so
@@ -200,6 +299,48 @@ which is far more than a game needs and far better than a lookup table.
 A user function of the same name shadows a built-in, so you can define your own
 `min` if you prefer.
 
+### The string library
+
+Available without declaring anything, and type-checked like any other call:
+
+```csharp
+var s = "  Hello, World  ";
+print($"[{trim(s)}]");            // [Hello, World]
+print(len(s));                    // 16   bytes, and 0 for null
+print(upper(trim(s)));            // HELLO, WORLD
+print(char_at("abc", 1));         // 98   the byte, or -1 past the end
+print(sub("abcdef", 1, 3));       // bcd
+print(sub("abcdef", -2, 2));      // ef   a negative start counts from the end
+print(index_of("abcdef", "cd"));  // 2    or -1
+print(contains("abcdef", "zz"));  // false
+print(replace("a-b-c", "-", "="));// a=b=c
+print(repeat("ab", 3));           // ababab
+
+foreach (var part in split("a,b,c", ",")) {   // split returns a real string[]
+    print(part);
+}
+```
+
+A few things worth knowing. A `null` string reads as empty rather than
+crashing. `sub` clamps at both ends instead of trapping, and an out-of-range
+`char_at` is `-1` so a loop walking to the end can tell. Lengths are **bytes**,
+not characters — Z has no character type, so one character of UTF-8 may be
+several bytes, and `char_at` hands you each byte in turn. `upper`/`lower` are
+ASCII-only and leave bytes above 127 alone, because case-mapping a UTF-8
+continuation byte on its own would corrupt the sequence.
+
+### The integer library
+
+```csharp
+print(pow(2, 10));     // 1024
+print(gcd(12, 18));    // 6
+print(lcm(4, 6));      // 12
+```
+
+`exp`, `log` and `tan` are absent. They are worth having only for a `float`, and
+there is nothing to call them on yet -- which is also why `sqrt`/`sin`/`cos` above
+are the fixed-point integer versions rather than the real ones.
+
 ---
 
 ## 6. String interpolation and concatenation
@@ -218,6 +359,20 @@ print($"bool: {true}");            // bool: true
 ```
 
 Nested quotes inside an interpolation work: `print($"a {"b"} c");`.
+
+### Escapes, and literal braces
+
+Inside an interpolated string, a brace is either a hole or a character. To write
+the character, escape it — or spell it as a byte or a code point, which is also
+how you get a brace that would otherwise open a hole:
+
+```csharp
+print($"a\{b}c");              // a{b}c      a literal brace, nothing interpolated
+print($"\x7bnot a hole\x7d");    // {not a hole}
+```
+
+Outside an interpolated string a brace needs no escape, and `\{` is a mistake
+worth reporting.
 
 ### Comparing strings
 
@@ -431,8 +586,209 @@ reference to. And a method pointer cannot return a struct, since the receiver
 already occupies the register a struct result would need. A plain `fn` pointer
 returning a struct is fine; it is only the bound form that cannot.
 
-A function pointer is not a closure: it captures nothing. Z has no nested
-functions, so there is nothing for a closure to capture from.
+A function pointer is not a closure: it captures nothing. To capture, use a
+lambda.
+
+### Closures
+
+A lambda is written with `=>`. It is an expression, so it fits wherever an
+expression does, and it captures any variable in scope where it is written:
+
+```csharp
+var add = (int a, int b) => a + b;
+print(add(2, 3));            // 5
+```
+
+A one-expression body *is* the result. A block body must `return` on every path.
+The parentheses are required even with no parameters, so `() => 1` is a closure
+and `x => x` is not.
+
+A function that returns a lambda declares its result as `closure`, with the same
+spelling as `fn`:
+
+```csharp
+closure(int) -> int makeAdder(int n) {
+    return (int x) => x + n;
+}
+
+var plus10 = makeAdder(10);
+print(plus10(5));            // 15
+```
+
+`closure` and `fn` are separate types on purpose — a closure carries an
+environment, which changes how it is called — so assigning a lambda to an `int`,
+or declaring a lambda-returning function as `fn`, is an error rather than
+something that fails later.
+
+The point of capturing is that the closure outlives the frame it was written in:
+
+```csharp
+closure() -> int counter() {
+    var n = 0;
+    return () => { n = n + 1; return n; };
+}
+
+var c = counter();
+print(c());                  // 1
+print(c());                  // 2
+print(c());                  // 3
+```
+
+Writing to a captured variable writes to the closure's own copy, shared by every
+closure made from the same `n`; the enclosing frame is untouched. Captured
+variables are boxed for this reason, so the copies are the same cell.
+
+Capture is by reference for anything with fields, so a lambda over a struct or
+class reads and writes the real thing:
+
+```csharp
+struct P { int x; int y; }
+var p = new P(3, 4);
+var getX = () => p.x;
+print(getX());               // 3
+```
+
+There is one limit: a lambda may not be written inside another lambda. A
+function may define as many lambdas as it likes, and may return one.
+
+### Nested functions
+
+A function can also be declared inside another one, written where a statement
+goes. This is the named counterpart to a lambda — use it when the function does
+not need to capture, and a lambda when it does.
+
+```csharp
+int outer() {
+    int helper(int n) { return n + 1; }
+    int twice(int n) { return n * 2; }
+    return helper(twice(5));
+}
+print(outer());             // 11
+```
+
+It is hoisted out to the top level and emitted under a symbol derived from the
+enclosing function, so two functions that each declare `helper` do not collide.
+It can call itself, because its signature is filed as it is read:
+
+```csharp
+int fact(int n) {
+    if (n < 2) { return 1; }
+    return n * fact(n - 1);
+}
+print(fact(5));             // 120
+```
+
+Declare it before you call it. A nested function's scope runs to the end of the
+enclosing function, but nothing pre-scans a body, so a sibling declared further
+down is not yet known at the call.
+
+**A nested function cannot capture.** It has a frame of its own and frame slots
+are numbered per function, so naming a variable declared beside it would read
+whatever its own frame happened to hold. That is an error, not a wrong answer:
+
+```csharp
+int main() {
+    var k = 7;
+    int peek() { return k; }   // error: undefined variable 'k'
+    print(peek());
+    return 0;
+}
+```
+
+The same rule stops a top-level function from reading a top-level variable. When
+you want to capture, write a lambda — `int addK(int x) => x + k;` becomes
+`var addK = (int x) => x + k;`.
+
+### `Result` and `?`
+
+A call that can fail returns a `Result`: an `Ok` carrying a value, or an `Err`
+carrying an error. Because a `Result` is a two-variant union, `match` handles it
+and the exhaustiveness rule applies like any other.
+
+```csharp
+Result<int, string> parse(string s) {
+    if (s == "42") { return Ok(42); }
+    return Err("not a number: " + s);
+}
+
+print(match parse("42") { Ok(v) => v, Err(e) => 0 });   // 42
+print(match parse("x")  { Ok(_) => 0, Err(e) => 0 });  // 0
+```
+
+`_` is a binding that is deliberately not read, so an arm can ignore the payload
+it does not need. Each arm is its own scope, so both arms above may bind `e`.
+
+**`?` propagates the error.** On a `Result`, inside a function that returns a
+`Result` with the same error type, `expr?` hands you the `Ok` payload — and
+returns the `Err` from the function if that is what it turned out to be:
+
+```csharp
+Result<bool, string> positive(string s) {
+    var n = parse(s)?;     // an Err here leaves the function right here
+    return Ok(n > 0);
+}
+```
+
+Watch the two `Result`s: different `T`, same `E`. That is the whole trick. The
+error travels up untouched while the payload comes out, so a chain of calls that
+can each fail reads as straight-line code, and whoever cares about the error
+handles it once, at the end.
+
+`Ok(3)` cannot be written on its own — it does not say what the error type is. It
+takes that from where the value is going: a declared type, a `return`, or a
+parameter. Both sides of a `Result` must be one word (`int`, `bool`, `float`,
+`string`, or a pointer); a struct by value does not fit in one, and a pointer to
+it does.
+
+### Interfaces
+
+An interface is a named set of method signatures. A type satisfies one by having
+those methods — there is nothing to declare, because a struct has no vtable of
+its own to list them in.
+
+```csharp
+interface Shape {
+    int Area();
+    string Name();
+}
+
+struct Square { int side; int Area() { return side * side; } string Name() => "square"; }
+struct Rect   { int w; int h; int Area() { return w * h; } string Name() { return "rect"; } }
+```
+
+Assigning to an interface-typed place converts, and a call resolves to the
+interface's method rather than to anything the value happens to be:
+
+```csharp
+Shape a = new Square(5);
+print(a.Area());      // 25
+print(a.Name());      // square
+```
+
+That is the point: unrelated types in one collection. Structs, classes and
+subclasses of different hierarchies, all called the same way.
+
+```csharp
+var shapes = new Shape[2];
+shapes[0] = new Square(3);
+shapes[1] = new Circle(2);      // a class, in the same array
+for (var i = 0; i < 2; i = i + 1) { print(shapes[i].Name()); }
+```
+
+An interface value is a *pointer* to a two-word cell holding a method table and
+the receiver, so it behaves like a pointer everywhere: it can be `null`, and
+comparing it to `null` works. A struct is copied to the heap when it becomes an
+interface value, because the cell outlives the frame it was made in.
+
+A **class** must declare every method it offers to an interface `virtual` or
+`override`, since it is dispatched through its vtable; a struct has no such
+requirement. The method has to match the signature, not just the name, and the
+error says which went wrong.
+
+`&nestedFn` works and has the same `fn(params) -> ret` type as any other
+function, so a nested function can be passed around like a top-level one. A
+function name and a variable of the same name can coexist; they are different
+namespaces, as in C.
 
 ---
 
@@ -822,7 +1178,34 @@ int main() {
 
 ---
 
-## 17. Calling C from Z
+## 17. Debugging
+
+`z build prog.z -o prog -g` emits DWARF, and a debugger can use it directly:
+
+```sh
+z build prog.z -o prog -g
+gdb ./prog
+(gdb) break prog.z:12      # a line, not an address
+(gdb) break add            # or a function
+(gdb) run
+(gdb) print count          # a parameter
+(gdb) info locals
+(gdb) where                # a backtrace
+```
+
+The line table is exact, so breakpoints on a line work even though the code
+moved. Function names, parameters and their values are all there.
+
+Two honest limits. A local the compiler promoted to a register is reported as
+*optimized out* rather than given a value that would only sometimes be right —
+describing a variable that moves between a register and the stack properly needs
+location lists, which is more machinery than this earns. And a local is typed
+only if its type is one of Z's three scalars (`long`, boolean, `char *`);
+anything else shows up untyped rather than mistyped.
+
+---
+
+## 18. Calling C from Z
 
 Z can call C, and C can call Z. Both directions are declared in the Z source,
 and no assembly rewriting is needed.
@@ -890,40 +1273,62 @@ deliberately.
 
 ---
 
-## 18. Things to know
+## 19. Things to know
 
-- **No floats** — integers only (`int` is 64-bit signed). `sqrt`, `sin` and
-  `cos` are integer built-ins; trig uses a full turn of `1 << 30` and Q30
-  results.
-- **No hex literals.** Write decimal, or build the value with shifts (`1 << 20`).
+- **`float` is binary64**, the format C calls `double`. Division by zero gives an
+  infinity rather than trapping, and a NaN compares false against everything
+  including itself, so `if (x != y)` is not a safe "are these the same value?"
+  test. See section 3.
+- **`sqrt`, `sin` and `cos` are integer built-ins.** They are *not* the
+  floating-point functions of the same name: trig uses a full turn of
+  `1 << 30` and Q30 results, and `sqrt` is an exact integer root. For a real
+  square root, `sqrt` a float argument after a cast -- or use `x * 0.5` style
+  Newton steps, since there is no `exp`/`log`/`pow` for floats.
+- **Literals come in every radix.** `0xff`, `0o755`, `0b1010_0110`, and `_` as
+  a digit separator, so `1_000_000` is a million. A literal too large for `int`
+  is a compile error, not a silent wrap.
 - **Bitwise operators wrap** on overflow, matching C on a 64-bit `int`.
 - **Structs are values, classes are references.** Assigning or passing a struct
   copies it; a class variable holds a pointer to a heap object.
 - **`foreach` loop variables** must be `var x`, a typed name (`int x`), or a
-  bare identifier (`x`) — all infer the element type.
+  bare identifier (`x`) — all infer the element type. The collection must be an
+  array: a pointer has no length, so there is no bound to iterate to.
 - **Match-arm bindings** share one scope per `match`, so reuse distinct names
   across arms.
 - **Compile-time errors** (type errors, non-exhaustive `match`, undefined names)
   are reported with the file, line, column, and a caret.
-- **A function takes at most 6 parameters** (5 if it returns a struct, which
-  spends one on the result buffer). Exceeding it is a compile error rather than
-  silently wrong code.
+- **The compiler warns too.** An unused local, a shadowed one, or a statement
+  that can never run. Warnings are on by default and never fail a build; use
+  `-w` to silence them, `-Werror` to make them fail, and `-Wno-<name>` for one.
+- **A function takes at most 16 parameters**, or 15 if it returns a struct or
+  union. A method's list is capped the same way but one lower, at 15, because
+  the receiver is a parameter too. The argument registers run out well before
+  those numbers, and the surplus is passed on the stack. Exceeding one is a
+  compile error rather than silently wrong code.
 - **Array indexing is unchecked** unless you pass `--bounds`. See section 15.
 - **A `const` must be declared before use**, unlike a function.
 - **`break`/`continue` outside a loop** is a compile error.
 - **Structs cannot be returned by value across the C boundary.** See section 17.
 - **`import` splices, it does not isolate.** An imported name is visible
   everywhere, with no namespace to qualify it.
-- **Function pointers are not closures.** `&f` captures nothing, and Z has no
-  nested functions, so there is no closure type. A `method(...)` pointer binds a
-  receiver but still captures nothing.
+- **Three callable things, none interchangeable.** `&f` is a bare code address
+  and captures nothing. A lambda is a closure -- a `{ code, env }` cell -- and
+  captures by value the declarations its body names, so `var add = () => x + 1`
+  keeps working when `x` changes afterwards. A `method(...)` pointer is a
+  `{ code, receiver }` cell: it binds the receiver, and still captures nothing.
+  A closure that was written in another function's body cannot outlive that
+  body's frame, which is why the compiler declines to inline one.
+- **A small same-file function is inlined, not called**, from `-O1` up. It makes
+  no difference to what your program prints, and you should not write code around
+  it, but it is why a debugger may step you through a function you never called:
+  the body is there, and a `step` follows the code rather than the calls.
 - **`method(...)` and `fn(...)` are not interchangeable.** One holds a code
   address; the other holds a `{ code, receiver }` binding, and a call through it
   spends an extra argument register on the receiver.
 
 ---
 
-## 19. Where to go next
+## 20. Where to go next
 
 - `docs/LANGUAGE.md` — the full language specification / grammar.
 - `README.md` — project overview, architecture, performance, and roadmap.
