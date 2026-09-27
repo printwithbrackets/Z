@@ -22,9 +22,15 @@ void string_table_init(StringTable *table, Arena *arena) {
 }
 
 int string_intern(StringTable *table, const char *bytes, int len) {
+    /* Compared against the recorded length, not strlen of the stored copy. A
+     * literal may contain a zero byte -- that is the point of the string type --
+     * and for one of those strlen stops early, so "a" and "a\0bc" both measured 1
+     * and compared equal on their first byte: the two literals shared an id, and
+     * every use of the shorter one silently got the longer one's bytes and
+     * length. The stored length is the only length that means anything here. */
     for (int i = 0; i < table->count; i++) {
         char *s = table->items[i];
-        if ((int)strlen(s) == len && memcmp(s, bytes, (size_t)len) == 0)
+        if (table->lens[i] == len && memcmp(s, bytes, (size_t)len) == 0)
             return i;
     }
     if (table->count == table->cap) {
@@ -33,10 +39,22 @@ int string_intern(StringTable *table, const char *bytes, int len) {
         if (table->items != NULL)
             memcpy(nitems, table->items, (size_t)table->count * sizeof(char *));
         table->items = nitems;
+        /* The lengths move with the items. A fresh array here would leave every
+         * entry already interned reading as zero, and the header of every string
+         * literal in the program -- which is built from these -- would claim to
+         * be empty. */
+        int *nlens = arena_alloc_array(table->arena, (size_t)ncap, sizeof(int));
+        if (table->lens != NULL)
+            memcpy(nlens, table->lens, (size_t)table->count * sizeof(int));
+        table->lens = nlens;
         table->cap = ncap;
     }
+    /* arena_strndup NUL-terminates, so a literal -- which is a Z string with a
+     * header, and the bytes of a C string -- can be handed to either. */
     char *copy = arena_strndup(table->arena, bytes, (size_t)len);
-    table->items[table->count++] = copy;
+    table->items[table->count] = copy;
+    table->lens[table->count] = len;
+    table->count++;
     return table->count - 1;
 }
 
@@ -560,7 +578,10 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                 {"~", T_TILDE},
                 {"(", T_LPAREN},    {")", T_RPAREN},      {"{", T_LBRACE},    {"}", T_RBRACE},
                 {"[", T_LBRACKET},  {"]", T_RBRACKET},    {";", T_SEMI},      {",", T_COMMA},
-                {".", T_DOT},       {"?", T_QUESTION},    {":", T_COLON},
+                /* `..` is listed before `.` so the longest match wins: the loop
+                 * takes the first entry that matches, and a slice written `..`
+                 * would otherwise lex as two field accesses. */
+                {"..", T_DOTDOT},   {".", T_DOT},       {"?", T_QUESTION},    {":", T_COLON},
             };
             int matched = 0;
             for (size_t k = 0; k < sizeof OPS / sizeof(*OPS) && !matched; k++) {

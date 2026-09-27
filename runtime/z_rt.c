@@ -274,26 +274,125 @@ long z_isqrt(long n) {
     return lo;
 }
 
-/* Lexicographic three-way string compare, the ordering Z's <, <=, > and >=
- * use on strings. Backs out to C's strcmp, whose sign convention matches. */
-long z_strcmp(const char *a, const char *b) {
-    if (a == NULL)
-        a = "";
-    if (b == NULL)
-        b = "";
-    return strcmp(a, b);
+/* ---- the string representation ----
+ *
+ * A Z `string` is a pointer to a sixteen-byte header followed by the bytes:
+ *
+ *     +------------------+------------------+---------+----------+
+ *     | int64 len        | int64 cap        | bytes   | NUL      |
+ *     +------------------+------------------+---------+----------+
+ *     ^ the value                                                 ^ value+len
+ *
+ * The value the program holds points at the first byte, so a `string` is one
+ * word, travels in a register, and is a scalar everywhere a scalar is allowed.
+ *
+ * Why a header rather than a bare `char *`, and why not a two-word struct
+ * passed in two registers:
+ *
+ *   - A bare `char *` has no length, so `len(s)` is a scan, a string cannot hold
+ *     an embedded zero, and every comparison has to stop at one. The header
+ *     fixes all three.
+ *   - A two-word struct would be 16 bytes and would have to be classified,
+ *     copied, stored and returned by every path in the code generator --
+ *     including the ones that cross the C boundary, where Z's convention and the
+ *     System V one do not agree. A `string` that cannot cross the C boundary is
+ *     not a string in a language with C interoperability, and a language whose
+ *     string type needs a special case at every ABI is one that will get the
+ *     special case wrong somewhere. The header keeps `string` a scalar, so
+ *     `extern` and `export` keep meaning what they meant.
+ *
+ * The trailing NUL is maintained on every string even though nothing in Z needs
+ * it, and that is the point: it is what makes a Z string valid to hand to a C
+ * function taking `const char *` with no conversion and no copy. The C boundary
+ * still stops at an embedded zero, because C has no way to express the length --
+ * but that is a property of the boundary, not a bug in the string.
+ *
+ * `cap` is the allocated byte count, which is >= `len`. It is what makes a
+ * builder's append amortized: a buffer that has room takes the bytes where they
+ * are, and only reallocates when it is full. `cap` is also why `+` cannot grow
+ * in place -- see z_concat.
+ */
+typedef struct ZStrHdr {
+    long len;
+    long cap;
+} ZStrHdr;
+
+#define ZH(b) ((ZStrHdr *)((char *)(b) - sizeof(ZStrHdr)))
+
+/* The length in bytes. A NULL string is the empty string, so `len(null)` is 0
+ * rather than a crash -- the same reading every other function here takes. */
+static long zlen(const char *b) { return b != NULL ? ZH(b)->len : 0; }
+
+/* A string with room for `cap` bytes, length 0.
+ *
+ * Exported below, under the name the `str_buf_new` builtin lowers to: a
+ * StringBuilder in Z is a class holding one of these, and the growth policy
+ * belongs next to the allocation because a string is opaque bytes to Z -- there
+ * is no way to write past a string's length from Z, which is the one thing a
+ * builder needs and the one thing the type deliberately does not offer. */
+char *z_str_buf_new(long cap);
+
+static char *zstr_alloc_impl(long cap) {
+    if (cap < 0)
+        cap = 0;
+    char *p = (char *)gc_alloc(sizeof(ZStrHdr) + (size_t)cap + 1);
+    ZStrHdr *h = ZH(p);
+    h->len = 0;
+    h->cap = cap;
+    p[0] = '\0';
+    return p;
 }
 
-/* Reports an out-of-range array access and aborts. Only reachable from code
- * compiled with bounds checking enabled, so a Z program cannot scribble past
- * the end of a heap array. */
-void z_bounds_fail(long idx, long len) {
+/* A fresh string holding a copy of `count` bytes of `src`. */
+static char *zstr_copy(const char *src, size_t count) {
+    char *out = zstr_alloc_impl((long)count);
+    if (count > 0)
+        memcpy(out, src, count);
+    out[count] = '\0';
+    ZH(out)->len = (long)count;
+    return out;
+}
+
+/* Lexicographic three-way string compare, the ordering Z's <, <=, > and >=
+ * use on strings.
+ *
+ * By (length-limited bytes, then length), which is not the same as C's strcmp:
+ * strcmp stops at the first difference or first NUL, so it cannot order two
+ * strings that differ only after an embedded zero, and it reports "abc" and
+ * "abd" as different for the right reason but "ab" and "ab\0c" as equal for
+ * the wrong one. Comparing the shared prefix and falling back to the length is
+ * the ordering a reader means by "less than" when a string is a value with a
+ * length. */
+long z_strcmp(const char *a, const char *b) {
+    long la = zlen(a), lb = zlen(b);
+    long n = la < lb ? la : lb;
+    if (n > 0) {
+        int c = memcmp(a, b, (size_t)n);
+        if (c != 0)
+            return c;
+    }
+    if (la < lb)
+        return -1;
+    return la > lb ? 1 : 0;
+}
+
+/* Reports an out-of-range access and aborts. Only reachable from code compiled
+ * with bounds checking enabled, so a Z program cannot scribble past the end of a
+ * heap array -- and, since the string header carries a length, cannot read past
+ * the end of a string either.
+ *
+ * `what` names the kind, because "array index 9 out of bounds (length 5)" is a
+ * confusing way to be told that a string index was wrong. */
+static void bounds_fail(const char *what, long idx, long len) {
     fflush(stdout);
-    fprintf(stderr, "runtime error: array index %ld out of bounds (length %ld)\n", idx,
-            len);
+    fprintf(stderr, "runtime error: %s index %ld out of bounds (length %ld)\n", what, idx, len);
     fflush(stderr);
     abort();
 }
+
+void z_bounds_fail(long idx, long len) { bounds_fail("array", idx, len); }
+
+void z_str_bounds_fail(long idx, long len) { bounds_fail("string", idx, len); }
 
 /* Heap array with an 8-byte length header; the returned pointer points at the
  * first element and the element count lives at ptr[-8]. */
@@ -317,12 +416,75 @@ void *z_newobj(long size) {
 }
 
 char *z_concat(char *a, char *b) {
-    size_t la = strlen(a);
-    size_t lb = strlen(b);
-    char *out = (char *)gc_alloc(la + lb + 1);
-    memcpy(out, a, la);
-    memcpy(out + la, b, lb);
+    long la = zlen(a), lb = zlen(b);
+    char *out = zstr_alloc_impl(la + lb);
+    if (la > 0)
+        memcpy(out, a, (size_t)la);
+    if (lb > 0)
+        memcpy(out + la, b, (size_t)lb);
     out[la + lb] = '\0';
+    ZH(out)->len = la + lb;
+    return out;
+}
+
+/* Appends to a buffer the caller *owns*, growing it geometrically.
+ *
+ * This is the one place a string is written in place, and it is safe only
+ * because of who owns the buffer: a StringBuilder's, which nothing else can
+ * reach. `z_concat` deliberately does not do this. Growing in place there would
+ * make `s = s + "x"` write through to every other name bound to `s`, so a
+ * language whose structs copy and whose classes share would quietly gain a
+ * third set of semantics -- mutable strings that look like values. The cost is
+ * one copy per `+`, which is the price of `s` meaning one thing, and the answer
+ * to "appending in a loop is slow" is a builder rather than a lie.
+ *
+ * Geometric growth by 1.5x with a floor of 8 bytes: a doubling would be
+ * equivalent amortized and wastes up to half the buffer; the 1.5x copy is cheap
+ * and keeps a builder's memory closer to what it holds. */
+char *z_str_buf_new(long cap) { return zstr_alloc_impl(cap); }
+
+/* A copy of `s` with no spare capacity.
+ *
+ * Distinct from appending an empty string to a buffer, which is a no-op that
+ * hands the buffer straight back -- correct for a builder, which owns what it
+ * holds, and wrong for anything that publishes the result, because the buffer
+ * would still be the builder's to grow. `cap == len` is what makes the copy
+ * inert: the in-place append path can never pick it, so the copy cannot change
+ * under anyone who is holding it. */
+char *z_str_dup(const char *s) { return zstr_copy(s, (size_t)zlen(s)); }
+
+char *z_str_buf_append(char *buf, const char *s) {
+    long lb = zlen(s);
+    if (buf == NULL)
+        return zstr_copy(s, (size_t)lb);
+    ZStrHdr *h = ZH(buf);
+    if (h->cap - h->len < lb) {
+        long need = h->len + lb;
+        long cap = h->cap + h->cap / 2;
+        if (cap < need)
+            cap = need;
+        if (cap < 8)
+            cap = 8;
+        char *out = zstr_alloc_impl(cap);
+        memcpy(out, buf, (size_t)h->len);
+        ZH(out)->len = h->len;
+        buf = out;
+        h = ZH(buf);
+    }
+    memcpy(buf + h->len, s, (size_t)lb);
+    h->len += lb;
+    buf[h->len] = '\0';
+    return buf;
+}
+
+/* A one-byte string holding `b`, truncated to a byte. The counterpart of
+ * char_at: Z has no character type, so a byte is an int in an expression and a
+ * one-byte string when it has to go into a buffer. */
+char *z_char_str(long b) {
+    char *out = zstr_alloc_impl(1);
+    out[0] = (char)(b & 0xff);
+    out[1] = '\0';
+    ZH(out)->len = 1;
     return out;
 }
 
@@ -339,10 +501,11 @@ char *z_itoa(long v) {
     }
     if (neg)
         buf[n++] = '-';
-    char *out = (char *)gc_alloc((size_t)n + 1);
+    char *out = zstr_alloc_impl(n);
     for (int i = 0; i < n; i++)
         out[i] = buf[n - 1 - i];
     out[n] = '\0';
+    ZH(out)->len = n;
     return out;
 }
 
@@ -365,114 +528,162 @@ void z_gc(void) { gc_collect(); }
  * readable ones, and the same choice every language makes by default. */
 void z_print_f(double v) { printf("%g\n", v); }
 
-/* Formats a float as a string, with the same six significant digits `print`
- * uses, so `"x = " + 1.5` and `print(1.5)` never disagree about how a number
- * looks. */
-static char *z_strdup_gc(const char *src) {
-    size_t n = strlen(src) + 1;
-    char *out = (char *)gc_alloc(n);
-    memcpy(out, src, n);
-    return out;
-}
-
-char *z_ftoa(double v) {
-    char buf[40];
-    snprintf(buf, sizeof buf, "%g", v);
-    return z_strdup_gc(buf);
-}
-
 /* ---- string library ----
  *
- * Everything a Z string function needs, over the same NUL-terminated bytes the
- * rest of the runtime uses. Three rules hold throughout:
+ * Every function here takes a Z string -- a pointer to the bytes, with the
+ * length in the header -- and returns one. Four rules hold throughout:
  *
  *   - A NULL argument reads as the empty string, so `len(null)` is 0 rather than
- *     a crash. This matches z_strcmp, which already substitutes "".
+ *     a crash, and `contains(null, "x")` is false.
  *   - Every returned string is gc_alloc'd, so the collector owns it and the
  *     caller never frees. An intermediate stays reachable through a local while
  *     a later allocation can trigger a collection.
  *   - A length is measured in bytes, not characters. Z has no character type, so
- *     a multi-byte UTF-8 sequence is three bytes and char_at returns each one.
- *     Lengths are therefore byte offsets, which is what indexing already means.
- *
- * Out-of-range arguments clamp rather than trap: a substring request is a
- * question about a string, and the answer to "past the end" is the empty string
- * rather than a runtime error. The one exception is char_at, which returns -1 so
- * that a caller walking to the end can tell it happened.
+ *     a multi-byte UTF-8 sequence is three bytes, `s[0]` is its first byte, and
+ *     `s.length` counts three. That is the same rule indexing has always had;
+ *     what is new is that the length is stored rather than scanned for.
+ *   - Out-of-range arguments clamp rather than trap: a substring request is a
+ *     question about a string, and the answer to "past the end" is the empty
+ *     string rather than a runtime error. The one exception is char_at, which
+ *     returns -1 so that a caller walking to the end can tell it happened.
  */
-static const char *nn(const char *s) { return s ? s : ""; }
 
-/* Copies `count` bytes from `src` into a fresh GC string. */
-static char *z_alloc_copy(const char *src, size_t count) {
-    char *out = (char *)gc_alloc(count + 1);
-    memcpy(out, src, count);
-    out[count] = '\0';
-    return out;
+/* Prints a string. Length-aware, so a string containing a zero byte prints all
+ * of it -- which `puts` cannot do, since it stops at the first one. The compiler
+ * calls this rather than puts so the newline is written here too and the whole
+ * of `print` stays in one place. */
+void z_print_str(const char *s) {
+    long n = zlen(s);
+    if (n > 0)
+        fwrite(s, 1, (size_t)n, stdout);
+    fputc('\n', stdout);
 }
 
-long z_strlen(const char *s) { return (long)strlen(nn(s)); }
+long z_strlen(const char *s) { return zlen(s); }
 
 char *z_sub(const char *s, long start, long count) {
-    size_t n = strlen(nn(s));
+    long n = zlen(s);
     /* A negative start counts back from the end, so sub(s, -3, 3) is the last
      * three bytes. This is the one convenience worth having, because "the tail
      * of this" is otherwise the most common thing to get wrong. */
     if (start < 0)
-        start += (long)n;
+        start += n;
     if (start < 0)
         start = 0;
     if (count < 0)
         count = 0;
-    if ((size_t)start > n)
-        start = (long)n;
-    if ((size_t)(start + count) > n)
-        count = (long)n - start;
-    return z_alloc_copy(nn(s) + start, (size_t)count);
+    if (start > n)
+        start = n;
+    if (start + count > n)
+        count = n - start;
+    return zstr_copy(s + start, (size_t)count);
 }
 
-long z_index_of(const char *s, const char *needle) {
-    const char *found = strstr(nn(s), nn(needle));
-    return found ? (long)(found - nn(s)) : -1;
+/* The range `s[a..b]`, with the same clamping as sub: `b` may run past the end,
+ * a negative `a` counts from the end, and either end past the string gives the
+ * empty string. Half-open, so the length of the result is b - a and
+ * `s[0..len(s)]` is the whole string. */
+char *z_slice(const char *s, long a, long b) {
+    long n = zlen(s);
+    if (a < 0)
+        a += n;
+    if (b < 0)
+        b += n;
+    if (a < 0)
+        a = 0;
+    if (b > n)
+        b = n;
+    if (b < a)
+        b = a;
+    return zstr_copy(s + a, (size_t)(b - a));
 }
 
-long z_contains(const char *s, const char *needle) { return z_index_of(s, needle) >= 0; }
+/* The first index at which `needle` occurs in `hay`, or -1.
+ *
+ * Not strstr: that stops at a zero byte, and a needle that legitimately contains
+ * one is exactly the case the header exists to make expressible. A zero-length
+ * needle matches at 0, which is what `indexOf(s, "")` should say. */
+long z_index_of(const char *hay, const char *needle) {
+    long lh = zlen(hay), ln = zlen(needle);
+    if (ln == 0)
+        return 0;
+    if (ln > lh)
+        return -1;
+    long limit = lh - ln;
+    for (long i = 0; i <= limit; i++) {
+        if (memcmp(hay + i, needle, (size_t)ln) == 0)
+            return i;
+    }
+    return -1;
+}
+
+long z_contains(const char *hay, const char *needle) {
+    return z_index_of(hay, needle) >= 0;
+}
 
 long z_starts_with(const char *s, const char *prefix) {
-    const char *a = nn(s), *b = nn(prefix);
-    return strncmp(a, b, strlen(b)) == 0;
+    long ls = zlen(s), lp = zlen(prefix);
+    return lp <= ls && memcmp(s, prefix, (size_t)lp) == 0;
 }
 
 long z_ends_with(const char *s, const char *suffix) {
-    const char *a = nn(s), *b = nn(suffix);
-    size_t la = strlen(a), lb = strlen(b);
-    /* An empty suffix matches everything, including the empty string. */
-    return la >= lb && memcmp(a + (la - lb), b, lb) == 0;
+    long ls = zlen(s), lx = zlen(suffix);
+    return lx <= ls && memcmp(s + (ls - lx), suffix, (size_t)lx) == 0;
 }
 
 /* The byte at `i`, or -1 past the end. */
 long z_char_at(const char *s, long i) {
-    const char *a = nn(s);
-    if (i < 0 || (size_t)i >= strlen(a))
+    if (i < 0 || i >= zlen(s))
         return -1;
     /* Zero-extended, so a byte above 127 comes back as 128..255 rather than a
      * negative value. */
-    return (long)(unsigned char)a[i];
+    return (long)(unsigned char)s[i];
+}
+
+/* The index of the first byte equal to `b`, or -1. */
+long z_index_of_byte(const char *s, long b) {
+    long n = zlen(s);
+    for (long i = 0; i < n; i++)
+        if ((long)(unsigned char)s[i] == b)
+            return i;
+    return -1;
+}
+
+/* The index just past the last byte equal to `b`, or -1 if there is none. */
+long z_last_index_of_byte(const char *s, long b) {
+    long n = zlen(s);
+    for (long i = n - 1; i >= 0; i--)
+        if ((long)(unsigned char)s[i] == b)
+            return i + 1;
+    return -1;
+}
+
+static int is_space_byte(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
 char *z_trim(const char *s) {
-    const char *a = nn(s);
-    const char *start = a;
-    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r' || *start == '\v' ||
-           *start == '\f')
-        start++;
-    size_t n = strlen(start);
-    while (n > 0) {
-        char c = start[n - 1];
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\v' && c != '\f')
-            break;
-        n--;
-    }
-    return z_alloc_copy(start, n);
+    long n = zlen(s);
+    long a = 0, b = n;
+    while (a < b && is_space_byte(s[a]))
+        a++;
+    while (b > a && is_space_byte(s[b - 1]))
+        b--;
+    return zstr_copy(s + a, (size_t)(b - a));
+}
+
+char *z_trim_start(const char *s) {
+    long n = zlen(s), a = 0;
+    while (a < n && is_space_byte(s[a]))
+        a++;
+    return zstr_copy(s + a, (size_t)(n - a));
+}
+
+char *z_trim_end(const char *s) {
+    long n = zlen(s), b = n;
+    while (b > 0 && is_space_byte(s[b - 1]))
+        b--;
+    return zstr_copy(s, (size_t)b);
 }
 
 /* ASCII case mapping, deliberately not locale-aware: a program's output must not
@@ -480,76 +691,115 @@ char *z_trim(const char *s) {
  * UTF-8 they are continuation bytes and case-mapping them one at a time would
  * corrupt the sequence. */
 char *z_upper(const char *s) {
-    const char *a = nn(s);
-    size_t n = strlen(a);
-    char *out = (char *)gc_alloc(n + 1);
-    for (size_t i = 0; i < n; i++)
-        out[i] = (a[i] >= 'a' && a[i] <= 'z') ? (char)(a[i] - 32) : a[i];
-    out[n] = '\0';
+    long n = zlen(s);
+    char *out = zstr_copy(s, (size_t)n);
+    for (long i = 0; i < n; i++)
+        if (out[i] >= 'a' && out[i] <= 'z')
+            out[i] = (char)(out[i] - 32);
     return out;
 }
 
 char *z_lower(const char *s) {
-    const char *a = nn(s);
-    size_t n = strlen(a);
-    char *out = (char *)gc_alloc(n + 1);
-    for (size_t i = 0; i < n; i++)
-        out[i] = (a[i] >= 'A' && a[i] <= 'Z') ? (char)(a[i] + 32) : a[i];
-    out[n] = '\0';
+    long n = zlen(s);
+    char *out = zstr_copy(s, (size_t)n);
+    for (long i = 0; i < n; i++)
+        if (out[i] >= 'A' && out[i] <= 'Z')
+            out[i] = (char)(out[i] + 32);
     return out;
 }
 
 /* Replaces every occurrence of `from` with `to`. An empty `from` would match at
  * every position, so it returns the string unchanged instead of looping. */
 char *z_replace(const char *s, const char *from, const char *to) {
-    const char *a = nn(s), *f = nn(from), *t = nn(to);
-    size_t lf = strlen(f);
+    long lf = zlen(from), lt = zlen(to), n = zlen(s);
     if (lf == 0)
-        return z_alloc_copy(a, strlen(a));
-    size_t lt = strlen(t);
+        return zstr_copy(s, (size_t)n);
     /* Count first, then allocate exactly: the collector can run during either,
      * and sizing the result up front keeps the second pass allocation-free. */
-    size_t count = 0;
-    for (const char *p = a; (p = strstr(p, f)) != NULL; p += lf)
-        count++;
-    size_t n = strlen(a);
-    size_t out_n = n + count * lt - count * lf;
-    char *out = (char *)gc_alloc(out_n + 1);
-    char *w = out;
-    const char *p = a;
-    for (;;) {
-        const char *hit = strstr(p, f);
-        if (hit == NULL) {
-            size_t rest = n - (size_t)(p - a);
-            memcpy(w, p, rest);
-            w += rest;
-            break;
+    long count = 0;
+    for (long i = 0; i + lf <= n;) {
+        if (memcmp(s + i, from, (size_t)lf) == 0) {
+            count++;
+            i += lf;
+        } else {
+            i++;
         }
-        size_t lead = (size_t)(hit - p);
-        memcpy(w, p, lead);
-        w += lead;
-        memcpy(w, t, lt);
-        w += lt;
-        p = hit + lf;
+    }
+    char *out = zstr_alloc_impl(n + count * lt - count * lf);
+    char *w = out;
+    for (long i = 0; i < n;) {
+        if (i + lf <= n && memcmp(s + i, from, (size_t)lf) == 0) {
+            if (lt > 0)
+                memcpy(w, to, (size_t)lt);
+            w += lt;
+            i += lf;
+        } else {
+            *w++ = s[i++];
+        }
     }
     *w = '\0';
+    ZH(out)->len = (long)(w - out);
     return out;
 }
 
 char *z_repeat(const char *s, long n) {
-    const char *a = nn(s);
-    size_t la = strlen(a);
+    long ls = zlen(s);
     if (n < 0)
         n = 0;
-    char *out = (char *)gc_alloc(la * (size_t)n + 1);
-    char *w = out;
+    char *out = zstr_alloc_impl(ls * n);
     for (long i = 0; i < n; i++) {
-        memcpy(w, a, la);
-        w += la;
+        if (ls > 0)
+            memcpy(out + ls * i, s, (size_t)ls);
     }
-    *w = '\0';
+    out[ls * n] = '\0';
+    ZH(out)->len = ls * n;
     return out;
 }
+
+/* Reverses the bytes. */
+char *z_reverse(const char *s) {
+    long n = zlen(s);
+    char *out = zstr_copy(s, (size_t)n);
+    for (long i = 0; i < n / 2; i++) {
+        char t = out[i];
+        out[i] = out[n - 1 - i];
+        out[n - 1 - i] = t;
+    }
+    return out;
+}
+
+/* Pads to `width` with `pad`, on the left for a positive width and the right
+ * for a negative one. Longer than `width` is returned unchanged rather than
+ * truncated: padding is a formatting request, and silently dropping the end of
+ * someone's data is not what "make this 20 wide" means. */
+static char *z_pad_signed(const char *s, long width, char pad) {
+    long n = zlen(s);
+    long target = width < 0 ? -width : width;
+    if (target <= n)
+        return zstr_copy(s, (size_t)n);
+    long fill = target - n;
+    char *out = zstr_alloc_impl(target);
+    char *w = out;
+    if (width > 0)
+        for (long i = 0; i < fill; i++)
+            *w++ = pad;
+    if (n > 0)
+        memcpy(w, s, (size_t)n);
+    w += n;
+    if (width < 0)
+        for (long i = 0; i < fill; i++)
+            *w++ = pad;
+    *w = '\0';
+    ZH(out)->len = target;
+    return out;
+}
+
+/* The two spellings, rather than one function and a flag: the flag would be a
+ * boolean in a signature that is otherwise all strings and numbers, and a
+ * negative width reads as a mistake at every call site. */
+char *z_pad_left(const char *s, long width, char pad) { return z_pad_signed(s, width, pad); }
+
+char *z_pad_right(const char *s, long width, char pad) { return z_pad_signed(s, -width, pad); }
 
 /* Splits on every occurrence of `sep` and returns a heap array of strings, so
  * the result is used like any other array: `parts.length`, `parts[i]`.
@@ -564,43 +814,88 @@ char *z_repeat(const char *s, long n) {
  * is what keeps it reachable: the collector is conservative, so a pointer sitting
  * in this frame is found and marked. */
 void *z_split(const char *s, const char *sep) {
-    const char *a = nn(s), *sp = nn(sep);
-    size_t ls = strlen(sp);
+    long a = zlen(s), ls = zlen(sep);
 
-    size_t count = 0;
+    long count = 0;
     if (ls == 0) {
-        count = strlen(a); /* one piece per character */
+        count = a; /* one piece per byte */
     } else {
         count = 1;
-        for (const char *p = a; (p = strstr(p, sp)) != NULL; p += ls) {
-            count++;
-            if (p[ls] == '\0') {
-                count--; /* no trailing empty piece */
-                break;
+        for (long i = 0; i + ls <= a;) {
+            if (memcmp(s + i, sep, (size_t)ls) == 0) {
+                count++;
+                i += ls;
+                if (i >= a) {
+                    count--; /* no trailing empty piece */
+                    break;
+                }
+            } else {
+                i++;
             }
         }
     }
 
-    char **out = (char **)z_newarray((long)count, (long)sizeof(char *));
-    size_t k = 0;
+    char **out = (char **)z_newarray(count, (long)sizeof(char *));
+    long k = 0;
     if (ls == 0) {
-        for (const char *p = a; *p != '\0' && k < count; p++)
-            out[k++] = z_alloc_copy(p, 1);
+        for (long i = 0; i < a && k < count; i++)
+            out[k++] = zstr_copy(s + i, 1);
     } else {
-        const char *p = a;
+        long i = 0;
         for (;;) {
-            const char *hit = strstr(p, sp);
-            size_t piece = hit ? (size_t)(hit - p) : strlen(p);
+            long piece = a;
+            for (long j = i; j + ls <= a; j++) {
+                if (memcmp(s + j, sep, (size_t)ls) == 0) {
+                    piece = j;
+                    break;
+                }
+            }
             if (k < count)
-                out[k++] = z_alloc_copy(p, piece);
-            if (hit == NULL)
+                out[k++] = zstr_copy(s + i, (size_t)piece - (size_t)i);
+            if (piece == a)
                 break;
-            p = hit + ls;
-            if (*p == '\0')
+            i = piece + ls;
+            if (i >= a)
                 break; /* trailing separator: stop, leaving no empty piece */
         }
     }
     return out;
+}
+
+/* The pieces of `parts` joined with `sep`, the inverse of split. `parts` is a Z
+ * array with a length header, so the count comes from the header rather than
+ * from a terminator -- there is no terminator to find. */
+char *z_join(const char *sep, void *parts) {
+    long ls = zlen(sep);
+    long n = parts != NULL ? *(long *)((char *)parts - 8) : 0;
+    long total = 0;
+    for (long i = 0; i < n; i++)
+        total += zlen(((char **)parts)[i]) + (i > 0 ? ls : 0);
+    char *out = zstr_alloc_impl(total);
+    char *w = out;
+    for (long i = 0; i < n; i++) {
+        if (i > 0 && ls > 0) {
+            memcpy(w, sep, (size_t)ls);
+            w += ls;
+        }
+        long l = zlen(((char **)parts)[i]);
+        if (l > 0) {
+            memcpy(w, ((char **)parts)[i], (size_t)l);
+            w += l;
+        }
+    }
+    *w = '\0';
+    ZH(out)->len = total;
+    return out;
+}
+
+/* Formats a float as a string, with the same six significant digits `print`
+ * uses, so `"x = " + 1.5` and `print(1.5)` never disagree about how a number
+ * looks. */
+char *z_ftoa(double v) {
+    char buf[40];
+    snprintf(buf, sizeof buf, "%g", v);
+    return zstr_copy(buf, strlen(buf));
 }
 
 /* ---- integer library ----

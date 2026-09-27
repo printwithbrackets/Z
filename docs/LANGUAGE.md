@@ -29,6 +29,10 @@ grammar below is the source of truth for what the compiler accepts today.
   (`123abc`) is an error rather than two tokens.
 - String escapes: `\n \t \r \0 \\ \"`, `\xNN` for a byte, and `\uXXXX` for a
   code point, encoded as UTF-8. An unrecognized escape is an error.
+- `s.length` / `len(s)` is the length in **bytes**. `s[i]` is the byte at `i` as
+  an `int` in `0..255`, and `s[a..b]` is the half-open byte range, with either
+  end optional and both clamped. A `string` is a sequence of bytes and Z has no
+  character type, so a multi-byte UTF-8 sequence is several `int`s.
 
 ## Types
 
@@ -37,7 +41,7 @@ grammar below is the source of truth for what the compiler accepts today.
 | `int` | 64-bit signed integer | machine word in `rax` |
 | `bool` | `true` / `false` | 0 or 1 |
 | `float` | IEEE-754 binary64 | 8 bytes; C's `double` |
-| `string` | immutable NUL-terminated bytes | pointer to `.rodata` |
+| `string` | immutable bytes with a length | pointer to the bytes; `{ len, cap }` header at `ptr[-16]` |
 | `T*` | pointer to `T` | machine word |
 | `T[]` | array of `T` | pointer to first element; length stored at `ptr[-8]` |
 | `struct S` | user-defined value type | inline in the frame; fields at byte offsets |

@@ -39,9 +39,19 @@ Code is compiled with `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 ```
 
 Optimization levels are spelled like gcc's (`-O0`..`-O3`), and `-O2` turns on
-loop-invariant code motion. `--bounds` range-checks array indexing, `-w`
-silences warnings, and `-Werror` makes them fail the build. Anything the
+loop-invariant code motion. `--bounds` range-checks array *and string* indexing,
+`-w` silences warnings, and `-Werror` makes them fail the build. Anything the
 compiler does not recognize is passed through to the linker.
+
+Diagnostics come in three shapes with `--error-format=human|gcc|json`, and take
+colour on a terminal (`--color=auto|always|never`, and never under `NO_COLOR`).
+`gcc` is one line per problem and per note, which is what an editor's error
+parser wants; `json` carries a stable code, an explicit span and the notes
+inline. `--no-std` compiles without the embedded standard library.
+
+The standard library is Z source (`lib/*.z`), embedded in the compiler and
+spliced ahead of every program -- so `StringBuilder` is a class, checked by the
+same front end as your code, not a C function behind a builtin.
 
 ## Editor support
 
@@ -127,7 +137,8 @@ The compiler is a classic multi-pass pipeline, each pass in its own module:
 | Types | `src/types.c` | pointer-based `Type` graph, sizes/alignment, struct defs |
 | Codegen | `src/codegen.c` | typed AST → x86-64 assembly (System V AMD64 ABI), lvalue/rvalue |
 | Driver | `src/main.c` | orchestrates passes, embeds + links the runtime, invokes `cc` |
-| Runtime | `runtime/z_rt.c` | conservative mark-sweep GC + heap array alloc, string concat/itoa; embedded in the binary |
+| Runtime | `runtime/z_rt.c` | conservative mark-sweep GC + heap array alloc, the string representation and its library; embedded in the binary |
+| Stdlib | `lib/*.z` | `StringBuilder` and the rest, in Z; embedded and spliced ahead of every unit |
 | Types | `src/types.c` | pointer-based `Type` graph: scalars, pointers, arrays, structs, tagged unions, type params |
 | Arena | `src/arena.c` | bump allocator — all compiler memory freed in one call |
 | Diag | `src/diag.c` | `file:line:col: error: …` with a caret under the token |
@@ -296,25 +307,53 @@ question is, because picking the wrong answer is the expensive way to find out.
   the buffering decision lives: read whole, or read a chunk and split, and
   whether a `File` owns a buffer such that copying one is a bug.
 
-- **M12 (planned): a string type that is not just concatenation.** `string` is
-  currently a NUL-terminated `char*` with `+` for concatenation, so it has no
-  length, cannot hold an embedded zero, and every append reallocates and copies
-  everything. That is a C string wearing a nicer name, and it is the single
-  most common thing a Z program gets wrong.
+- **M12 (done): a string type that is not just concatenation.** A `string` is a
+  pointer to a `{ len, cap }` header followed by the bytes. Three problems, three
+  fixes: `len` was a `strlen` and is now a load; a zero byte ended the string and
+  is now a byte, so `"a\0bc"` has length 4, prints in full, and can be searched
+  and split; and comparison was `strcmp` and is now by content and then length,
+  so two strings differing only after an embedded zero are no longer equal.
 
-  The fix is a real value: a pointer plus a length, passed as two registers,
-  comparing and hashing by content. Whether it is a `struct` (copied by value,
-  which is 16 bytes and usually what you want) or stays a pointer (one word,
-  but a `string` variable can be reassigned and every function takes it
-  indirectly) is the question. Value semantics is the one that makes
-  `s = s + "x"` correct without surprise, and Z already has the machinery for a
-  16-byte value parameter. What it costs is every ABI interaction: a `string` in
-  an exported function, one in a C caller, one crossing the GC boundary.
+  **The decision the roadmap flagged** — a 16-byte value passed in two
+  registers, or a pointer — is taken as *a pointer with a header*, and the reason
+  is the C boundary. A `string` that cannot cross into C is not a string in a
+  language with C interoperability, and a type needing a special case at every
+  ABI is one that will get the special case wrong somewhere. A header keeps
+  `string` a scalar: it still travels in a register, and `extern`/`export` still
+  mean what they meant. The trailing NUL is kept on every string even though
+  nothing in Z reads it, which is exactly what makes a Z string valid to hand to
+  a C function as `const char *`. What the C side *cannot* do is see past a zero,
+  so the interop test demonstrates reading the length out of the header — the one
+  thing C lacks a way to ask for.
 
-  Slice and search come with it — `s[2..5]`, `indexOf`, `contains`, `split`,
-  `join` — and so does the question of what indexing means. Bytes or characters?
-  UTF-8 makes those different answers, and a language that has `\uXXXX` escapes
-  and no character type has already decided something it has not said out loud.
+  Indexing and slicing come with it: `s.length`, `s[i]` as a byte in `0..255`,
+  and `s[a..b]` half-open with either end optional and both clamped. The
+  roadmap asked what indexing means for a language with `\uXXXX` escapes and no
+  character type: **bytes**, stated once in the reference and applied everywhere,
+  including in the bounds-check message, which now says which kind of thing was
+  indexed.
+
+  Appending is a separate type. `s = s + x` still copies, because `s` is a value
+  and growing it in place would write through to every other name bound to it —
+  the runtime comment on `z_str_buf_append` is explicit that in-place growth is
+  only safe where the caller owns the buffer. `StringBuilder` is a class that
+  does own one, so `append` is amortized O(1) instead of O(n²) over a loop;
+  `toString()` copies and `take()` does not, which is the whole difference
+  between them.
+
+  Two bugs this found that the old representation could not have had, both worth
+  recording: string interning deduplicated on `strlen`, so `"a"` and `"a\0bc"`
+  compared equal on their first byte and shared an id — every use of the shorter
+  literal silently got the longer one's bytes; and the `.asciz` emitter walked
+  the literal to its first zero, emitting a truncated body under a header that
+  claimed the full length.
+
+- **M12b (done): the standard library is Z, not C.** `lib/*.z` is embedded in
+  the compiler and spliced ahead of every compilation unit, the same way the
+  runtime is. `StringBuilder` is a class with methods, checked and compiled by
+  the same front end a user's code goes through — so a bug in it is a bug any
+  program using it would have found, rather than something only the C side can
+  reach. `--no-std` compiles without it. M13 turns this into real packages.
 
 - **M13 (planned): package and module distribution.** `import "path.z"` splices
   a file's declarations into the importing one. That is fine for one directory

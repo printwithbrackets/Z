@@ -5,6 +5,8 @@ extern int c_add(int a, int b);
 extern int c_scale(int v, int k);
 extern int c_strlen(string s);
 extern void c_print(string s);
+extern int c_zlen(string s);
+extern int c_zprint(string s);
 extern int c_fill(int* out, int n);
 
 int main() {
@@ -22,6 +24,18 @@ int main() {
     var buf = new int[4];
     print(c_fill(&buf[0], 4));                 // 4
     print(buf[0] + buf[1] + buf[2] + buf[3]);  // 0+1+4+9 = 14
+
+    /* A Z string is a valid C string: the bytes are NUL-terminated, so a C
+     * function taking `const char *` needs no conversion. */
+    print(c_zlen("hello"));                 // 5
+    print(c_zlen(""));                      // 0
+
+    /* ...and a string with an embedded zero is *not* a valid C string, because
+     * C has no way to say how long it is. Read the length out of the header and
+     * the whole string crosses; use strlen and you get "a". */
+    print(c_zlen("a\0bc"));                 // 4
+    print(c_strlen("a\0bc"));               // 1 -- C stops at the zero
+    print(c_zprint("a\0bc"));               // 4, and all four bytes arrive
 
     /* Note: struct-by-value across the boundary is NOT supported. Z returns
      * every aggregate through a hidden result pointer, while the C ABI returns

@@ -329,6 +329,76 @@ several bytes, and `char_at` hands you each byte in turn. `upper`/`lower` are
 ASCII-only and leave bytes above 127 alone, because case-mapping a UTF-8
 continuation byte on its own would corrupt the sequence.
 
+### A string is a value with a length
+
+```csharp
+var s = "hello world";
+print(s.length);          // 11
+print(s[0]);              // 104   the byte, as an int
+print(s[1..3]);           // el    half-open: s[a..b] keeps a..b-1
+print(s[..5]);            // hello an end may be left out
+print(s[6..]);            // world and so may the start
+print(s[1..999]);          // ello world, an end past the end just clamps
+print(s[4..2]);           // (empty) an inverted range is empty, not an error
+
+var z = "a\0bc";
+print(z.length);          // 4     a zero byte is a byte, not an end
+print(z[1]);              // 0
+print(z[0] + z[2] + z[3]);// 294
+print(contains("ab\0cd", "b\0"));   // true
+
+print("ab" < "abc");      // true   a prefix sorts before what extends it
+print("ab\0c" == "ab\0d"); // false, and strcmp would have called this equal
+```
+
+Three things follow from the length being stored rather than found by scanning
+for a zero.
+
+**`len` is a load, not a walk.** It used to be a `strlen`. Now it is a read of
+the header immediately before the bytes.
+
+**A zero byte is data.** A C string ends at the first zero, so `"a\0bc"` used to
+print as nothing and measure as 0, and every function that took it stopped early.
+Now the length is 4, every byte is reachable, `print` writes all four, and
+`split`, `replace` and `index_of` all see it. C interoperability still stops at
+a zero — that is a property of C's strings, not a bug in this one — and
+[section 18](#types) says how a C caller gets past it.
+
+**Comparison is by content, then by length.** Not by `strcmp`, which cannot order
+two strings that differ only after an embedded zero.
+
+### Building a string
+
+`+` allocates a new string and copies both sides, and it still does. A `string` is
+a value: `s = s + "x"` writes a *new* string and leaves every other name bound to
+`s` alone. That is worth one copy, because it means `s` means one thing.
+
+The cost is that building a string of *n* pieces in a loop copies O(n²) bytes,
+and no amount of cleverness in the runtime fixes that without taking the value
+semantics away. So the mutable buffer is a separate type that says so:
+
+```csharp
+var b = new StringBuilder();
+for (var i = 0; i < 200; i++) {
+    b.append("ab");
+}
+b.append("!");
+b.appendInt(42);
+print(b.length());            // 403
+print(b.toString()[402]);     // 50, the '2'
+print(ends_with(b.toString(), "42"));    // true
+```
+
+`append` is amortized constant time: the builder owns its buffer, so appending
+extends it in place and reallocates only when it is full.
+
+`toString()` gives you a **copy**, and that is the whole point of the difference
+between it and `take()`. The buffer belongs to the builder, so a string handed
+straight out of it would change under its reader the next time anything was
+appended. `take()` hands the buffer over and takes a new one, which is safe
+because the builder gives up its claim — use it for the common tail of "build a
+string, pass it on, don't need it again".
+
 ### The integer library
 
 ```csharp
@@ -1241,6 +1311,13 @@ Z's `int` is 64-bit and maps onto C's `long`; `bool` maps onto an `int` that is
 0 or 1; `string` is a NUL-terminated `const char *`. Structs and arrays are
 passed as pointers.
 
+A Z `string` keeps its length in a header immediately before the bytes the value
+points at, and a NUL terminator after them, so it is a valid `const char *` and
+needs no conversion. The terminator is what makes the boundary work; the header
+is what lets a C function that needs the *whole* string read it, at `s[-16]`. C
+itself still stops at a zero byte, so a Z string containing one crosses the
+boundary truncated unless the C side asks for the length.
+
 ### Linking
 
 Anything the compiler does not recognize after the source file is handed
@@ -1305,12 +1382,24 @@ deliberately.
   the receiver is a parameter too. The argument registers run out well before
   those numbers, and the surplus is passed on the stack. Exceeding one is a
   compile error rather than silently wrong code.
-- **Array indexing is unchecked** unless you pass `--bounds`. See section 15.
+- **Array and string indexing are unchecked** unless you pass `--bounds`. See
+  section 15.
+- **A `string` is a sequence of bytes, and that is all it is.** `s.length`,
+  `s[i]` and `s[a..b]` all count and slice bytes. Z has no character type, so
+  one `é` is two ints and a `\uXXXX` escape is two to four of them. Nothing
+  validates UTF-8, and nothing needs to: the type makes no claim that the bytes
+  are text.
+- **`+` on a string always copies.** It has to, because a `string` is a value and
+  two names bound to one string must not see each other's appends. Use
+  `StringBuilder` to build a string in a loop.
 - **A `const` must be declared before use**, unlike a function.
 - **`break`/`continue` outside a loop** is a compile error.
 - **Structs cannot be returned by value across the C boundary.** See section 17.
 - **`import` splices, it does not isolate.** An imported name is visible
-  everywhere, with no namespace to qualify it.
+  everywhere, with no namespace to qualify it and nothing marked private.
+- **The standard library is Z source inside the compiler.** `lib/*.z` is spliced
+  ahead of every program, so `StringBuilder` is checked and compiled by the same
+  front end your code is. `--no-std` compiles without it.
 - **Three callable things, none interchangeable.** `&f` is a bare code address
   and captures nothing. A lambda is a closure -- a `{ code, env }` cell -- and
   captures by value the declarations its body names, so `var add = () => x + 1`

@@ -1840,6 +1840,8 @@ static Type *builtin_type(Parser *p, char code) {
         return type_bool(&p->ty);
     case 's':
         return type_string(&p->ty);
+    case 'f':
+        return type_f64(&p->ty);
     case 'S':
         /* The array length is -1 for every Z-written array type; the real
          * length lives in the header the runtime allocated. */
@@ -2609,6 +2611,17 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
     const char *sym = resolve_fn_sym(p, name);
     Sig *s = find_sig(p, sym);
     if (s == NULL) {
+        /* A class or struct name called without `new` is the one missing token
+         * that produces a bare "undefined function" for a name that is right
+         * there in the file, so it gets named rather than suggested. */
+        if (p->cur_this == NULL && type_find_struct(&p->ty, name) != NULL) {
+            diag_note("'%s' is a type, not a function; construct one with 'new %s(...)'", name,
+                      name);
+            diag_error_code(span, "not_a_function",
+                            "'%s(...)' cannot be called: '%s' is a type", name, name);
+            e->type = NULL;
+            return e;
+        }
         suggest_in_scope(p, SK_FUNC, "function", name);
         diag_error_code(span, "undefined_function", "undefined function '%s'", name);
         e->type = NULL;
@@ -2708,7 +2721,53 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
         if (at(p, T_LBRACKET)) {
             Span span = cur(p)->span;
             advance(p);
-            Expr *idx = parse_expr(p);
+            /* `s[a..b]`: a range, which for a string is a slice. Both ends are
+             * optional, because "the rest of this" and "the head of this" are
+             * the two things a range is asked for most and writing `s[0..s.length]`
+             * or `s[n..]` for them is noise. An omitted end becomes the literal 0
+             * or the string's own length, so a half-open range still has a
+             * half-open answer. */
+            int is_range = at(p, T_DOTDOT);
+            Expr *idx;
+            if (is_range) {
+                idx = new_expr(p, E_INT, span);
+                idx->ival = 0;
+                idx->type = type_int(&p->ty);
+            } else {
+                idx = parse_expr(p);
+            }
+            if (is_range || at(p, T_DOTDOT)) {
+                if (!match(p, T_DOTDOT))
+                    diag_error(cur(p)->span, "expected '..' in a range");
+                Expr *hi;
+                if (at(p, T_RBRACKET)) {
+                    /* s[a..]: an omitted end is the length. Reading it from the
+                     * string rather than storing it keeps a slice of a slice
+                     * right, since the inner slice's length is its own. */
+                    hi = new_expr(p, E_STRLEN, span);
+                    hi->lhs = e;
+                    hi->type = type_int(&p->ty);
+                } else {
+                    hi = parse_expr(p);
+                }
+                if (!match(p, T_RBRACKET))
+                    diag_error(cur(p)->span, "expected ']' after range");
+                Expr *sl = new_expr(p, E_SLICE, span);
+                sl->lhs = e;
+                sl->rhs = idx;
+                sl->env = hi; /* the exclusive end; `env` is the free slot */
+                if (is_kind(e->type, TK_STRING)) {
+                    sl->type = type_string(&p->ty);
+                } else {
+                    if (!is_unk(e->type)) {
+                        diag_error(span, "cannot take a range of %s; only a string has one",
+                                   type_name(&p->ty, e->type));
+                    }
+                    sl->type = NULL;
+                }
+                e = sl;
+                continue;
+            }
             if (!match(p, T_RBRACKET)) {
                 diag_error(cur(p)->span, "expected ']' after index");
             }
@@ -2718,6 +2777,14 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             Type *bt = e->type;
             if (is_kind(bt, TK_ARRAY) || is_kind(bt, TK_PTR)) {
                 ix->type = bt->base;
+            } else if (is_kind(bt, TK_STRING)) {
+                /* A byte, as an int. Z has no character type, so this is the one
+                 * byte and the value is 0..255 -- the same reading `char_at` and
+                 * `.length` have always had, now indexed rather than called. */
+                if (!is_unk(idx->type) && !type_equals(idx->type, type_int(&p->ty)))
+                    diag_error(idx->span, "a string index must be 'int' but got '%s'",
+                               type_name(&p->ty, idx->type));
+                ix->type = type_int(&p->ty);
             } else {
                 if (!is_unk(bt)) {
                     diag_error(span, "cannot index %s", type_name(&p->ty, bt));
@@ -2997,8 +3064,13 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                     continue;
                 }
             }
-            if (is_kind(e->type, TK_ARRAY) && strcmp(name, "length") == 0) {
-                Expr *f = new_expr(p, E_FIELD, span);
+            /* `.length` is the length of an array or a string, and on a string
+             * it is a load of the header rather than a scan: the length is
+             * stored, so `len(s)` is now a field read. */
+            if ((is_kind(e->type, TK_ARRAY) || is_kind(e->type, TK_STRING)) &&
+                strcmp(name, "length") == 0) {
+                int is_str = is_kind(e->type, TK_STRING);
+                Expr *f = new_expr(p, is_str ? E_STRLEN : E_FIELD, span);
                 f->lhs = e;
                 f->name = name;
                 f->type = type_int(&p->ty);

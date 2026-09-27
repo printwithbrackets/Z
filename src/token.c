@@ -70,6 +70,8 @@ const char *token_kind_name(TokenKind kind) {
         return "']'";
     case T_DOT:
         return "'.'";
+    case T_DOTDOT:
+        return "'..'";
     case T_QUESTION:
         return "'?'";
     case T_COLON:

@@ -59,6 +59,8 @@ typedef enum {
     T_SEMI,
     T_COMMA,
     T_DOT,
+    T_DOTDOT, /* `..`, the range in `s[a..b]`. Distinct from T_DOT so that the
+               * lexer can tell a slice from a field access without lookahead. */
     T_QUESTION,
     T_COLON,
     T_FATARROW,

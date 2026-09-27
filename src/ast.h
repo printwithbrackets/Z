@@ -20,6 +20,14 @@ typedef enum {
      * function's address and `env` the captured environment. */
     E_CLOSURE,
     E_STRING,
+    /* s.length: a load of the string header's length field. Its own node rather
+     * than an E_FIELD with an offset, because the field lives *before* the value
+     * -- the string points at its bytes, not at its header -- and every other
+     * field read in the code generator adds a positive offset. */
+    E_STRLEN,
+    /* s[a..b]: a half-open byte range of a string, as a new string. `rhs` is the
+     * inclusive start, `env` the exclusive end. */
+    E_SLICE,
     E_VAR,
     E_UNARY,
     E_BINARY,

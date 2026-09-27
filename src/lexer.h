@@ -5,10 +5,17 @@
 #include "token.h"
 
 /* Deduplicated interned string literals. Identical literals share an id so
- * codegen emits one .rodata entry per distinct string. */
+ * codegen emits one .rodata entry per distinct string.
+ *
+ * `lens` is the byte length of each literal, kept beside `items` because a
+ * literal may contain an embedded zero: the items are NUL-terminated C strings
+ * for the convenience of everything that only wants to print them, so the
+ * length cannot be recovered with strlen and has to be stored. It is what ends
+ * up in the header of every string value the program sees. */
 typedef struct {
     Arena *arena;
     char **items;
+    int *lens;
     int count;
     int cap;
 } StringTable;

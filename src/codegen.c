@@ -827,6 +827,16 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         mark_addr_taken(cg, e->lhs); /* base is addressed */
         walk_alloc_expr(cg, e->rhs, idx);
         break;
+    case E_STRLEN:
+        /* The length is in the header the value points into, which is a load
+         * from the value: the string itself is not addressed. */
+        walk_alloc_expr(cg, e->lhs, idx);
+        break;
+    case E_SLICE:
+        walk_alloc_expr(cg, e->lhs, idx);
+        walk_alloc_expr(cg, e->rhs, idx);
+        walk_alloc_expr(cg, e->env, idx);
+        break;
     case E_FIELD:
         mark_addr_taken(cg, e->lhs); /* base is addressed */
         break;
@@ -1213,29 +1223,34 @@ static void gen_addr(CG *cg, Expr *e) {
         gen_expr(cg, e->lhs);
         break;
     case E_INDEX: {
-        int esz = type_size(e->lhs->type->base);
+        /* A string element is a byte, so its address is base + index with no
+         * scaling. The length lives in the header, so there is a bound to check
+         * it against exactly as an array has one at ptr[-8]. */
+        int is_str = is_kind(e->lhs->type, TK_STRING);
+        int esz = is_str ? 1 : type_size(e->lhs->type->base);
         int t = temp_alloc(cg);
         gen_expr(cg, e->lhs); /* base pointer */
         store_temp(cg, t);
         gen_expr(cg, e->rhs); /* index */
         /* Arrays in Z are always heap allocations from z_newarray, so a
          * value of array type always has a valid length header at ptr[-8] and
-         * the index can be range-checked. A TK_PTR index has no header, so
-         * there is nothing to check against and it is left alone. */
-        if (cg->bounds_checks && is_kind(e->lhs->type, TK_ARRAY)) {
+         * the index can be range-checked. A string has its length 16 bytes
+         * back. A TK_PTR index has neither, so there is nothing to check
+         * against and it is left alone. */
+        if (cg->bounds_checks && (is_kind(e->lhs->type, TK_ARRAY) || is_str)) {
             int ti = temp_alloc(cg);
             int lbad = next_label(cg);
             int lok = next_label(cg);
             store_temp(cg, ti);              /* rax = index */
             load_temp(cg, t, "r11");         /* r11 = base */
             buf_printf(cg->out, "  cmp rax, 0\n  jl .L%d\n", lbad);
-            buf_printf(cg->out, "  mov rcx, QWORD PTR [r11 - 8]\n");
+            buf_printf(cg->out, "  mov rcx, QWORD PTR [r11 - %d]\n", is_str ? 16 : 8);
             buf_printf(cg->out, "  cmp rax, rcx\n  jge .L%d\n", lbad);
             load_temp(cg, ti, "rax");
             buf_printf(cg->out, "  jmp .L%d\n", lok);
             buf_printf(cg->out, ".L%d:\n", lbad);
             buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, rcx\n");
-            buf_printf(cg->out, "  call z_bounds_fail\n");
+            buf_printf(cg->out, "  call %s\n", is_str ? "z_str_bounds_fail" : "z_bounds_fail");
             buf_printf(cg->out, ".L%d:\n", lok);
             cg->temp_top = ti;
         }
@@ -1874,7 +1889,7 @@ static void gen_expr(CG *cg, Expr *e) {
         buf_printf(cg->out, "  mov rax, 0\n");
         break;
     case E_STRING:
-        buf_printf(cg->out, "  lea rax, [rip + .Lstr%d]\n", e->str_id);
+        buf_printf(cg->out, "  lea rax, [rip + .Lstr%d + 16]\n", e->str_id);
         break;
     case E_VAR: {
         if (!e->agg_param && !is_aggregate(e->type)) {
@@ -1910,7 +1925,43 @@ static void gen_expr(CG *cg, Expr *e) {
         }
         break;
     }
+    case E_STRLEN:
+        /* The length is the first word of the header, which sits immediately
+         * before the bytes the value points at. One load, no call, no scan --
+         * this is what `len(s)` was not before the string had a header. */
+        gen_expr(cg, e->lhs);
+        buf_printf(cg->out, "  mov rax, QWORD PTR [rax - 16]\n");
+        break;
+    case E_SLICE: {
+        /* z_slice(s, a, b) is a call rather than inline code because the
+         * clamping -- a negative end counting from the back, either end past the
+         * string -- has more cases than are worth spelling out twice. A slice is
+         * a copy, so this is one of the two string operations that allocates. */
+        int t = temp_alloc(cg);
+        gen_expr(cg, e->lhs);
+        store_temp(cg, t);
+        gen_expr(cg, e->rhs);
+        buf_printf(cg->out, "  mov rsi, rax\n");
+        gen_expr(cg, e->env);
+        buf_printf(cg->out, "  mov rdx, rax\n");
+        load_temp(cg, t, "rdi");
+        buf_printf(cg->out, "  call z_slice\n");
+        cg->temp_top = t;
+        break;
+    }
     case E_INDEX:
+        gen_addr(cg, e);
+        if (is_aggregate(e->type)) {
+            /* A struct value is represented by its address. */
+        } else if (is_kind(e->lhs->type, TK_STRING)) {
+            /* A byte, zero-extended, so a value above 127 reads back as
+             * 128..255 rather than as a negative int. The eight-byte load the
+             * general path does would read three bytes past the string. */
+            buf_printf(cg->out, "  movzx eax, BYTE PTR [rax]\n");
+        } else {
+            load_indirect(cg);
+        }
+        break;
     case E_DEREF:
         gen_addr(cg, e);
         if (is_aggregate(e->type)) {
@@ -2243,7 +2294,8 @@ static void gen_expr(CG *cg, Expr *e) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->lhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
-                           "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
+                           "  lea rdi, [rip + .Lfalse_str + 16]\n"
+                           "  lea r11, [rip + .Ltrue_str + 16]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
             } else if (lflt) {
                 buf_printf(cg->out, "  call z_ftoa\n");
@@ -2257,7 +2309,8 @@ static void gen_expr(CG *cg, Expr *e) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->rhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
-                           "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
+                           "  lea rdi, [rip + .Lfalse_str + 16]\n"
+                           "  lea r11, [rip + .Ltrue_str + 16]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
             } else if (rflt) {
                 buf_printf(cg->out, "  call z_ftoa\n");
@@ -2516,14 +2569,17 @@ static void gen_expr(CG *cg, Expr *e) {
             }
             gen_expr(cg, e->args[0]);
             if (is_kind(at, TK_STRING)) {
-                buf_printf(cg->out, "  mov rdi, rax\n  call puts\n");
+                /* z_print_str, not puts: puts stops at the first zero byte, so a
+                 * string containing one would print only its first line. Now that
+                 * the length is in the header it is the length that is printed. */
+                buf_printf(cg->out, "  mov rdi, rax\n  call z_print_str\n");
             } else if (is_kind(at, TK_BOOL)) {
                 int lfalse = next_label(cg);
                 int lend = next_label(cg);
                 buf_printf(cg->out,
                            "  cmp rax, 0\n  je .L%d\n"
-                           "  lea rdi, [rip + .Ltrue_str]\n  jmp .L%d\n"
-                           ".L%d:\n  lea rdi, [rip + .Lfalse_str]\n"
+                           "  lea rdi, [rip + .Ltrue_str + 16]\n  jmp .L%d\n"
+                           ".L%d:\n  lea rdi, [rip + .Lfalse_str + 16]\n"
                            ".L%d:\n  call puts\n",
                            lfalse, lend, lfalse, lend);
             } else {
@@ -4045,9 +4101,14 @@ static void emit_function(CG *cg, Stmt *fn) {
         buf_printf(cg->out, "%s:\n", dbg_end);
 }
 
-static void emit_escaped(CG *cg, const char *s) {
-    for (; *s != '\0'; s++) {
-        unsigned char c = (unsigned char)*s;
+/* Emits `n` bytes as the body of an .asciz, escaping what the assembler needs
+ * escaped. The length is a parameter rather than a terminator because a Z string
+ * may contain a zero byte -- that is the whole point of it having a length --
+ * and a loop that stopped at the first zero would silently emit a truncated
+ * literal while the header above it claimed the full length. */
+static void emit_escaped_n(CG *cg, const char *s, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
         switch (c) {
         case '"':
             buf_puts(cg->out, "\\\"");
@@ -4191,14 +4252,44 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
     /* 64-bit magic multipliers and divisors referenced by [rip + .Lro<i>]. */
     for (int i = 0; i < cg.nrodata; i++)
         buf_printf(&out, ".Lro%d:\n  .quad %llu\n", i, (unsigned long long)cg.rodata[i]);
+    /* A string literal is a Z string: a { len, cap } header, the bytes, and a
+     * trailing zero. The header is static data rather than something built at
+     * run time, so a literal costs a `lea` and no allocation, exactly as before
+     * -- the length is already known at compile time, which is the one case
+     * where knowing it costs nothing.
+     *
+     * `cap` equals `len`: a literal is never grown. That is not an
+     * optimization but a safety property, because the code that appends to a
+     * string in place is allowed to do so only where it owns the buffer, and a
+     * literal is in read-only memory. Leaving a literal with spare capacity
+     * would turn a latent write into a segfault.
+     *
+     * The label names the *bytes*, sixteen past the header, because that is
+     * the value a Z string holds.
+     *
+     * .rodata, so a literal really is read-only. That is what makes the
+     * cap == len rule above a guarantee rather than a convention: the one code
+     * path that appends in place would fault here instead of quietly scribbling
+     * over a literal, which is the outcome the rule exists to make impossible
+     * and a page fault is the cheapest possible way to find out it was not. */
+    buf_puts(&out, "  .section .rodata\n");
     for (int i = 0; i < strings->count; i++) {
-        buf_printf(&out, ".Lstr%d:\n  .asciz \"", i);
-        emit_escaped(&cg, strings->items[i]);
+        buf_printf(&out, ".align 8\n.Lstr%d:\n  .quad %d\n  .quad %d\n  .asciz \"", i,
+                   strings->lens[i], strings->lens[i]);
+        emit_escaped_n(&cg, strings->items[i], strings->lens[i]);
         buf_puts(&out, "\"\n");
     }
+    /* The empty string, for a program that has no literals at all. Without it
+     * there is no label to point a default at, and a zero-length string is a
+     * perfectly ordinary thing to have. */
+    buf_puts(&out, ".align 8\n.Lstrempty:\n  .quad 0\n  .quad 0\n  .asciz \"\"\n");
+    /* .Lfmt_int is a printf format, not a Z string, so it gets no header. The
+     * two bool strings are Z strings -- a bool concatenates into one, and that
+     * is not a special case worth branching on -- so they are laid out with
+     * headers like every other literal and referenced sixteen past the label. */
     buf_puts(&out, ".Lfmt_int:\n  .asciz \"%ld\\n\"\n");
-    buf_puts(&out, ".Ltrue_str:\n  .asciz \"true\"\n");
-    buf_puts(&out, ".Lfalse_str:\n  .asciz \"false\"\n");
+    buf_puts(&out, ".align 8\n.Ltrue_str:\n  .quad 4\n  .quad 4\n  .asciz \"true\"\n");
+    buf_puts(&out, ".align 8\n.Lfalse_str:\n  .quad 5\n  .quad 5\n  .asciz \"false\"\n");
 
     /* The debug sections go last, once every function's description is known.
      * They return to .text afterwards so the section note below is not left

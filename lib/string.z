@@ -1,0 +1,93 @@
+/* StringBuilder: the answer to "appending in a loop is slow".
+ *
+ * A Z `string` is a value. `s = s + "x"` allocates a new string and copies all
+ * of `s`, which is correct and which a program should be able to write without
+ * thinking -- `s` means one thing, and it means it everywhere. The cost is that
+ * building a string of n pieces in a loop copies O(n^2) bytes, and no amount of
+ * cleverness in the runtime fixes that without breaking the value semantics:
+ * growing `s` in place would write through to every other name bound to it.
+ *
+ * So the mutable buffer is a separate type that says so, and this is it. The
+ * buffer is a string the builder owns, so appending can extend it where it lies
+ * and only reallocate when it is full, which is amortized constant time. The
+ * growth policy lives in the runtime (str_buf_append) because a string is opaque
+ * bytes to Z -- there is no way to write past a string's length from Z at all,
+ * which is a deliberate part of the type and the one thing a builder needs.
+ *
+ * This is a class, not a struct, and that is the same decision the language
+ * already draws everywhere else: a growable buffer is something two names
+ * should share, so assignment shares it. `var b2 = b1;` is an alias, and
+ * `b1` and `b2` are the same builder -- which is what anyone reaching for a
+ * StringBuilder expects, and the reason a struct version of this would be a
+ * trap in a language whose structs copy.
+ */
+class StringBuilder {
+    /* The buffer. Starts with room for 16 bytes so a short build never
+     * reallocates, which is the common case and the one where a per-append
+     * allocation would be most visible. */
+    string buf;
+
+    StringBuilder() {
+        buf = str_buf_new(16);
+    }
+
+    /* Appends `s`. Amortized O(1): the buffer doubles-and-a-half when full. */
+    void append(string s) {
+        buf = str_buf_append(buf, s);
+    }
+
+    /* Appends one byte. Takes an int rather than a char because Z has no
+     * character type, so this is the value s[i] gives back and nothing else. */
+    void appendByte(int b) {
+        buf = str_buf_append(buf, char_str(b));
+    }
+
+    /* Appends an int in decimal. A builder that cannot format a number forces
+     * every caller to break its own chain to build one, and the result of that
+     * is `b.append(i.ToString())` -- or worse, `b.append("" + i)`, which
+     * allocates a temporary string to immediately copy into the buffer. */
+    void appendInt(int v) {
+        buf = str_buf_append(buf, int_to_string(v));
+    }
+
+    void appendFloat(float v) {
+        buf = str_buf_append(buf, float_to_string(v));
+    }
+
+    void appendBool(bool v) {
+        if (v) { this.append("true"); } else { this.append("false"); }
+    }
+
+    int length() { return len(buf); }
+
+    bool isEmpty() { return len(buf) == 0; }
+
+    /* The string built so far.
+     *
+     * A *copy*, and that is the whole reason toString is not just `return buf`.
+     * The buffer belongs to the builder, so appending extends it in place; a
+     * string handed out from it would change under its reader the next time
+     * anything was appended, and `toString` means the opposite of that in every
+     * language that spells it this way. str_dup is the inert copy: it has no
+     * spare capacity, so nothing can ever append to it in place. */
+    string toString() { return str_dup(buf); }
+
+    /* Empties the builder, keeping the buffer. A builder that is reused in a
+     * loop should not have to give back its allocation each time round. */
+    void clear() {
+        buf = str_buf_new(0);
+    }
+
+    /* Empties the builder and hands over what it had, without copying.
+     *
+     * Unlike toString this *is* just the buffer: the builder gives up its claim
+     * by taking a new one, so nothing can still reach the old bytes and the
+     * in-place append that made this builder cheap is safe to have been used.
+     * For the common tail of "build a string, pass it on, do not need it again"
+     * this is the version that does not copy. */
+    string take() {
+        var out = buf;
+        buf = str_buf_new(0);
+        return out;
+    }
+}
