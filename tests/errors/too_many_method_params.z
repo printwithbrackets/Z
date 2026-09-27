@@ -1,2 +1,10 @@
-struct S { int M(int a, int b, int c, int d, int e, int f, int g) { return a + g; } }
+// A method's list is capped one lower than a plain function's, because the
+// receiver takes a parameter slot of its own. A class is where you meet it,
+// since methods are usually the widest thing in a program.
+//
+// The limit counts the receiver, so this is one more than fits.
+struct S {
+  int M(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l,
+        int m, int n, int o, int p) { return a + p; }
+}
 int main() { var s = new S(); return 0; }
