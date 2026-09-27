@@ -1,0 +1,1 @@
+cannot assign 'closure(int) -> int' to 'int'

@@ -1,0 +1,4 @@
+// Narrowing a float to an int loses precision, so it is never implicit.
+var n = 0;
+n = 2.5;
+print(n);

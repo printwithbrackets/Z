@@ -1,0 +1,7 @@
+// `?` propagates the error type of the value on its left, so it can only be used
+// where that error type is the one the function returns.
+Result<int, string> a() { return Ok(1); }
+Result<int, int> b() {
+    var v = a()?;      // propagates a string; this function returns an int error
+    return Ok(v);
+}

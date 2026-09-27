@@ -1,0 +1,8 @@
+// The method has to match the signature, not just the name. `Scale` here returns
+// nothing, so it is not the `int Scale(int)` the interface asks for.
+interface Sized { int Scale(int k); }
+struct Thing { int n; void Scale(int k) { n = n + k; } }
+int main() {
+    Sized t = new Thing(0);
+    return 0;
+}

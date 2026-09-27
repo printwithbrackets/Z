@@ -1,0 +1,33 @@
+// Closures in a program with top-level statements, where the entry function is
+// synthesized after the file is read.
+//
+// A lambda marks the captured declarations in the body of the function that
+// encloses it, by walking that body. Top-level statements are collected one at a
+// time and only gathered into a block once the whole file has been read, so
+// nothing walked them: a captured `var` was never given a box and the closure's
+// environment read a frame slot the initializer had never filled.
+
+struct P { int x; int y; }
+
+var k = 7;                       // a captured constant
+var readK = () => k + 1;
+print(readK());
+
+var counter = 0;                 // captured, then written through the closure
+var bump = () => {
+    counter = counter + 1;
+    return counter;
+};
+print(bump());
+print(bump());
+print(counter);
+
+var p = new P(3, 4);             // a capture with fields
+var getX = () => p.x;
+var getY = () => p.y;
+print(getX());
+print(getY());
+
+closure(int) -> int makeAdder(int n) { return (int x) => x + n; }
+var plus10 = makeAdder(10);
+print(plus10(5));

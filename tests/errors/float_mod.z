@@ -1,0 +1,4 @@
+// There is no remainder for a non-integer, so `%` stays integer-only rather
+// than quietly truncating.
+var f = 7.5;
+print(f % 2.0);

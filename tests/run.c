@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
         "methods",  "props",      "ext",       "fatarrow", "opoverload",     "tern",
         "gc",       "enum_match", "constfold", "regalloc", "divmod",         "boolstr",
         "generics", "generics2",  "classes",   "classes2", "integration",
-        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib",
+        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib", "floats", "closures", "closures_toplevel", "nested_fn", "typed_locals", "local_types", "unroll", "closedform", "result", "interfaces",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -109,6 +109,11 @@ int main(int argc, char **argv) {
         "too_many_params", "too_many_method_params", "bad_const", "dup_const",
         "bitwise_on_string", "break_outside_loop", "continue_outside_loop", "intrinsic_arity", "intrinsic_arg_type", "compare_mixed", "extern_with_body", "extern_arity", "extern_argtype", "export_no_body", "fnptr_argcount", "fnptr_argtype", "fnptr_signature", "fnptr_order", "fnptr_arity_mismatch", "methodptr_struct_recv", "methodptr_no_method", "methodptr_struct_return",
         "foreach_ptr", "foreach_nonarray", "bad_escape", "int_overflow", "empty_radix_literal", "digits_then_letters",
+        "float_to_int", "float_mod", "float_bitwise", "float_not", "float_shift",
+        "lambda_return_type", "lambda_not_int", "lambda_fn_return", "lambda_in_lambda",
+        "nested_fn_capture", "fn_reads_toplevel_var", "nested_fn_extern", "nested_fn_no_body",
+        "result_mismatch", "result_no_ret", "result_ambiguous", "result_too_big",
+        "iface_missing_method", "iface_bad_signature", "iface_nonvirtual", "iface_no_method",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);

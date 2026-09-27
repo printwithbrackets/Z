@@ -1,0 +1,1 @@
+'?' propagates 'string' but this function returns 'int'

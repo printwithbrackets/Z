@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "limits.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -59,12 +60,68 @@ static void buf_printf(Buf *b, const char *fmt, ...) {
 /* System V integer-argument registers, in order. */
 static const char *const ARG_REGS[6] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
+/* One described variable or parameter, ready to be written as a DIE once the
+ * whole compile unit is assembled. */
+typedef struct {
+    const char *name;
+    int file;
+    int line;
+    int slot;
+    int type_code; /* dbg_type_of result, or 0 for untyped */
+} DbgVar;
+
+#define DBUG_MAX_VARS 256
+
+typedef struct {
+    const char *name;
+    int file;
+    int line;
+    const char *begin_label;
+    const char *end_label;
+    /* dbg_type_of of the result, or 0 for untyped. Without this the subprogram
+     * DIE carries no DW_AT_type at all and a reader infers `void`, so every
+     * function looked like it returned nothing. */
+    int ret_type;
+    int nparams; /* how many leading entries of vars[] are parameters */
+    DbgVar vars[DBUG_MAX_VARS];
+    int nvars;
+} DbgFunc;
+
+#define DBUG_MAX_FUNCS 1024
+
+/* Distinct source files a compilation unit spans (an `import` pulls in more),
+ * which is how many entries the DWARF file table can hold. */
+#define MAX_DBG_FILES 128
+
 /* Callee-saved registers used to hold local variables whose address is never
  * taken, so their values stay in registers instead of reloading from the
  * stack on every use. rax is the accumulator and r10/r11 are expression
  * scratch, so the pool excludes them. */
 static const char *const POOL_REGS[] = {"rbx", "r12", "r13", "r14", "r15"};
 #define NPOOL 5
+
+/* One (implementing type, interface) pair whose itab has to exist. Collected
+ * during the emit pass and written out at the end, so a conversion that is never
+ * reached costs nothing. */
+typedef struct {
+    StructDef *impl;
+    IfaceDef *idef;
+} ItabUse;
+
+#define MAX_ITABS 256
+
+/* The symbol an itab is emitted under. Derived from both names, so two types
+ * implementing one interface get two arrays, and one type implementing two
+ * interfaces gets two arrays. */
+static const char *iface_itab_symbol(IfaceDef *id, StructDef *impl) {
+    static char bufs[8][160];
+    static int next = 0;
+    char *b = bufs[next];
+    next = (next + 1) % 8;
+    snprintf(b, sizeof bufs[0], "$itab$%s$%s", impl != NULL ? impl->name : "?",
+             id != NULL ? id->name : "?");
+    return b;
+}
 
 /* Per-scalar-local register-allocation info, keyed by frame slot. */
 typedef struct {
@@ -74,9 +131,19 @@ typedef struct {
     int assigned;   /* index into POOL_REGS, or -1 */
     int const_cand; /* defined by a constant (E_INT) initializer */
     long long const_val;
+    /* 1 when the local holds a float. A float is 8 bytes and lives in one slot,
+     * but its value belongs in an XMM register, and the register pool here is
+     * general-purpose only. Rather than grow a second pool and teach every pass
+     * about both, float locals stay in the frame. That costs a load and a store
+     * per access and is the conservative choice: the alternative is a register
+     * class that half the optimizer does not model. */
+    int is_float;
     int reassigned; /* written by an assignment somewhere in the function */
     int is_const;   /* const_cand && !reassigned => value is a compile-time constant */
 } LocalInfo;
+
+/* How deep inlined bodies may nest. Shared with the parser, which enforces the
+ * same limit, so the two agree on what the emitter can hold. */
 
 /* Innermost-loop-first stack of break/continue targets. The parser rejects
  * break/continue outside a loop, so the top entry is always the right one. */
@@ -93,6 +160,14 @@ typedef struct {
     LoopCtx loops[MAX_LOOP_DEPTH];
     int loop_depth;
     int bounds_checks; /* emit a runtime range check on every array index */
+    int debug_info;    /* emit DWARF: line table plus function/local DIEs */
+    int opt;           /* Z_OPT_* level this function is generated at */
+    int measuring;     /* 1 during the sizing pass, which emits no code */
+    /* Interface conversions actually reached, and the itabs they need. Collected
+     * during the emit pass and written out at the end of the file. */
+    ItabUse itabs[MAX_ITABS];
+    int nitabs;
+    int emitting_hoist;/* 1 while emitting a hoisted node's own value */
     Arena *arena;      /* for interned assembly symbol names */
     int temp_top;         /* current temporary high-water during emit */
     int temp_high;        /* max temp slots used in this function */
@@ -105,6 +180,18 @@ typedef struct {
     int pool_mask;    /* bitmask of POOL_REGS indices actually used */
     uint64_t *rodata; /* 64-bit constants (magic multipliers etc.) */
     int nrodata, ro_cap;
+
+    /* ---- DWARF ----
+     *
+     * The section contents are not buffered: a DWARF section contains addresses,
+     * and the only way to write an address codegen does not know yet is to leave
+     * a label reference in the assembly text for the linker to resolve. What is
+     * buffered here is the *description* of each function, gathered while the
+     * code is emitted and turned into a section at the end. */
+    int dbg_file_count; /* distinct source files, i.e. .file entries */
+    const char *dbg_file_names[MAX_DBG_FILES];
+    DbgFunc *dbg_funcs; /* one entry per emitted function */
+    int dbg_nfuncs, dbg_funcs_cap;
 } CG;
 
 /* Interns a 64-bit constant in .rodata, returning its index (labels are
@@ -250,7 +337,93 @@ static void emit_memcpy(CG *cg, int size) {
  * region, so temp 0 begins 8 bytes under the deepest local. */
 static int temp_off(CG *cg, int t) { return 8 + cg->cur_locals_bytes + 8 * (t + 1); }
 
+/* True at a level where the optimizer runs. Everything the M7 pass does --
+ * constant folding and propagation, register allocation, leaf and immediate
+ * operand selection, branch-on-flags, in-place compound assignment, constant
+ * strength reduction -- hangs off constant folding and register allocation, so
+ * switching those off at -O0 switches off the whole set. */
+static int opt_on(const CG *cg) { return cg->opt >= Z_OPT_DEFAULT; }
+
+static void dbg_loc(CG *cg, Span span);
+static void gen_call(CG *cg, Expr *e);
+static void gen_icall(CG *cg, Expr *e);
+static void gen_vcall(CG *cg, Expr *e);
+static int is_compare_op(TokenKind k);
 static int next_label(CG *cg) { return ++cg->label_counter; }
+
+/* ---- argument passing ----
+ *
+ * The System V AMD64 ABI numbers the integer registers and the vector registers
+ * independently, so a float does not displace the integers that follow it, and
+ * it caps them separately: six integer registers, eight vector registers.
+ * Anything past its cap goes on the stack, eight bytes per slot, in argument
+ * order -- so the leftmost overflowing argument is at the lowest address.
+ *
+ * `hidden` counts leading arguments that are not in the source: a struct-return
+ * buffer, a bound receiver, a closure's environment. They occupy the first slots
+ * of the integer sequence, which is why a struct-returning function can pass one
+ * fewer argument in a register than one returning a scalar.
+ *
+ * Both the call site and the callee's prologue run this. That is the point: if
+ * the two ever disagreed about which register a parameter is in, the program
+ * would read a live register as if it held something else, and nothing would say
+ * so. */
+#define Z_MAX_REG_ARGS 6
+/* x86-64 has sixteen vector argument registers, not eight. The old figure was
+ * the number SysV passes in the *integer* sequence, which is a different limit
+ * and the wrong one to be reading from here. */
+#define Z_MAX_REG_FLT 16
+
+/* The vector argument registers by name. A table rather than a formatted
+ * buffer, because an `ArgAssign` outlives the loop that fills it: naming a
+ * register through a pointer into a dead stack slot gave every float argument
+ * whichever name that slot happened to end up holding, so a call with two floats
+ * passed both in xmm1. */
+static const char *const XMM_ARG_REGS[Z_MAX_REG_FLT] = {
+    "xmm0",  "xmm1",  "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
+    "xmm8",  "xmm9",  "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+};
+
+typedef struct {
+    /* The register an argument arrives in -- "rdi", "xmm0", ... -- or NULL when
+     * it arrives on the stack. */
+    const char *reg[Z_MAX_ARGS];
+    /* Byte offset from the stack pointer at the call, for a stack argument.
+     * -1 for a register argument. */
+    int soff[Z_MAX_ARGS];
+    int nstack; /* how many arguments go on the stack */
+    int pad;    /* bytes to subtract from rsp, already rounded to 16 */
+} ArgAssign;
+
+static void assign_args(Type **ptypes, int n, int hidden, ArgAssign *out) {
+    memset(out, 0, sizeof *out);
+    int nint = hidden, nflt = 0, nstack = 0;
+    for (int i = 0; i < n; i++) {
+        out->soff[i] = -1;
+        if (is_kind(ptypes[i], TK_F64)) {
+            if (nflt < Z_MAX_REG_FLT) {
+                out->reg[i] = XMM_ARG_REGS[nflt];
+            } else {
+                out->soff[i] = nstack * 8;
+                nstack++;
+            }
+            nflt++;
+        } else {
+            if (nint < Z_MAX_REG_ARGS) {
+                out->reg[i] = ARG_REGS[nint];
+            } else {
+                out->soff[i] = nstack * 8;
+                nstack++;
+            }
+            nint++;
+        }
+    }
+    out->nstack = nstack;
+    /* The stack has to be 16-byte aligned at the call, so the adjustment is a
+     * whole number of 16-byte units. The frame is already aligned, so this is
+     * enough however many arguments there are. */
+    out->pad = (nstack * 8 + 15) & ~15;
+}
 
 static void store_temp(CG *cg, int t) {
     buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", temp_off(cg, t));
@@ -265,6 +438,306 @@ static int temp_alloc(CG *cg) {
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
     return t;
+}
+
+/* ---- float values ----
+ *
+ * A float is eight bytes, so it occupies a frame slot or a temporary slot exactly
+ * like an int does. What differs is which register holds it while it is being
+ * computed: floats live in XMM registers, so they are moved with `movsd` rather
+ * than `mov`, and combined with the SSE arithmetic instructions rather than the
+ * integer ones. A temporary therefore holds either an integer or a float
+ * depending on what was stored there, and the code that stores it is the code
+ * that knows which.
+ *
+ * xmm0 is the accumulator, exactly as rax is for integers: an expression leaves
+ * its value there. xmm1..xmm3 are scratch. */
+
+static const char *const XMM_ACC = "xmm0";
+static const char *const XMM_SCRATCH[] = {"xmm1", "xmm2", "xmm3"};
+
+/* Stores the float in xmm0 into a temporary slot. */
+static void store_temp_x(CG *cg, int t) {
+    buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", temp_off(cg, t), XMM_ACC);
+}
+
+/* Loads a temporary slot holding a float into `reg`. */
+static void load_temp_x(CG *cg, int t, const char *reg) {
+    buf_printf(cg->out, "  movsd %s, QWORD PTR [rbp - %d]\n", reg, temp_off(cg, t));
+}
+
+/* Places already-staged arguments where the ABI says they go, opening the
+ * outgoing-argument area if any of them spill.
+ *
+ * The arguments are in frame temps by the time this runs, which is what makes it
+ * safe to write them through rsp: a nested call in an argument expression would
+ * otherwise move rsp between computing an offset and using it. `hidden` counts
+ * leading arguments the caller supplies but the source does not name. */
+static void args_prologue(CG *cg, Expr *e, int base, int hidden, ArgAssign *aa) {
+    Type **atypes = arena_alloc_array(cg->arena, (size_t)(e->nargs > 0 ? e->nargs : 1),
+                                      sizeof(Type *));
+    for (int i = 0; i < e->nargs; i++)
+        atypes[i] = e->args[i]->type;
+    assign_args(atypes, e->nargs, hidden, aa);
+    if (aa->nstack > 0) {
+        buf_printf(cg->out, "  sub rsp, %d\n", aa->pad);
+        /* r11 is the scratch: it is not an argument register, so filling the stack
+         * slots cannot disturb an argument already placed in one. */
+        for (int i = 0; i < e->nargs; i++) {
+            if (aa->reg[i] != NULL || aa->soff[i] < 0)
+                continue;
+            if (is_kind(e->args[i]->type, TK_F64)) {
+                buf_printf(cg->out, "  movsd QWORD PTR [rsp + %d], %s\n", aa->soff[i], XMM_ACC);
+            } else {
+                buf_printf(cg->out, "  mov r11, QWORD PTR [rbp - %d]\n", temp_off(cg, base + i));
+                buf_printf(cg->out, "  mov QWORD PTR [rsp + %d], r11\n", aa->soff[i]);
+            }
+        }
+    }
+    for (int i = 0; i < e->nargs; i++) {
+        if (aa->reg[i] == NULL)
+            continue;
+        if (is_kind(e->args[i]->type, TK_F64))
+            load_temp_x(cg, base + i, aa->reg[i]);
+        else
+            load_temp(cg, base + i, aa->reg[i]);
+    }
+}
+
+/* Closes what args_prologue opened. */
+static void args_epilogue(CG *cg, const ArgAssign *aa) {
+    if (aa->nstack > 0)
+        buf_printf(cg->out, "  add rsp, %d\n", aa->pad);
+}
+
+
+/* The bits of `v` as a 64-bit pattern. A double's representation *is* its bit
+ * pattern, so this is the whole conversion. Written out rather than punned
+ * through a union so it does not depend on the host's endianness matching the
+ * target's, which is the one assumption a memcpy pun would quietly make. */
+static uint64_t double_bits(double v) {
+    uint64_t bits = 0;
+    memcpy(&bits, &v, sizeof bits);
+    return bits;
+}
+
+/* Interns a double and returns its .rodata index. Shares the constant pool with
+ * the integer magic numbers, because a pool of 64-bit words is all either needs
+ * and the two never collide. */
+static int rodata_add_double(CG *cg, double v) { return rodata_add(cg, double_bits(v)); }
+
+/* True for the expression kinds whose value is a float that gen_float knows how
+ * to produce, and which have no effect of their own. */
+static int is_float_value_expr(Expr *e) {
+    switch (e->kind) {
+    case E_F64:
+    case E_CVT:
+    case E_VAR:
+    case E_FIELD:
+    case E_INDEX:
+    case E_DEREF:
+    case E_UNARY:
+    case E_TERNARY:
+    case E_CALL:
+    case E_ICALL:
+    case E_VCALL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Puts the value of `e` into xmm0, whatever shape it has: a literal, a local, a
+ * conversion, or a nested expression. */
+static void gen_float(CG *cg, Expr *e);
+
+static void gen_float(CG *cg, Expr *e) {
+    switch (e->kind) {
+    case E_F64: {
+        int idx = rodata_add_double(cg, e->dval);
+        buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + .Lro%d]\n", XMM_ACC, idx);
+        return;
+    }
+    case E_INT: {
+        /* An int reaching a float instruction has already been widened by the
+         * parser, so this only fires for a literal folded early. */
+        int idx = rodata_add_double(cg, (double)e->ival);
+        buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + .Lro%d]\n", XMM_ACC, idx);
+        return;
+    }
+    case E_CVT: {
+        Type *from = e->lhs->type;
+        if (is_kind(e->type, TK_F64)) {
+            if (is_kind(from, TK_F64)) {
+                gen_float(cg, e->lhs);
+            } else {
+                /* int -> float. cvtsi2sd reads a 64-bit signed integer, and
+                 * leaves the float in the low half of the destination. */
+                gen_expr(cg, e->lhs);
+                buf_printf(cg->out, "  cvtsi2sd %s, rax\n", XMM_ACC);
+            }
+            return;
+        }
+        /* float -> int: truncate toward zero, which is what every conversion
+         * from a floating type to an integer does. `cvttsd2si` is the
+         * truncating form; the rounding one would round 2.5 to 2 and 3.5 to 4,
+         * which is not what a cast means. */
+        gen_float(cg, e->lhs);
+        buf_printf(cg->out, "  cvttsd2si rax, %s\n", XMM_ACC);
+        return;
+    }
+    case E_VAR: {
+        if (e->agg_param)
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
+        else
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rbp - %d]\n", XMM_ACC, e->slot);
+        return;
+    }
+    case E_FIELD: {
+        gen_addr(cg, e);
+        buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
+        return;
+    }
+    case E_INDEX: {
+        /* gen_addr leaves the element's address in rax. */
+        gen_addr(cg, e);
+        buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
+        return;
+    }
+    case E_BINARY: {
+        /* Only float *arithmetic* reaches here. A comparison's result is a bool,
+         * so gen_expr routes it to gen_float_cmp instead; falling through to the
+         * default would call gen_expr again and recurse until the stack ran out,
+         * which is what a stray comparison node here once did. */
+        static const char *const ops[] = {"addsd", "subsd", "mulsd", "divsd"};
+        TokenKind op = e->op;
+        const char *ins = NULL;
+        for (size_t i = 0; i < sizeof ops / sizeof(*ops); i++) {
+            TokenKind want = (TokenKind[]){T_PLUS, T_MINUS, T_STAR, T_SLASH}[i];
+            if (op == want)
+                ins = ops[i];
+        }
+        /* Both operands are staged so the *left* one can be the destination.
+         * subsd and divsd are not commutative: with the operands the other way
+         * round they quietly compute `rhs - lhs` and `rhs / lhs`, which is a
+         * miscompile that no test of addition would ever notice. */
+        int tl = temp_alloc(cg);
+        int tr = temp_alloc(cg);
+        gen_float(cg, e->lhs);
+        store_temp_x(cg, tl);
+        gen_float(cg, e->rhs);
+        store_temp_x(cg, tr);
+        load_temp_x(cg, tl, XMM_ACC);
+        /* The right operand is read straight from its slot: an SSE arithmetic
+         * instruction takes a memory operand, so this is one instruction and no
+         * extra register shuffle. */
+        buf_printf(cg->out, "  %s %s, QWORD PTR [rbp - %d]\n", ins, XMM_ACC, temp_off(cg, tr));
+        cg->temp_top = tl;
+        return;
+    }
+    case E_UNARY: {
+        gen_float(cg, e->lhs);
+        if (e->op == T_MINUS) {
+            /* Exclusive-or with the sign bit. Negating by multiplying by -1.0
+             * would be simpler and wrong: it turns -0.0 into +0.0 and turns
+             * infinity into itself, because both have their sign bit set
+             * already. Exclusive-or flips exactly the one bit it means to. */
+            int idx = rodata_add(cg, 0x8000000000000000ULL);
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + .Lro%d]\n", XMM_SCRATCH[1], idx);
+            /* Destination first: `xorpd xmm0, xmm1` negates xmm0 in place.
+             * Writing the mask register first would leave the negated value
+             * there, and everything downstream reads xmm0. */
+            buf_printf(cg->out, "  xorpd %s, %s\n", XMM_ACC, XMM_SCRATCH[1]);
+        }
+        return;
+    }
+    case E_TERNARY: {
+        int te = temp_alloc(cg);
+        int fe = temp_alloc(cg);
+        int lelse = next_label(cg);
+        int lend = next_label(cg);
+        gen_expr(cg, e->lhs); /* the bool condition, into rax */
+        buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", lelse);
+        gen_float(cg, e->rhs);
+        store_temp_x(cg, te);
+        buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lend, lelse);
+        gen_float(cg, e->args[0]);
+        store_temp_x(cg, te);
+        buf_printf(cg->out, ".L%d:\n", lend);
+        load_temp_x(cg, te, XMM_ACC);
+        cg->temp_top = fe;
+        return;
+    }
+    case E_CALL:
+    case E_ICALL:
+    case E_VCALL: {
+        /* Dispatch by kind, not to gen_call for all three. A float-valued call
+         * through a pointer is an indirect call, and gen_call would look for a
+         * *name* to call -- of which an E_ICALL has none -- and emit a call to a
+         * null symbol. The result of a float-returning call is already in xmm0,
+         * which is where gen_float expects to find it, so no move is needed. */
+        if (e->kind == E_ICALL)
+            gen_icall(cg, e);
+        else if (e->kind == E_VCALL)
+            gen_vcall(cg, e);
+        else
+            gen_call(cg, e);
+        return;
+    }
+    default:
+        gen_expr(cg, e);
+        return;
+    }
+}
+
+/* Compares two floats and leaves a 0 or 1 in rax.
+ *
+ * The result follows IEEE-754 rather than intuition. `ucomisd` sets ZF, PF and
+ * CF as if the two values were unsigned integers, and sets all three when the
+ * comparison is *unordered*, which is what happens if either side is NaN. So:
+ *
+ *   ==   ZF=1 and PF=0        (PF excludes NaN)
+ *   !=   ZF=0 or  PF=1        (NaN is not equal to anything, including itself)
+ *   <    CF=1 and PF=0        (operands swapped so "less" lands in CF)
+ *   <=   CF=1 or  ZF=1, and PF=0
+ *   >    CF=0 and ZF=0        (NaN sets CF, so it is already excluded)
+ *   >=   CF=0                 (likewise)
+ *
+ * The signed conditions are `setb`/`setbe` and the unsigned ones `seta`/`setae`;
+ * mixing them up is the classic way to get a comparison that works on every
+ * input except the one nobody tested. */
+static void gen_float_cmp(CG *cg, Expr *e) {
+    int t = temp_alloc(cg);
+    /* The left operand ends up in xmm0 and the right in xmm1, so the flags read
+     * in the same direction as the source. Getting this the other way round
+     * silently inverts every ordering comparison, which is exactly the kind of
+     * bug that looks like a working compiler until the first `if (a < b)`. */
+    gen_float(cg, e->rhs);
+    store_temp_x(cg, t);
+    gen_float(cg, e->lhs);
+    load_temp_x(cg, t, XMM_SCRATCH[0]);
+    cg->temp_top = t;
+
+    TokenKind op = e->op;
+    if (op == T_LT || op == T_LE) {
+        /* "less" lands in CF, and "less or equal" is CF-or-ZF -- but an
+         * unordered comparison sets CF too, so CF alone would report every NaN
+         * comparison as true. The parity flag is the one that distinguishes
+         * "less" from "unordered", so it has to be folded in. */
+        buf_printf(cg->out, "  ucomisd %s, %s\n", XMM_ACC, XMM_SCRATCH[0]);
+        buf_printf(cg->out, "  set%s al\n", op == T_LT ? "b" : "be");
+        buf_puts(cg->out, "  setnp cl\n  and al, cl\n");
+    } else if (op == T_GT || op == T_GE) {
+        buf_printf(cg->out, "  ucomisd %s, %s\n", XMM_ACC, XMM_SCRATCH[0]);
+        buf_printf(cg->out, "  set%s al\n", op == T_GT ? "a" : "ae");
+    } else if (op == T_EQ) {
+        buf_printf(cg->out, "  ucomisd %s, %s\n", XMM_ACC, XMM_SCRATCH[0]);
+        buf_puts(cg->out, "  sete al\n  setnp cl\n  and al, cl\n");
+    } else { /* T_NE */
+        buf_printf(cg->out, "  ucomisd %s, %s\n", XMM_ACC, XMM_SCRATCH[0]);
+        buf_puts(cg->out, "  setne al\n  setp cl\n  or al, cl\n");
+    }
+    buf_puts(cg->out, "  movzx eax, al\n");
 }
 
 /* Loads the 8-byte value at the address in rax. */
@@ -290,6 +763,7 @@ static LocalInfo *li_for(CG *cg, int slot) {
     li->assigned = -1;
     li->const_cand = 0;
     li->const_val = 0;
+    li->is_float = 0;
     li->reassigned = 0;
     li->is_const = 0;
     return li;
@@ -420,6 +894,22 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
             walk_alloc_expr(cg, s->init, cur);
         if (s->slot > 0) {
             li_def(cg, s->slot, cur);
+            if (s->boxed) {
+                /* A captured local is neither a constant nor a register
+                 * candidate. Constant propagation is the dangerous one: a
+                 * `var n = 0` that a closure increments is never reassigned in
+                 * *this* function -- the assignment is inside the hoisted lambda
+                 * -- so it looks like the literal 0, and the declaration is
+                 * dropped along with the box the environment points at. */
+                LocalInfo *bi = li_for(cg, s->slot);
+                bi->const_cand = 0;
+                bi->eligible = 0;
+            }
+            /* Record the floatness once, at the declaration, which is the only
+             * place the declared type is known. Everything downstream asks
+             * local_reg, which consults this. */
+            if (type_is_float(s->type))
+                li_for(cg, s->slot)->is_float = 1;
             /* A local initialized with a plain integer constant is a candidate
              * for compile-time propagation (finalized in alloc_regs). */
             if (s->init != NULL && s->init->kind == E_INT && !is_aggregate(s->type)) {
@@ -475,7 +965,9 @@ static void alloc_regs(CG *cg, Stmt *fn) {
     if (fn == NULL)
         return;
     /* Parameters stay in memory (their values arrive in argument registers and
-     * are spilled in the prologue). */
+     * are spilled in the prologue). A float parameter arrives in an XMM
+     * register and is spilled too, but by a different instruction, so the value
+     * is a double rather than a 64-bit integer. */
     for (int i = 0; i < fn->nparams; i++)
         li_for(cg, fn->params[i]->slot)->eligible = 0;
 
@@ -531,6 +1023,8 @@ static LocalInfo *li_lookup(CG *cg, int slot) {
 static int const_fold_val(CG *cg, Expr *e, long long *out) {
     if (e == NULL)
         return 0;
+    if (!opt_on(cg))
+        return 0; /* -O0 does no constant folding */
     switch (e->kind) {
     case E_NULL:
         *out = 0;
@@ -634,10 +1128,18 @@ static int const_fold_val(CG *cg, Expr *e, long long *out) {
 }
 
 /* Returns the pool register holding `slot`'s value, or NULL. */
+/* The register an eligible local was assigned, or NULL when it stays in
+ * memory. -O0 never allocates one, so every local is a memory reference. */
 static const char *local_reg(CG *cg, int slot) {
-    for (int i = 0; i < cg->nlocals; i++)
-        if (cg->locals[i].slot == slot && cg->locals[i].assigned >= 0)
-            return POOL_REGS[cg->locals[i].assigned];
+    if (!opt_on(cg))
+        return NULL;
+    for (int i = 0; i < cg->nlocals; i++) {
+        if (cg->locals[i].slot != slot || cg->locals[i].assigned < 0)
+            continue;
+        if (cg->locals[i].is_float)
+            return NULL; /* stays in the frame; see LocalInfo.is_float */
+        return POOL_REGS[cg->locals[i].assigned];
+    }
     return NULL;
 }
 
@@ -652,6 +1154,19 @@ static int is_leaf_expr(Expr *e) {
 }
 
 /* Emits a leaf `e` (already known to satisfy is_leaf_expr) into `reg`. */
+/* The register a leaf currently occupies, or NULL if it has none: not a local,
+ * a propagated constant (which lives in the instruction stream, not a register),
+ * or something that was spilled. Lets an operator name the operand instead of
+ * copying it into a scratch register first. */
+static const char *leaf_live_reg(CG *cg, Expr *e) {
+    if (e == NULL || e->kind != E_VAR || e->agg_param || is_aggregate(e->type))
+        return NULL;
+    LocalInfo *li = li_lookup(cg, e->slot);
+    if (li != NULL && li->is_const)
+        return NULL;
+    return local_reg(cg, e->slot);
+}
+
 static void gen_leaf_to_reg(CG *cg, Expr *e, const char *reg) {
     if (e->kind == E_INT || e->kind == E_BOOL) {
         buf_printf(cg->out, "  mov %s, %lld\n", reg, e->ival);
@@ -673,6 +1188,11 @@ static void gen_leaf_to_reg(CG *cg, Expr *e, const char *reg) {
 static void gen_addr(CG *cg, Expr *e) {
     switch (e->kind) {
     case E_VAR:
+        if (e->boxed) {
+            /* The address of a captured variable is inside its box. */
+            buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->slot);
+            return;
+        }
         if (e->agg_param) {
             /* An aggregate param is passed by reference: the slot holds the
              * address of the caller's value. */
@@ -739,6 +1259,7 @@ static void gen_addr(CG *cg, Expr *e) {
 static const char *z_sym(CG *cg, const char *name);
 static void gen_icall(CG *cg, Expr *e);
 static void gen_mptr(CG *cg, Expr *e);
+static void gen_expr(CG *cg, Expr *e);
 
 static int is_cmp_op(TokenKind k) {
     return k == T_EQ || k == T_NE || k == T_LT || k == T_LE || k == T_GT || k == T_GE;
@@ -772,6 +1293,78 @@ static void emit_cmp_zero(CG *cg, TokenKind op) {
     }
 }
 
+/* The same operators, naming a register other than r11 for the right operand.
+ *
+ * `shl` and `sar` are the two that cannot simply substitute: the shift count has
+ * to be in cl, and r11 is the only scratch register guaranteed free of the
+ * argument registers at this point. Naming a callee-saved register instead would
+ * be fine, so those two fall back to moving the operand into r11 first. */
+/* The same operators, naming a register other than r11 for the right operand.
+ *
+ * The shifts are the two that cannot simply substitute: the count has to be in
+ * cl, and the operand therefore has to be somewhere the `mov rcx, reg` form can
+ * read. A callee-saved register satisfies that, so no move is needed for any
+ * register this can be handed -- the guard is there so a future caller passing
+ * an argument register still gets correct code. */
+static void emit_binop_reg(CG *cg, TokenKind op, const char *reg) {
+    switch (op) {
+    case T_PLUS:
+        buf_printf(cg->out, "  add rax, %s\n", reg);
+        break;
+    case T_MINUS:
+        buf_printf(cg->out, "  sub rax, %s\n", reg);
+        break;
+    case T_STAR:
+        buf_printf(cg->out, "  imul rax, %s\n", reg);
+        break;
+    case T_SLASH:
+        buf_printf(cg->out, "  cqo\n  idiv %s\n", reg);
+        break;
+    case T_PERCENT:
+        buf_printf(cg->out, "  cqo\n  idiv %s\n  mov rax, rdx\n", reg);
+        break;
+    case T_AMP:
+        buf_printf(cg->out, "  and rax, %s\n", reg);
+        break;
+    case T_PIPE:
+        buf_printf(cg->out, "  or rax, %s\n", reg);
+        break;
+    case T_CARET:
+        buf_printf(cg->out, "  xor rax, %s\n", reg);
+        break;
+    case T_SHL:
+        buf_printf(cg->out, "  mov rcx, %s\n  shl rax, cl\n", reg);
+        break;
+    case T_SHR:
+        buf_printf(cg->out, "  mov rcx, %s\n  sar rax, cl\n", reg);
+        break;
+    case T_EQ:
+        buf_printf(cg->out, "  cmp rax, %s\n  sete al\n  movzx rax, al\n", reg);
+        break;
+    case T_NE:
+        buf_printf(cg->out, "  cmp rax, %s\n  setne al\n  movzx rax, al\n", reg);
+        break;
+    case T_LT:
+        buf_printf(cg->out, "  cmp rax, %s\n  setl al\n  movzx rax, al\n", reg);
+        break;
+    case T_LE:
+        buf_printf(cg->out, "  cmp rax, %s\n  setle al\n  movzx rax, al\n", reg);
+        break;
+    case T_GT:
+        buf_printf(cg->out, "  cmp rax, %s\n  setg al\n  movzx rax, al\n", reg);
+        break;
+    case T_GE:
+        buf_printf(cg->out, "  cmp rax, %s\n  setge al\n  movzx rax, al\n", reg);
+        break;
+    default:
+        buf_printf(cg->out, "  add rax, %s\n", reg);
+        break;
+    }
+}
+
+/* The same operators with the right operand already in r11, which is the form
+ * every other caller reaches: the left is in rax and the right is materialized
+ * into r11 by the caller. */
 static void emit_binop_op(CG *cg, TokenKind op) {
     switch (op) {
     case T_PLUS:
@@ -836,6 +1429,23 @@ static void gen_int_literal(CG *cg, long long v) {
     }
 }
 
+/* Evaluate call arguments into frame temps starting at `base`. A float argument
+ * has to go through gen_float, which leaves its value in xmm0; staging it with
+ * gen_expr instead would save rax, which at that point usually holds the
+ * receiver or the object just allocated rather than the value, and the callee
+ * would read back a small integer as a denormal double. */
+static void gen_args_stage(CG *cg, Expr *e, int base) {
+    for (int i = 0; i < e->nargs; i++) {
+        if (is_kind(e->args[i]->type, TK_F64)) {
+            gen_float(cg, e->args[i]);
+            store_temp_x(cg, base + i);
+        } else {
+            gen_expr(cg, e->args[i]);
+            store_temp(cg, base + i);
+        }
+    }
+}
+
 static void gen_call(CG *cg, Expr *e) {
     int sret = is_aggregate(e->type);
     int rt_nt = sret ? (type_size(e->type) + 7) / 8 : 0;
@@ -852,17 +1462,32 @@ static void gen_call(CG *cg, Expr *e) {
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
     for (int i = 0; i < e->nargs; i++) {
-        gen_expr(cg, e->args[i]);
-        store_temp(cg, base + i);
+        if (is_kind(e->args[i]->type, TK_F64)) {
+            gen_float(cg, e->args[i]);
+            store_temp_x(cg, base + i);
+        } else {
+            gen_expr(cg, e->args[i]);
+            store_temp(cg, base + i);
+        }
     }
-    int regoff = sret ? 1 : 0;
-    for (int i = 0; i < e->nargs && i + regoff < 6; i++) {
-        load_temp(cg, base + i, ARG_REGS[i + regoff]);
-    }
+    /* The System V ABI numbers the integer registers and the vector registers
+     * independently: the first integer argument goes in rdi whether or not any
+     * float has been passed, and the first float goes in xmm0. So each class is
+     * counted separately and neither displaces the other. Counting them in one
+     * sequence would make `f(1.0, 2)` pass 2 in rsi where the callee looks in
+     * rdx.
+     *
+     * Each class is also capped separately, and anything past its cap goes on the
+     * stack rather than being refused. The arguments are already staged in frame
+     * temps, so the stack slots can be written now without a nested call moving
+     * rsp underneath them. */
+    ArgAssign aa;
+    args_prologue(cg, e, base, sret ? 1 : 0, &aa);
     if (sret) {
         buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
     }
     buf_printf(cg->out, "  call %s\n", e->is_extern ? e->name : z_sym(cg, e->name));
+    args_epilogue(cg, &aa);
     if (sret) {
         /* The result value is the address of the buffer. Keep the buffer
          * reserved for the rest of the statement so a later nested call does
@@ -908,8 +1533,15 @@ static void gen_icall(CG *cg, Expr *e) {
     int rt_base = sret ? temp_alloc_many(cg, rt_nt) : 0;
     int rt_addr = sret ? temp_off(cg, rt_base + rt_nt - 1) : 0;
     /* The parser rejects a bound pointer returning a struct, so a struct
-     * result buffer and a bound receiver never both claim rdi here. */
+     * result buffer and a bound receiver never both claim rdi here. A closure is
+     * refused for the same reason, so its environment and a result buffer cannot
+     * both want rdi either. */
+    int iface = is_kind(e->lhs->type, TK_IFACE);
     int bound = is_kind(e->lhs->type, TK_MPTR);
+    /* A closure's cell is { code, env }, the same two words in the same order as
+     * a bound method's, so the hidden first argument is the environment for one
+     * and the receiver for the other. */
+    int closure = is_kind(e->lhs->type, TK_CLOSURE);
     int tf = temp_alloc(cg);
     gen_expr(cg, e->lhs); /* the callable */
     store_temp(cg, tf);
@@ -917,24 +1549,42 @@ static void gen_icall(CG *cg, Expr *e) {
     cg->temp_top += e->nargs;
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
-    for (int i = 0; i < e->nargs; i++) {
-        gen_expr(cg, e->args[i]);
-        store_temp(cg, base + i);
-    }
-    /* A bound pointer's receiver occupies rdi, so the declared arguments start
-     * one register higher. */
-    int regoff = (sret || bound) ? 1 : 0;
-    for (int i = 0; i < e->nargs && i + regoff < 6; i++)
-        load_temp(cg, base + i, ARG_REGS[i + regoff]);
+    gen_args_stage(cg, e, base);
+    /* A bound pointer's receiver, or a closure's environment, occupies rdi, so
+     * the declared arguments start one register higher -- and once a hidden
+     * argument has taken rdi, the declared arguments continue in the integer
+     * sequence, so a float among them is passed as raw bits in a general-purpose
+     * register. The vector sequence only applies when nothing is hidden. */
+    /* The same assignment the callee's prologue reads, with the hidden argument
+     * counted as a leading integer-class one. A float among the declared
+     * arguments still arrives in a vector register: the ABI numbers the two
+     * sequences independently, so an environment in rdi does not push the first
+     * float out of xmm0. */
+    ArgAssign aa;
+    args_prologue(cg, e, base, (sret || bound || closure || iface) ? 1 : 0, &aa);
     if (sret)
         buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
     load_temp(cg, tf, "r11");
-    if (bound) {
+    if (iface) {
+        /* An interface cell is { itab, receiver }. The code address is not in the
+         * cell -- the cell holds one itab for the whole interface -- so it comes
+         * from the slot this method's name resolved to at parse time. */
+        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
+        buf_printf(cg->out, "  mov r11, QWORD PTR [r11 + %d]\n", e->vtable_index * 8);
+    } else if (bound) {
         /* r11 is the binding cell: { code, receiver }. */
+        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
+    } else if (closure) {
+        /* { code, env }: the environment becomes the hidden first argument and
+         * the declared arguments were placed from rsi up, which is where the
+         * hoisted function expects to find them. */
         buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
         buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
     }
     buf_printf(cg->out, "  call r11\n");
+    args_epilogue(cg, &aa);
     if (sret) {
         buf_printf(cg->out, "  lea rax, [rbp - %d]\n", rt_addr);
         cg->temp_top = rt_base + rt_nt;
@@ -1016,17 +1666,36 @@ static void gen_vcall(CG *cg, Expr *e) {
     cg->temp_top += e->nargs;
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
-    for (int i = 0; i < e->nargs; i++) {
-        gen_expr(cg, e->args[i]);
-        store_temp(cg, base + i);
-    }
-    /* Resolve the target: obj = args[0]; vptr = obj[0]; fn = vtable[vtable_index]. */
+    gen_args_stage(cg, e, base);
+    /* Resolve the target: obj = args[0]; vptr = obj[0]; fn = vtable[vtable_index].
+     * Done before the arguments are placed, because r11 is the scratch the
+     * placement uses. */
     load_temp(cg, base + 0, "r11");                      /* r11 = receiver object */
     buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n"); /* vptr */
     buf_printf(cg->out, "  mov r11, QWORD PTR [r11 + %d]\n", e->vtable_index * 8);
-    int regoff = sret ? 1 : 0;
-    for (int i = 0; i < e->nargs && i + regoff < 6; i++)
-        load_temp(cg, base + i, ARG_REGS[i + regoff]);
+    /* The resolved code address is in r11, which the argument placement is about
+     * to overwrite, so stash *that* -- not the receiver. Reloading the receiver
+     * here and saving it would store the object pointer and then call it. */
+    int vt = temp_alloc(cg);
+    buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], r11\n", temp_off(cg, vt));
+    {
+        /* A virtual call is reached through a vtable, so the slot to load cannot
+         * be known while generating the call. Stash it, place the arguments, then
+         * come back for it. */
+        ArgAssign aa;
+        args_prologue(cg, e, base, sret ? 1 : 0, &aa);
+        load_temp(cg, vt, "r11");
+        cg->temp_top = vt;
+        buf_printf(cg->out, "  call r11\n");
+        args_epilogue(cg, &aa);
+        if (sret) {
+            buf_printf(cg->out, "  lea rax, [rbp - %d]\n", rt_addr);
+            cg->temp_top = rt_base + rt_nt;
+        } else {
+            cg->temp_top = vt;
+        }
+        return;
+    }
     if (sret)
         buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
     buf_printf(cg->out, "  call r11\n");
@@ -1128,10 +1797,68 @@ static void gen_intrinsic(CG *cg, Expr *e) {
     cg->temp_top = t;
 }
 
+/* ---- interfaces ----
+ *
+ * An interface value is a pointer to a { itab, receiver } cell, and the itab is
+ * a static array of code pointers, one per method the interface requires, in the
+ * interface's declaration order. A call resolves a method name to an index once,
+ * at parse time, and loads that slot -- so every implementing type has to agree
+ * on the layout, which it does by following the interface's order.
+ *
+ * A struct's methods are emitted as ordinary `z$` symbols, so its itab points
+ * straight at them. A class dispatches through its vtable instead, so its itab
+ * points at a small trampoline per slot that loads the receiver's vtable and
+ * jumps through it -- which is what keeps a subclass stored in an interface
+ * calling the override rather than the implementation the conversion site
+ * happened to name. */
+
+/* Records that this pair is needed. Returns 0 if the table is full, which the
+ * caller treats as "do not emit": a program needing more distinct interface
+ * conversions than this has been tested against should fail to link rather than
+ * silently call the wrong thing. */
+static int iface_note_itab(CG *cg, StructDef *impl, IfaceDef *idef) {
+    for (int i = 0; i < cg->nitabs; i++)
+        if (cg->itabs[i].impl == impl && cg->itabs[i].idef == idef)
+            return 1;
+    if (cg->nitabs >= MAX_ITABS)
+        return 0;
+    cg->itabs[cg->nitabs].impl = impl;
+    cg->itabs[cg->nitabs].idef = idef;
+    cg->nitabs++;
+    return 1;
+}
+
 static void gen_expr(CG *cg, Expr *e) {
+    /* Loop-invariant code motion may have already computed this into a slot
+     * ahead of the enclosing loop; read it back instead of recomputing. While
+     * emitting that very computation the guard must not fire. */
+    if ((e->kind == E_BINARY || e->kind == E_UNARY) && e->hoisted_slot != 0 &&
+        !cg->emitting_hoist) {
+        buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->hoisted_slot);
+        return;
+    }
+    /* A float-typed expression computes in an XMM register. Dispatching on the
+     * *type* rather than on the node kind is what makes this total: a float can
+     * arrive as a literal, a local, a field, a conversion, a call or an
+     * arithmetic expression, and they all want the same treatment.
+     *
+     * A whitelist, not "anything that is a float and is not a binary": an
+     * assignment is float-typed too, and routing it here would send gen_float's
+     * unhandled default back to gen_expr and round forever. Enumerating the
+     * kinds that produce a value with no effect of their own means a node kind
+     * added later is handled by the integer path (wrong for a float, but loudly
+     * wrong in testing) rather than by mutual recursion. */
+    if (is_kind(e->type, TK_F64) && is_float_value_expr(e)) {
+        gen_float(cg, e);
+        return;
+    }
     switch (e->kind) {
     case E_INT:
         gen_int_literal(cg, e->ival);
+        break;
+    case E_F64:
+    case E_CVT:
+        gen_float(cg, e);
         break;
     case E_BOOL:
         buf_printf(cg->out, "  mov rax, %d\n", e->ival ? 1 : 0);
@@ -1150,6 +1877,17 @@ static void gen_expr(CG *cg, Expr *e) {
                 buf_printf(cg->out, "  mov rax, %lld\n", li->const_val);
                 break;
             }
+        }
+        if (e->boxed) {
+            /* The slot holds the box pointer; the value is behind it. */
+            buf_printf(cg->out, "  mov r11, QWORD PTR [rbp - %d]\n", e->slot);
+            if (is_kind(e->type, TK_F64))
+                buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", XMM_ACC);
+            else if (!is_aggregate(e->type))
+                buf_printf(cg->out, "  mov rax, QWORD PTR [r11]\n");
+            else
+                buf_printf(cg->out, "  mov rax, r11\n");
+            break;
         }
         const char *reg = (e->agg_param || is_aggregate(e->type)) ? NULL : local_reg(cg, e->slot);
         if (reg != NULL) {
@@ -1207,12 +1945,17 @@ static void gen_expr(CG *cg, Expr *e) {
             if (f->is_prop)
                 continue;
             cg->temp_top = top;
-            gen_expr(cg, e->args[fi++]);
             int faddr = saddr - f->offset;
             if (is_aggregate(f->type)) {
+                gen_expr(cg, e->args[fi++]);
                 buf_printf(cg->out, "  mov rsi, rax\n  lea rdi, [rbp - %d]\n", faddr);
                 emit_memcpy(cg, type_size(f->type));
+            } else if (is_kind(f->type, TK_F64)) {
+                /* The value arrives in xmm0, not rax. */
+                gen_float(cg, e->args[fi++]);
+                buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", faddr, XMM_ACC);
             } else {
+                gen_expr(cg, e->args[fi++]);
                 buf_printf(cg->out, "  lea r11, [rbp - %d]\n", faddr);
                 buf_printf(cg->out, "  mov QWORD PTR [r11], rax\n");
             }
@@ -1225,6 +1968,98 @@ static void gen_expr(CG *cg, Expr *e) {
         int esz = type_size(e->type->base);
         gen_expr(cg, e->lhs); /* count */
         buf_printf(cg->out, "  mov rdi, rax\n  mov rsi, %d\n  call z_newarray\n", esz);
+        break;
+    }
+    case E_TRY: {
+        /* `expr?` on a Result.
+         *
+         * The operand is an aggregate, so gen_expr leaves its *address* in rax.
+         * That address goes into a temp because the early return has to jump away
+         * and come back, and the value it left behind has to still be there. The
+         * sequence is exactly what an explicit `match` and `return` would emit:
+         * read the discriminant, and on Err copy the whole value into the
+         * caller's result buffer and leave.
+         *
+         * Copying all sixteen bytes is sound because every Result has the same
+         * layout -- tag at 0, one payload word at 8 -- whatever T and E are. The
+         * bytes are an Err carrying an E, and the caller expects a Result whose
+         * Err carries that same E, so the value is exactly what was asked for. */
+        Type *rt = e->lhs->type;
+        if (e->type == NULL || rt == NULL) {
+            /* The parser already reported this; emit something harmless so the
+             * rest of the function still generates and later errors are real. */
+            gen_expr(cg, e->lhs);
+            break;
+        }
+        int tsz = type_size(rt);
+        int tnt = (tsz + 7) / 8;
+        if (tnt < 1)
+            tnt = 1;
+        int t = temp_alloc_many(cg, tnt);
+        gen_expr(cg, e->lhs);
+        store_temp(cg, t);
+        int err_tag = rt->udef->variants[1].tag;
+        int ok_off = rt->udef->variants[0].fields[0].offset;
+        int lcont = next_label(cg);
+        load_temp(cg, t, "r11");
+        buf_printf(cg->out, "  cmp DWORD PTR [r11], %d\n", err_tag);
+        buf_printf(cg->out, "  jne .L%d\n", lcont);
+        /* The error path: hand the value back and leave the function. */
+        buf_printf(cg->out, "  mov rsi, QWORD PTR [rbp - %d]\n", temp_off(cg, t));
+        buf_printf(cg->out, "  mov rdi, QWORD PTR [rbp - %d]\n", cg->cur_ret_slot);
+        emit_memcpy(cg, tsz);
+        buf_printf(cg->out, "  jmp .Lret_%s\n", cg->cur_sym);
+        buf_printf(cg->out, ".L%d:\n", lcont);
+        /* The Ok path: the payload word, left in rax as the expression's value. */
+        load_temp(cg, t, "rax");
+        buf_printf(cg->out, "  mov rax, QWORD PTR [rax + %d]\n", ok_off);
+        break;
+    }
+    case E_IFACE: {
+        /* Materialise a concrete value as an interface value: a heap cell holding
+         * { itab, receiver }.
+         *
+         * A class is already a pointer, so it is the receiver as it stands. A
+         * struct value has to be copied to the heap first, because the cell
+         * outlives the frame the value was in -- the same reason a closure's
+         * environment is on the heap. Either way the receiver is a pointer, which
+         * is what lets a struct and a class share one calling convention here:
+         * Z already passes an aggregate receiver by reference, so a struct
+         * method's `this` is a pointer to the value and reads its fields
+         * straight through it.
+         *
+         * The cell is the same two words a bound method uses, so the garbage
+         * collector already traces it and the call sequence in gen_icall is
+         * shared. */
+        StructDef *impl = e->impl;
+        IfaceDef *id = e->idef;
+        int rtmp = temp_alloc(cg);
+        if (impl != NULL && impl->is_class) {
+            gen_expr(cg, e->lhs); /* already the object pointer */
+        } else {
+            /* Two temps, not one: the source address and the new heap block are
+             * both live across the allocation, and sharing a slot made the copy
+             * read and write the same address -- the receiver ended up pointing
+             * into the caller's frame, which the cell then outlived. */
+            int src = temp_alloc(cg);
+            int blk = temp_alloc(cg);
+            gen_expr(cg, e->lhs); /* the address of the value */
+            store_temp(cg, src);
+            int sz = type_size(e->lhs->type);
+            buf_printf(cg->out, "  mov rdi, %d\n  call z_newobj\n", sz);
+            store_temp(cg, blk);
+            load_temp(cg, src, "rsi");
+            load_temp(cg, blk, "rdi");
+            emit_memcpy(cg, sz);
+            cg->temp_top = src + 1;
+        }
+        store_temp(cg, rtmp);
+        if (!cg->measuring)
+            iface_note_itab(cg, impl, id);
+        buf_printf(cg->out, "  lea rdi, [rip + %s]\n", iface_itab_symbol(id, impl));
+        load_temp(cg, rtmp, "rsi");
+        buf_printf(cg->out, "  call z_newiface\n");
+        cg->temp_top = rtmp;
         break;
     }
     case E_UNIONLIT: {
@@ -1244,12 +2079,21 @@ static void gen_expr(CG *cg, Expr *e) {
         for (int i = 0; i < e->nargs && i < e->variant->nfields; i++) {
             cg->temp_top = top;
             Field *f = &e->variant->fields[i];
-            gen_expr(cg, e->args[i]);
             int faddr = saddr - f->offset;
             if (is_aggregate(f->type)) {
+                gen_expr(cg, e->args[i]);
                 buf_printf(cg->out, "  mov rsi, rax\n  lea rdi, [rbp - %d]\n", faddr);
                 emit_memcpy(cg, type_size(f->type));
+            } else if (is_kind(f->type, TK_F64)) {
+                /* The value is in an XMM register, not rax. Storing rax here put
+                 * whatever the previous instruction happened to leave there into
+                 * the payload, so a variant carrying a double read back as a
+                 * denormal built out of an unrelated register. */
+                gen_float(cg, e->args[i]);
+                buf_printf(cg->out, "  lea r11, [rbp - %d]\n", faddr);
+                buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
             } else {
+                gen_expr(cg, e->args[i]);
                 buf_printf(cg->out, "  lea r11, [rbp - %d]\n", faddr);
                 buf_printf(cg->out, "  mov QWORD PTR [r11], rax\n");
             }
@@ -1278,10 +2122,23 @@ static void gen_expr(CG *cg, Expr *e) {
             for (int b = 0; b < arm->nbind && arm->variant != NULL && b < arm->variant->nfields;
                  b++) {
                 int off = arm->variant->fields[b].offset;
+                Type *ft = arm->variant->fields[b].type;
                 cg->temp_top = t + 1;
                 load_temp(cg, t, "r11");
-                buf_printf(cg->out, "  mov rax, QWORD PTR [r11 + %d]\n", off);
-                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", arm->bind_slots[b]);
+                if (is_aggregate(ft)) {
+                    /* An aggregate payload lives inline in the union, and the
+                     * parser gave the binding a slot that holds a pointer (the
+                     * same `agg_param` convention a by-value struct parameter
+                     * uses). So the binding is the payload's address, not the
+                     * eight bytes at it. */
+                    buf_printf(cg->out, "  lea rax, [r11 + %d]\n", off);
+                    buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", arm->bind_slots[b]);
+                } else {
+                    /* A float payload is copied as eight raw bits, which is the
+                     * whole double; the binding is read back with movsd. */
+                    buf_printf(cg->out, "  mov rax, QWORD PTR [r11 + %d]\n", off);
+                    buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", arm->bind_slots[b]);
+                }
             }
             gen_expr(cg, arm->body);
             buf_printf(cg->out, "  jmp .L%d\n", lend);
@@ -1331,10 +2188,27 @@ static void gen_expr(CG *cg, Expr *e) {
     case E_ICALL:
         gen_icall(cg, e);
         break;
+
     case E_MPTR:
         gen_mptr(cg, e);
         break;
     case E_BINARY: {
+        /* What decides this is the *result* type, not the operand types.
+         * `"x = " + 1.5` has a float operand and is string concatenation, so a
+         * test on the operands alone sends it into the float path -- which then
+         * stores the string pointer's bits into a float slot and adds it to
+         * whatever happened to be in xmm0. */
+        if (is_kind(e->type, TK_F64)) {
+            gen_float(cg, e);
+            break;
+        }
+        /* A float comparison yields a bool, so its operands are the only thing
+         * that identifies it. */
+        if (is_compare_op(e->op) &&
+            (is_kind(e->lhs->type, TK_F64) || is_kind(e->rhs->type, TK_F64))) {
+            gen_float_cmp(cg, e);
+            break;
+        }
         long long cf;
         /* Whole-expression constant folding (covers propagated-constant
          * locals and invariant subtrees). */
@@ -1348,22 +2222,38 @@ static void gen_expr(CG *cg, Expr *e) {
              * z_concat(a, b). */
             int t0 = temp_alloc(cg);
             int t1 = temp_alloc(cg);
-            gen_expr(cg, e->lhs);
+            /* A float operand is formatted in C and handed back as a string, so
+             * the number-to-text rule lives with `print` rather than being
+             * written twice in assembly. z_concat_f takes it in xmm0, which is
+             * where a float already is. */
+            int lflt = is_kind(e->lhs->type, TK_F64);
+            int rflt = is_kind(e->rhs->type, TK_F64);
+            if (lflt)
+                gen_float(cg, e->lhs);
+            else
+                gen_expr(cg, e->lhs);
             if (is_kind(e->lhs->type, TK_INT)) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->lhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
                            "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
+            } else if (lflt) {
+                buf_printf(cg->out, "  call z_ftoa\n");
             }
             store_temp(cg, t0);
-            gen_expr(cg, e->rhs);
+            if (rflt)
+                gen_float(cg, e->rhs);
+            else
+                gen_expr(cg, e->rhs);
             if (is_kind(e->rhs->type, TK_INT)) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->rhs->type, TK_BOOL)) {
                 buf_printf(cg->out,
                            "  lea rdi, [rip + .Lfalse_str]\n  lea r11, [rip + .Ltrue_str]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
+            } else if (rflt) {
+                buf_printf(cg->out, "  call z_ftoa\n");
             }
             store_temp(cg, t1);
             load_temp(cg, t0, "rdi");
@@ -1407,10 +2297,24 @@ static void gen_expr(CG *cg, Expr *e) {
                 emit_binop_imm(cg, e->op, cr);
             } else if (is_leaf_expr(e->rhs)) {
                 /* The right operand is a leaf: evaluate the left into rax, then
-                 * drop the right straight into r11 with no temp round-trip. */
+                 * take the right from wherever it already is.
+                 *
+                 * A leaf that the register allocator put in a register is named
+                 * directly, so `a + b` with both in registers is two instructions
+                 * rather than three. Copying it into r11 first is what the
+                 * three-address form costs, and it was the last of that in the
+                 * hot loop. Naming the operand's own register is safe for every
+                 * operator here because the left is already in rax: if the two
+                 * happen to be the same register, `add rbx, rbx` and
+                 * `sub rbx, rbx` and `imul rbx, rbx` are each exactly right. */
                 gen_expr(cg, e->lhs);
-                gen_leaf_to_reg(cg, e->rhs, "r11");
-                emit_binop_op(cg, e->op);
+                const char *rreg = leaf_live_reg(cg, e->rhs);
+                if (rreg != NULL) {
+                    emit_binop_reg(cg, e->op, rreg);
+                } else {
+                    gen_leaf_to_reg(cg, e->rhs, "r11");
+                    emit_binop_op(cg, e->op);
+                }
             } else {
                 int t = temp_alloc(cg);
                 gen_expr(cg, e->rhs);
@@ -1424,6 +2328,75 @@ static void gen_expr(CG *cg, Expr *e) {
         break;
     }
     case E_ASSIGN: {
+        /* A captured variable lives in a heap cell, because the closure that
+         * reads it may outlive the frame that declared it. Its slot therefore
+         * holds a pointer to that cell and every access goes through it. Both
+         * sides of the assignment then reach one value, so a counter climbs
+         * inside a closure and is seen to have climbed outside it. */
+        if (e->lhs != NULL && e->lhs->boxed) {
+            int tb = temp_alloc(cg);
+            gen_addr(cg, e->lhs); /* rax = the box pointer */
+            store_temp(cg, tb);
+            int tr = temp_alloc(cg);
+            gen_expr(cg, e->rhs);
+            if (is_kind(e->type, TK_F64)) {
+                store_temp_x(cg, tr);
+            } else if (is_aggregate(e->type)) {
+                /* A captured struct is a whole cell, not a word, so the copy has
+                 * to move every byte. */
+                buf_printf(cg->out, "  mov rsi, rax\n");
+                load_temp(cg, tb, "rdi");
+                emit_memcpy(cg, type_size(e->type));
+                cg->temp_top = tb;
+                break;
+            } else {
+                store_temp(cg, tr);
+            }
+            load_temp(cg, tb, "r11");
+            if (is_kind(e->type, TK_F64)) {
+                load_temp_x(cg, tr, XMM_ACC);
+                buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
+            } else {
+                load_temp(cg, tr, "rax");
+                buf_printf(cg->out, "  mov QWORD PTR [r11], rax\n");
+            }
+            cg->temp_top = tb;
+            break;
+        }
+        /* A float assignment stores with movsd from xmm0, not mov from rax, and
+         * the in-place forms above all reason in terms of rax -- so floats take
+         * their own path before any of that. A float local is never in a
+         * general-purpose register (see LocalInfo.is_float), so there is no
+         * in-place form to miss. */
+        if (is_kind(e->type, TK_F64)) {
+            int ta = temp_alloc(cg);
+            gen_addr(cg, e->lhs);
+            store_temp(cg, ta);
+            if (e->compound) {
+                static const char *const fops[] = {"addsd", "subsd", "mulsd", "divsd"};
+                static const TokenKind fkinds[] = {T_PLUS, T_MINUS, T_STAR, T_SLASH};
+                const char *ins = NULL;
+                for (size_t i = 0; i < sizeof fops / sizeof(*fops); i++)
+                    if (e->op == fkinds[i])
+                        ins = fops[i];
+                int tb = temp_alloc(cg);
+                gen_float(cg, e->rhs);
+                store_temp_x(cg, tb);
+                load_temp(cg, ta, "r11");        /* r11 = destination address */
+                load_temp_x(cg, tb, XMM_SCRATCH[1]); /* xmm1 = the right operand */
+                buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", XMM_ACC);
+                if (ins != NULL)
+                    buf_printf(cg->out, "  %s %s, %s\n", ins, XMM_ACC, XMM_SCRATCH[1]);
+                buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
+                cg->temp_top = ta;
+            } else {
+                gen_float(cg, e->rhs);
+                load_temp(cg, ta, "r11");
+                buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
+            }
+            cg->temp_top = ta;
+            break;
+        }
         /* A scalar LHS that lives in a register is written in place; no
          * address is materialized. */
         const char *lreg = NULL;
@@ -1485,10 +2458,56 @@ static void gen_expr(CG *cg, Expr *e) {
         cg->temp_top = tA;
         break;
     }
+    case E_CLOSURE: {
+        /* A { code, env } cell, the same shape a bound method uses.
+         *
+         * The environment is a heap array of the captured variables' box
+         * pointers, gathered here from the enclosing frame -- each argument is
+         * already an E_VAR for a captured slot, and reading it yields the box.
+         * The code address goes in as the symbol, so it needs no relocation and
+         * the cell is two words. */
+        int n = e->nargs;
+        int base = cg->temp_top;
+        cg->temp_top += n > 0 ? n : 1;
+        if (cg->temp_top > cg->temp_high)
+            cg->temp_high = cg->temp_top;
+        for (int i = 0; i < n; i++) {
+            /* gen_addr, not gen_expr: the environment holds each captured
+             * variable's *box*, so that the closure and the enclosing function
+             * reach the same cell and an assignment through one is seen by the
+             * other. Reading the slot's contents instead would capture a snapshot
+             * and a counter would stop counting the moment the closure was made. */
+            gen_addr(cg, e->args[i]);
+            store_temp(cg, base + i);
+        }
+        /* A closure that captured nothing still gets a real (empty) cell, so
+         * the call path has one shape rather than two. */
+        buf_printf(cg->out, "  mov rdi, %d\n  mov rsi, 8\n  call z_newarray\n", n);
+        buf_printf(cg->out, "  mov r11, rax\n");
+        for (int i = 0; i < n; i++) {
+            load_temp(cg, base + i, "rax");
+            buf_printf(cg->out, "  mov QWORD PTR [r11 + %d], rax\n", 8 * i);
+        }
+        buf_printf(cg->out, "  mov rsi, r11\n");
+        buf_printf(cg->out, "  lea rdi, [rip + %s]\n", z_sym(cg, e->name));
+        buf_printf(cg->out, "  call z_newbinding\n");
+        cg->temp_top = base;
+        break;
+    }
     case E_CALL:
         if (strcmp(e->name, "print") == 0) {
-            gen_expr(cg, e->args[0]);
             Type *at = e->args[0]->type;
+            if (is_kind(at, TK_F64)) {
+                /* The value is already in xmm0, which is where the ABI puts a
+                 * floating-point argument. The formatting happens in C, because
+                 * a variadic call with a float is the caller's job to set up and
+                 * getting it subtly wrong is a stack-corrupting bug rather than
+                 * a wrong digit. */
+                gen_float(cg, e->args[0]);
+                buf_printf(cg->out, "  call z_print_f\n");
+                break;
+            }
+            gen_expr(cg, e->args[0]);
             if (is_kind(at, TK_STRING)) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call puts\n");
             } else if (is_kind(at, TK_BOOL)) {
@@ -1525,20 +2544,24 @@ static void gen_expr(CG *cg, Expr *e) {
         buf_printf(cg->out, "  lea rdx, [rip + .Lvt_%s]\n", sd->name);
         buf_printf(cg->out, "  mov QWORD PTR [r11], rdx\n");
         if (e->name != NULL) {
-            /* Call ctor: this=obj in rdi, then the ctor args in rsi.. */
+            /* Call ctor: this=obj in rdi, then the ctor args in rsi.. The
+             * receiver is a hidden first argument, so the declared arguments
+             * follow in the integer sequence, which is where the constructor's
+             * prologue looks for them. */
             int n = e->nargs;
             int base = cg->temp_top;
             cg->temp_top += n;
             if (cg->temp_top > cg->temp_high)
                 cg->temp_high = cg->temp_top;
-            for (int i = 0; i < n; i++) {
-                gen_expr(cg, e->args[i]);
-                store_temp(cg, base + i);
-            }
+            gen_args_stage(cg, e, base);
+            /* `this` in rdi, then the declared arguments from rsi and the vector
+             * registers, or the stack. rdi is written after the arguments are
+             * placed, because placing them uses rdi. */
+            ArgAssign aa;
+            args_prologue(cg, e, base, 1, &aa);
             load_temp(cg, ot, "rdi");
-            for (int i = 0; i < n && i + 1 < 6; i++)
-                load_temp(cg, base + i, ARG_REGS[i + 1]);
             buf_printf(cg->out, "  call %s\n", e->is_extern ? e->name : z_sym(cg, e->name));
+            args_epilogue(cg, &aa);
             cg->temp_top = base;
         }
         load_temp(cg, ot, "rax"); /* result = object pointer */
@@ -1573,6 +2596,10 @@ static int is_pure_expr(Expr *e) {
         return 1;
     case E_MPTR:
         return is_pure_expr(e->lhs);
+    case E_CLOSURE:
+        /* Building a closure allocates, so it is not a pure read of a value even
+         * though its operands are. */
+        return 0;
     case E_INTRINSIC:
     case E_ICALL: {
         for (int i = 0; i < e->nargs; i++)
@@ -1602,6 +2629,17 @@ static int is_compare_op(TokenKind op) {
  * condition is a side-effect-free comparison, branches directly on the flags
  * instead of materializing a 0/1 boolean. */
 static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
+    /* A float comparison cannot take the branch-on-flags path below: that one
+     * emits an integer `cmp` against a value in rax, and a float is in an XMM
+     * register. The guard is here, at the single entry point, rather than spread
+     * through the arms, so there is no way to reach them with a float by
+     * accident. */
+    if (cond != NULL && cond->kind == E_BINARY && is_compare_op(cond->op) &&
+        (is_kind(cond->lhs->type, TK_F64) || is_kind(cond->rhs->type, TK_F64))) {
+        gen_float_cmp(cg, cond);
+        buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", false_label);
+        return;
+    }
     if (cond != NULL && cond->kind == E_BINARY && is_compare_op(cond->op) &&
         is_pure_expr(cond->lhs) && is_pure_expr(cond->rhs)) {
         long long cr;
@@ -1697,8 +2735,13 @@ static void gen_void_expr(CG *cg, Expr *e) {
                                       : e->op == T_STAR  ? "imul"
                                                          : NULL;
                     if (ins != NULL) {
-                        gen_leaf_to_reg(cg, e->rhs, "r11");
-                        buf_printf(cg->out, "  %s %s, r11\n", ins, lreg);
+                        const char *rreg = leaf_live_reg(cg, e->rhs);
+                        if (rreg != NULL) {
+                            buf_printf(cg->out, "  %s %s, %s\n", ins, lreg, rreg);
+                        } else {
+                            gen_leaf_to_reg(cg, e->rhs, "r11");
+                            buf_printf(cg->out, "  %s %s, r11\n", ins, lreg);
+                        }
                         return;
                     }
                 }
@@ -1728,19 +2771,432 @@ static void loop_pop(CG *cg) {
         cg->loop_depth--;
 }
 
+/* ---- loop unrolling (level 3) ----
+ *
+ * At -O3 a loop body is emitted Z_UNROLL times. Four is the usual sweet spot: it
+ * removes three-quarters of the loop-back branches, and a larger factor buys
+ * little before the body stops fitting in the instruction cache. */
+
+#define Z_UNROLL 4
+/* A body bigger than this is left rolled. The point of unrolling is to get the
+ * body to sit in the instruction cache across consecutive iterations, and a body
+ * that does not fit gains nothing from being copied four times. */
+#define Z_UNROLL_MAX_STMT 24
+
+/* Statements in a body, counted only until `cap` is passed: the caller is asking
+ * "is this small enough to unroll", and a long body should not cost a full walk
+ * to answer no. */
+static int stmt_count(Stmt *s, int cap) {
+    if (s == NULL)
+        return 0;
+    int n = 1;
+    if (n > cap)
+        return n;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems && n <= cap; i++)
+            n += stmt_count(s->items[i], cap - n);
+        break;
+    case S_IF:
+    case S_WHILE:
+        n += stmt_count(s->body, cap - n);
+        n += stmt_count(s->orelse, cap - n);
+        break;
+    case S_FOR:
+        n += stmt_count(s->for_init, cap - n);
+        n += stmt_count(s->body, cap - n);
+        break;
+    default:
+        break;
+    }
+    return n;
+}
+
+/* How many copies of this body to emit. Unrolling needs a condition to test
+ * before each copy: that test is what makes an unknown trip count safe, since no
+ * copy of the body runs unless the condition held, and the tail is handled by
+ * the same test rather than by a computed iteration count. A `for(;;)` has no
+ * condition and so is never unrolled. */
+static int unroll_factor(CG *cg, Stmt *body, Expr *cond) {
+    if (cg->opt < 3 || cond == NULL)
+        return 1;
+    if (stmt_count(body, Z_UNROLL_MAX_STMT + 1) > Z_UNROLL_MAX_STMT)
+        return 1;
+    return Z_UNROLL;
+}
+
+/* Emits a loop, `unroll` copies of the body deep.
+ *
+ * The condition is tested before every copy instead of once per pass. The body
+ * therefore still runs exactly as many times as it did rolled -- what changes is
+ * that the last copy branches back to the top while the others fall through into
+ * the next copy, so most of the loop-back branches are gone and consecutive
+ * iterations sit next to each other for the prefetcher. Each copy pushes its own
+ * continuation label, so `continue` runs the step of the copy it appears in and
+ * then branches on, and every copy shares `lend`, so one `break` leaves the whole
+ * loop.
+ *
+ * At a factor of 1 this emits exactly what the rolled form did. */
+static void gen_loop(CG *cg, Stmt *body, Expr *cond, Expr *step, int unroll) {
+    int lstart = next_label(cg);
+    int lend = next_label(cg);
+    buf_printf(cg->out, ".L%d:\n", lstart);
+    for (int u = 0; u < unroll; u++) {
+        int last = u == unroll - 1;
+        int lnext = last ? lstart : next_label(cg);
+        int lcont = next_label(cg);
+        if (cond != NULL)
+            gen_cond_branch(cg, cond, last ? lend : lnext);
+        loop_push(cg, lend, lcont);
+        gen_stmt(cg, body);
+        loop_pop(cg);
+        buf_printf(cg->out, ".L%d:\n", lcont);
+        if (step != NULL)
+            gen_void_expr(cg, step);
+        buf_printf(cg->out, "  jmp .L%d\n", lnext);
+        if (!last)
+            buf_printf(cg->out, ".L%d:\n", lnext);
+    }
+    buf_printf(cg->out, ".L%d:\n", lend);
+}
+
+/* ---- loop-invariant code motion (levels 2 and up) ----
+ *
+ * An arithmetic expression over constants and locals that the loop body never
+ * assigns to has the same value on every iteration, so it can be computed once
+ * ahead of the loop. This is the largest single win available for the shape of
+ * loop Z is written for, and it is what gcc -O1 already does.
+ *
+ * Scope is deliberately narrow, because a wrong hoist is a miscompile:
+ *
+ *   * Only side-effect-free integer arithmetic over locals and literals moves.
+ *     Division and modulo are excluded even when invariant -- they can trap,
+ *     and moving a trap out of a loop changes which iterations fail, so the
+ *     operation has to stay where it was.
+ *   * Nothing with an unknown effect is descended into for hoisting, so the
+ *     "no operand is written by the body" test is sufficient: Z integers do
+ *     not alias, and a call is treated as clobbering everything.
+ *   * The body is walked including nested loops, so an expression invariant in
+ *     the outer loop is hoisted to the outer loop. An inner loop then finds
+ *     only what the outer one could not move, which is exactly right.
+ *
+ * Hoisted values take a fresh frame slot numbered the way the parser would
+ * number a local declared next, so they sit below the temporaries. The measure
+ * pass runs the same walk and allocates the same slots, so the frame is sized
+ * for them without a second mechanism.
+ */
+
+/* Operators that are pure integer arithmetic and cannot trap. */
+static int licm_op_is_safe(TokenKind op) {
+    switch (op) {
+    case T_PLUS: case T_MINUS: case T_STAR:
+    case T_AMP: case T_PIPE: case T_CARET: case T_SHL: case T_SHR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+#define LICM_MAX_SLOT 256
+
+/* True when the expression may have a side effect, in which case everything it
+ * touches is treated as written. Being conservative here is what keeps the
+ * rest of the pass simple. */
+static int licm_may_write(Expr *e) {
+    if (e == NULL)
+        return 0;
+    switch (e->kind) {
+    case E_ASSIGN:
+    case E_CALL:
+    case E_VCALL:
+    case E_ICALL:
+    case E_NEW:
+    case E_NEWCLASS:
+    case E_INTRINSIC:
+    case E_FNPTR:
+    case E_MPTR:
+    case E_STRUCTLIT:
+    case E_UNIONLIT:
+        return 1;
+    default:
+        return licm_may_write(e->lhs) || licm_may_write(e->rhs);
+    }
+}
+
+static void licm_note_expr(Expr *e, unsigned char *written) {
+    if (e == NULL)
+        return;
+    if (e->kind == E_ASSIGN) {
+        /* An assignment to a plain local writes exactly that local, so the
+         * rest of the body stays analysable. Anything else -- an array
+         * element, a field, a dereference -- can write through a pointer, and
+         * then nothing can be assumed. */
+        if (e->lhs != NULL && e->lhs->kind == E_VAR) {
+            int s = e->lhs->slot;
+            if (s > 0 && s < LICM_MAX_SLOT)
+                written[s] = 1;
+            licm_note_expr(e->rhs, written);
+            for (int i = 0; i < e->nargs; i++)
+                licm_note_expr(e->args[i], written);
+            return;
+        }
+        memset(written, 1, LICM_MAX_SLOT);
+        return;
+    }
+    if (licm_may_write(e)) {
+        /* Something with an effect runs here, so assume every local it could
+         * reach is written. */
+        memset(written, 1, LICM_MAX_SLOT);
+        return;
+    }
+    licm_note_expr(e->lhs, written);
+    licm_note_expr(e->rhs, written);
+    for (int i = 0; i < e->nargs; i++)
+        licm_note_expr(e->args[i], written);
+}
+
+static void licm_note_stmt(Stmt *s, unsigned char *written) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            licm_note_stmt(s->items[i], written);
+        return;
+    case S_VAR:
+        licm_note_expr(s->init, written);
+        if (s->slot > 0 && s->slot < LICM_MAX_SLOT)
+            written[s->slot] = 1;
+        return;
+    case S_EXPR:
+        licm_note_expr(s->expr, written);
+        return;
+    case S_RETURN:
+        licm_note_expr(s->expr, written);
+        return;
+    case S_IF:
+        licm_note_expr(s->cond, written);
+        licm_note_stmt(s->body, written);
+        licm_note_stmt(s->orelse, written);
+        return;
+    case S_WHILE:
+        licm_note_expr(s->cond, written);
+        licm_note_stmt(s->body, written);
+        return;
+    case S_FOR:
+        licm_note_stmt(s->for_init, written);
+        licm_note_expr(s->cond, written);
+        licm_note_stmt(s->body, written);
+        licm_note_expr(s->for_step, written);
+        return;
+    case S_BREAK:
+    case S_CONTINUE:
+        /* The body may not run to completion, but every hoisted expression is
+         * trap-free, so evaluating it early is still harmless. */
+        return;
+    default:
+        memset(written, 1, LICM_MAX_SLOT);
+        return;
+    }
+}
+
+/* True when every leaf is a literal or a read of a local the body never
+ * writes, and the node itself is pure arithmetic. */
+static int licm_invariant(Expr *e, const unsigned char *written) {
+    if (e == NULL)
+        return 0;
+    switch (e->kind) {
+    case E_INT:
+    case E_BOOL:
+        return 1;
+    case E_VAR:
+        return e->slot <= 0 || e->slot >= LICM_MAX_SLOT || !written[e->slot];
+    case E_UNARY:
+        return (e->op == T_MINUS || e->op == T_TILDE) && licm_invariant(e->lhs, written);
+    case E_BINARY:
+        return licm_op_is_safe(e->op) && licm_invariant(e->lhs, written) &&
+               licm_invariant(e->rhs, written);
+    default:
+        return 0;
+    }
+}
+
+typedef struct {
+    Expr **items;
+    int n;
+    int cap;
+    CG *cg;
+} LicmList;
+
+static void licm_push(LicmList *L, Expr *e) {
+    if (L->n == L->cap) {
+        int ncap = L->cap == 0 ? 8 : L->cap * 2;
+        Expr **ni = arena_alloc_array(L->cg->arena, (size_t)ncap, sizeof(Expr *));
+        if (L->n > 0)
+            memcpy(ni, L->items, (size_t)L->n * sizeof(Expr *));
+        L->items = ni;
+        L->cap = ncap;
+    }
+    L->items[L->n++] = e;
+}
+
+/* Returns nonzero when a child was hoisted, which makes this node redundant:
+ * its operands are already in slots. */
+static int licm_walk_expr(CG *cg, Expr *e, const unsigned char *written, LicmList *L) {
+    if (e == NULL)
+        return 0;
+    int below = licm_walk_expr(cg, e->lhs, written, L);
+    below += licm_walk_expr(cg, e->rhs, written, L);
+    for (int i = 0; i < e->nargs; i++)
+        below += licm_walk_expr(cg, e->args[i], written, L);
+    if (e->hoisted_slot != 0) {
+        /* The measure pass already decided this and reserved the slot. The
+         * emit pass only has to schedule the computation. */
+        if (L != NULL)
+            licm_push(L, e);
+        return 1;
+    }
+    if (below > 0)
+        return 1;
+    if (e->kind != E_BINARY && e->kind != E_UNARY)
+        return 0;
+    if (!is_kind(e->type, TK_INT) && !is_kind(e->type, TK_BOOL))
+        return 0;
+    if (!licm_invariant(e, written))
+        return 0;
+    /* Reserve the slot in the measure pass too, so the frame is sized for it. */
+    cg->cur_locals_bytes += 8;
+    e->hoisted_slot = 8 + cg->cur_locals_bytes;
+    if (L != NULL)
+        licm_push(L, e);
+    return 1;
+}
+
+static void licm_walk_stmt(CG *cg, Stmt *s, const unsigned char *written, LicmList *L) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            licm_walk_stmt(cg, s->items[i], written, L);
+        return;
+    case S_VAR:
+        licm_walk_expr(cg, s->init, written, L);
+        return;
+    case S_EXPR:
+        licm_walk_expr(cg, s->expr, written, L);
+        return;
+    case S_RETURN:
+        licm_walk_expr(cg, s->expr, written, L);
+        return;
+    case S_IF:
+        licm_walk_expr(cg, s->cond, written, L);
+        licm_walk_stmt(cg, s->body, written, L);
+        licm_walk_stmt(cg, s->orelse, written, L);
+        return;
+    case S_WHILE:
+        licm_walk_expr(cg, s->cond, written, L);
+        licm_walk_stmt(cg, s->body, written, L);
+        return;
+    case S_FOR:
+        licm_walk_expr(cg, s->cond, written, L);
+        licm_walk_stmt(cg, s->for_init, written, L);
+        licm_walk_stmt(cg, s->body, written, L);
+        licm_walk_expr(cg, s->for_step, written, L);
+        return;
+    default:
+        return;
+    }
+}
+
+/* Runs the pass over one loop. `step` is the loop's own step expression, or NULL
+ * for a `while`: it runs once per iteration, so a local it writes is not
+ * invariant, and without it the loop's induction variable looks like a constant
+ * and expressions over it get hoisted out of the loop they vary in.
+ *
+ * `emit` is 0 during the measure pass, which still marks nodes and reserves
+ * their slots so the frame accounts for them. */
+static void licm_hoist(CG *cg, Stmt *body, Expr *step, int emit) {
+    if (body == NULL)
+        return;
+    unsigned char written[LICM_MAX_SLOT];
+    memset(written, 0, sizeof written);
+    /* The step first: it is the one write the body walk cannot see, and getting
+     * it wrong is a miscompile rather than a missed optimization. */
+    if (step != NULL)
+        licm_note_expr(step, written);
+    licm_note_stmt(body, written);
+    LicmList L;
+    memset(&L, 0, sizeof L);
+    L.cg = cg;
+    licm_walk_stmt(cg, body, written, emit ? &L : NULL);
+    if (!emit)
+        return;
+    /* L.items is in post-order, so an operand is always computed before the
+     * expression that reads its slot. */
+    cg->emitting_hoist = 1;
+    for (int i = 0; i < L.n; i++) {
+        gen_expr(cg, L.items[i]);
+        buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", L.items[i]->hoisted_slot);
+    }
+    cg->emitting_hoist = 0;
+}
+
 static void gen_stmt(CG *cg, Stmt *s) {
     /* Temporaries (including struct-return buffers) never live across a
      * statement boundary, so start each statement from a clean temp space. */
     cg->temp_top = 0;
+    /* Mark the line before the statement's code, so the line table attributes
+     * the instructions to the line the user wrote them on. */
+    dbg_loc(cg, s->span);
     switch (s->kind) {
     case S_VAR:
         if (s->init != NULL) {
             LocalInfo *li = s->slot > 0 ? li_lookup(cg, s->slot) : NULL;
-            if (li != NULL && li->is_const && s->init->kind == E_INT) {
-                /* Propagated constant: no storage needed, reads are inlined. */
+            if (li != NULL && li->is_const && !s->boxed && s->init->kind == E_INT) {
+                /* Propagated constant: no storage needed, reads are inlined.
+                 * A captured local is excepted. Its slot holds a pointer to a
+                 * heap cell, and the cell is built here by reading that slot --
+                 * so skipping the store left the box holding whatever the frame
+                 * happened to contain, and a `var k = 7;` captured by a lambda
+                 * read back as garbage. Constant propagation inlines reads of
+                 * the value, never reads through the box, so the two are
+                 * independent and both have to happen. */
                 break;
             }
             const char *reg = is_aggregate(s->type) ? NULL : local_reg(cg, s->slot);
+            if (s->boxed) {
+                /* A captured local is boxed at its declaration: evaluate the
+                 * initializer, put it in a fresh heap cell, and leave the cell's
+                 * address in the slot. The closure's environment is built from
+                 * these same pointers, so both sides name one value. */
+                if (is_kind(s->type, TK_F64)) {
+                    gen_float(cg, s->init);
+                    buf_printf(cg->out, "  movq rdi, %s\n  call z_box_f\n", XMM_ACC);
+                } else if (is_aggregate(s->type)) {
+                    /* A struct gets a cell of its own size, written in place. */
+                    int t = temp_alloc(cg);
+                    gen_expr(cg, s->init); /* rax = the source address */
+                    store_temp(cg, t);
+                    buf_printf(cg->out, "  mov rdi, %d\n  call z_box_n\n", type_size(s->type));
+                    load_temp(cg, t, "rsi");
+                    buf_printf(cg->out, "  mov rdi, rax\n");
+                    emit_memcpy(cg, type_size(s->type));
+                    cg->temp_top = t;
+                } else {
+                    gen_expr(cg, s->init);
+                    buf_printf(cg->out, "  mov rdi, rax\n  call z_box\n");
+                }
+                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", s->slot);
+                break;
+            }
+            if (is_kind(s->type, TK_F64)) {
+                /* A float stays in the frame (see LocalInfo.is_float), so the
+                 * store is a movsd of the value the initializer left in xmm0. */
+                gen_float(cg, s->init);
+                buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", s->slot, XMM_ACC);
+                break;
+            }
             gen_expr(cg, s->init);
             if (is_aggregate(s->type)) {
                 /* rax = source address; copy into the local's frame slot. */
@@ -1781,32 +3237,17 @@ static void gen_stmt(CG *cg, Stmt *s) {
         break;
     }
     case S_WHILE: {
-        int lstart = next_label(cg);
-        int lend = next_label(cg);
-        buf_printf(cg->out, ".L%d:\n", lstart);
-        gen_cond_branch(cg, s->cond, lend);
-        loop_push(cg, lend, lstart);
-        gen_stmt(cg, s->body);
-        loop_pop(cg);
-        buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lstart, lend);
+        if (cg->opt >= 2)
+            licm_hoist(cg, s->body, NULL, !cg->measuring);
+        gen_loop(cg, s->body, s->cond, NULL, unroll_factor(cg, s->body, s->cond));
         break;
     }
     case S_FOR: {
+        if (cg->opt >= 2)
+            licm_hoist(cg, s->body, s->for_step, !cg->measuring);
         if (s->for_init != NULL)
             gen_stmt(cg, s->for_init);
-        int lstart = next_label(cg);
-        int lcont = next_label(cg);
-        int lend = next_label(cg);
-        buf_printf(cg->out, ".L%d:\n", lstart);
-        if (s->cond != NULL)
-            gen_cond_branch(cg, s->cond, lend);
-        loop_push(cg, lend, lcont);
-        gen_stmt(cg, s->body);
-        loop_pop(cg);
-        buf_printf(cg->out, ".L%d:\n", lcont);
-        if (s->for_step != NULL)
-            gen_void_expr(cg, s->for_step);
-        buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lstart, lend);
+        gen_loop(cg, s->body, s->cond, s->for_step, unroll_factor(cg, s->body, s->cond));
         break;
     }
     case S_BREAK:
@@ -1821,6 +3262,9 @@ static void gen_stmt(CG *cg, Stmt *s) {
         break;
     case S_BLOCK:
         gen_block_items(cg, s);
+        /* A block that wraps an inlined body carries the label its `return`s
+         * jump to, emitted after the last item so reaching the end of the body
+         * and returning from it are the same thing. */
         break;
     case S_FUNC:
     case S_STRUCT:
@@ -1830,6 +3274,559 @@ static void gen_stmt(CG *cg, Stmt *s) {
 }
 
 static int align16(int n) { return (n + 15) & ~15; }
+
+/* ---- DWARF debug information ----
+ *
+ * Enough of DWARF 4 for a debugger to set a breakpoint, step, and read the
+ * values in a frame.
+ *
+ * Everything is written as assembly text rather than assembled into a byte
+ * buffer, and that is not a style choice. A DWARF section contains addresses,
+ * and codegen does not know addresses: it writes assembly, and the linker is
+ * what places things. A buffer of already-encoded bytes cannot express "the
+ * address of this label", because by the time the bytes exist the label is gone.
+ * Emitting `.quad .Ldbg_b0` inline leaves the assembler and linker to resolve
+ * it into a relocation, which is the only way the value can be both unknown at
+ * compile time and correct in the output.
+ *
+ *   .debug_line   Not encoded here at all. The assembler builds it from the
+ *                 .file and .loc directives emitted next to the code, so the
+ *                 address-to-line mapping is produced from the same text that
+ *                 produced the addresses and cannot drift from it.
+ *   .debug_abbrev A fixed table, written once at the end.
+ *   .debug_info   A compile unit, the base types, and one subprogram per
+ *                 function with its parameters and locals.
+ *
+ * Two honest limitations:
+ *
+ *   - Locals are described only while they live in memory. The register
+ *     allocator promotes some to callee-saved registers, and a variable that
+ *     moves between a register and the stack over its lifetime needs a location
+ *     list to describe accurately. Those variables are left out rather than
+ *     given a location that is right only part of the time, so a debugger
+ *     reports them as optimized out. Parameters are always in memory, so those
+ *     are exact.
+ *   - Z has three scalar types, so a local is described as a long, a boolean or
+ *     a char pointer, and anything else gets no type at all. A debugger shows
+ *     that as an untyped value, which is better than a confident wrong type.
+ */
+#define DW_TAG_compile_unit 0x11
+#define DW_TAG_pointer_type 0x0f
+#define DW_TAG_formal_parameter 0x05
+#define DW_TAG_base_type 0x24
+#define DW_TAG_subprogram 0x2e
+#define DW_TAG_variable 0x34
+
+#define DW_CHILDREN_no 0
+#define DW_CHILDREN_yes 1
+
+#define DW_AT_location 0x02
+#define DW_AT_name 0x03
+#define DW_AT_byte_size 0x0b
+#define DW_AT_low_pc 0x11
+#define DW_AT_high_pc 0x12
+#define DW_AT_language 0x13
+#define DW_AT_stmt_list 0x10
+#define DW_AT_producer 0x25
+#define DW_AT_decl_file 0x3a
+#define DW_AT_decl_line 0x3b
+#define DW_AT_encoding 0x3e
+#define DW_AT_external 0x3f
+#define DW_AT_frame_base 0x40
+#define DW_AT_type 0x49
+
+#define DW_FORM_addr 0x01
+#define DW_FORM_data2 0x05
+#define DW_FORM_data1 0x0b
+#define DW_FORM_string 0x08
+#define DW_FORM_ref4 0x13
+#define DW_FORM_exprloc 0x18
+#define DW_FORM_flag_present 0x19
+/* A section-relative offset, which is what DW_AT_stmt_list takes. Using
+ * DW_FORM_addr here instead asks for a relocated address, and a non-alloc
+ * section like .debug_line has no address: the value comes back as 0 and every
+ * reader quietly ignores the line program. */
+#define DW_FORM_sec_offset 0x17
+
+/* DW_OP_breg0 through DW_OP_breg31 are 0x70 through 0x8f, so breg6 -- rbp on
+ * x86-64 -- is 0x76. Off by one here is 0x77, which is breg7: rsp. A location
+ * read through rsp still assembles, still passes every "is the section
+ * present" check, and reports a plausible-looking wrong value, which is the
+ * worst way for this to fail. */
+#define DW_OP_breg6 0x76
+#define DW_OP_call_frame_cfa 0x9c
+/* DW_OP_fbreg, kept for reference: it is relative to the frame base, which a
+ * reader can only resolve with unwind information. */
+#define DW_OP_fbreg 0x91
+
+#define DW_ATE_boolean 0x02
+#define DW_ATE_signed 0x05
+#define DW_ATE_signed_char 0x06
+#define DW_ATE_float 0x04
+
+/* DWARF 4, 64-bit DWARF format. The format is 32-bit: the unit length is a
+ * 4-byte field, which is what lets a reference to a label stand in for it. */
+#define DWARF_VERSION 4
+
+/* Abbreviation codes, fixed so the DIE writer can name them. */
+#define DW_ABBREV_CU 1
+#define DW_ABBREV_SUBPROGRAM 2
+#define DW_ABBREV_PARAM_TYPED 3
+#define DW_ABBREV_PARAM 4
+#define DW_ABBREV_VAR_TYPED 5
+#define DW_ABBREV_VAR 6
+#define DW_ABBREV_BASE 7
+#define DW_ABBREV_POINTER 8
+
+
+/* Emits one byte as a `.byte` directive. Abbreviation codes, tags and attribute
+ * pairs are all ULEB128, and every value used here fits in a single byte, so
+ * the encoding and the directive coincide. */
+static void dbg8(Buf *b, unsigned v) { buf_printf(b, "  .byte %u\n", v & 0xffu); }
+
+static void dbg16(Buf *b, unsigned v) { buf_printf(b, "  .short %u\n", v & 0xffffu); }
+
+static void dbg32(Buf *b, unsigned long v) { buf_printf(b, "  .long %lu\n", v & 0xffffffffUL); }
+
+/* A NUL-terminated string in DW_FORM_string form. */
+static void dbg_asciz(Buf *b, const char *s) { buf_printf(b, "  .asciz \"%s\"\n", s); }
+
+/* SLEB128, the signed base-128 encoding DWARF uses for frame offsets. An
+ * exprloc's length prefix has to be written before the value it measures, so
+ * the length and the bytes are produced separately. */
+static int sleb128_len(long v) {
+    int n = 0;
+    for (;;) {
+        unsigned char byte = (unsigned char)(v & 0x7f);
+        v >>= 7; /* arithmetic: the sign lives in bit 6 of every byte */
+        n++;
+        if ((v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0))
+            return n;
+    }
+}
+
+static void sleb128_put(Buf *b, long v) {
+    for (;;) {
+        unsigned char byte = (unsigned char)(v & 0x7f);
+        v >>= 7;
+        if ((v == 0 && (byte & 0x40) == 0) || (v == -1 && (byte & 0x40) != 0)) {
+            buf_printf(b, "  .byte %u\n", (unsigned)byte);
+            return;
+        }
+        buf_printf(b, "  .byte %u\n", (unsigned)(byte | 0x80));
+    }
+}
+
+/* The abbreviation table. Fixed content, written once. */
+static void dbg_write_abbrev(Buf *b) {
+    /* One abbreviation: code, tag, has-children, then (attribute, form) pairs
+     * closed by a zero pair. */
+#define ABBREV(code_, tag_, kids_)                                                            \
+    dbg8(b, code_);                                                                           \
+    dbg8(b, tag_);                                                                            \
+    dbg8(b, kids_)
+
+#define ATTR(a_, f_)                                                                          \
+    dbg8(b, a_);                                                                              \
+    dbg8(b, f_)
+
+#define ATTR_END()                                                                            \
+    dbg8(b, 0);                                                                               \
+    dbg8(b, 0)
+
+    /* The line program the assembler generated, named so DW_AT_stmt_list can
+     * point at it. It is emitted before this function runs, and the assembler
+     * appends its own program to the section, so this label is the section
+     * start. */
+    buf_puts(b, "  .section .debug_line\n.Lz_line:\n");
+
+    buf_puts(b, "  .section .debug_abbrev\n.Lz_abbrev:\n");
+
+    ABBREV(DW_ABBREV_CU, DW_TAG_compile_unit, DW_CHILDREN_yes);
+    ATTR(DW_AT_producer, DW_FORM_string);
+    ATTR(DW_AT_language, DW_FORM_data2);
+    ATTR(DW_AT_stmt_list, DW_FORM_sec_offset);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR_END();
+
+    /* external is flag_present, so it costs no bytes in the DIE itself. The
+     * frame base is the canonical frame address rather than a register, because
+     * codegen rebases rbp below the saved callee-saved registers and so rbp is
+     * not a stable reference across a function. */
+    /* The return type sits after the name so a reader that only wants to know
+     * what a function returns finds it before the addresses. */
+    ABBREV(DW_ABBREV_SUBPROGRAM, DW_TAG_subprogram, DW_CHILDREN_yes);
+    ATTR(DW_AT_external, DW_FORM_flag_present);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_type, DW_FORM_ref4);
+    ATTR(DW_AT_decl_file, DW_FORM_data1);
+    ATTR(DW_AT_decl_line, DW_FORM_data1);
+    ATTR(DW_AT_low_pc, DW_FORM_addr);
+    ATTR(DW_AT_high_pc, DW_FORM_addr);
+    ATTR(DW_AT_frame_base, DW_FORM_exprloc);
+    ATTR_END();
+
+    /* Parameters and locals come in typed and untyped pairs. Naming a type Z
+     * does not have would be a lie a debugger would faithfully print. */
+    ABBREV(DW_ABBREV_PARAM_TYPED, DW_TAG_formal_parameter, DW_CHILDREN_no);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_decl_file, DW_FORM_data1);
+    ATTR(DW_AT_decl_line, DW_FORM_data1);
+    ATTR(DW_AT_type, DW_FORM_ref4);
+    ATTR(DW_AT_location, DW_FORM_exprloc);
+    ATTR_END();
+
+    ABBREV(DW_ABBREV_PARAM, DW_TAG_formal_parameter, DW_CHILDREN_no);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_decl_file, DW_FORM_data1);
+    ATTR(DW_AT_decl_line, DW_FORM_data1);
+    ATTR(DW_AT_location, DW_FORM_exprloc);
+    ATTR_END();
+
+    ABBREV(DW_ABBREV_VAR_TYPED, DW_TAG_variable, DW_CHILDREN_no);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_decl_file, DW_FORM_data1);
+    ATTR(DW_AT_decl_line, DW_FORM_data1);
+    ATTR(DW_AT_type, DW_FORM_ref4);
+    ATTR(DW_AT_location, DW_FORM_exprloc);
+    ATTR_END();
+
+    ABBREV(DW_ABBREV_VAR, DW_TAG_variable, DW_CHILDREN_no);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_decl_file, DW_FORM_data1);
+    ATTR(DW_AT_decl_line, DW_FORM_data1);
+    ATTR(DW_AT_location, DW_FORM_exprloc);
+    ATTR_END();
+
+    ABBREV(DW_ABBREV_BASE, DW_TAG_base_type, DW_CHILDREN_no);
+    ATTR(DW_AT_name, DW_FORM_string);
+    ATTR(DW_AT_byte_size, DW_FORM_data1);
+    ATTR(DW_AT_encoding, DW_FORM_data1);
+    ATTR_END();
+
+    ABBREV(DW_ABBREV_POINTER, DW_TAG_pointer_type, DW_CHILDREN_no);
+    ATTR(DW_AT_byte_size, DW_FORM_data1);
+    ATTR(DW_AT_type, DW_FORM_ref4);
+    ATTR_END();
+
+    dbg8(b, 0); /* the table's own terminator */
+
+#undef ABBREV
+#undef ATTR
+#undef ATTR_END
+}
+
+/* The 1-based DWARF file number for `path`, adding a .file entry the first time
+ * the file is seen. A compilation unit spans several files once `import` is
+ * used, and every line marker names one of them by number.
+ *
+ * The entries are emitted as they are discovered, which means the first one
+ * lands in the middle of the code. That is fine: a .file directive is a
+ * declaration, not code, wherever it appears. */
+static int dbg_file(CG *cg, const char *path) {
+    if (path == NULL)
+        return 1;
+    for (int i = 0; i < cg->dbg_file_count; i++) {
+        if (strcmp(cg->dbg_file_names[i], path) == 0)
+            return i + 1;
+    }
+    if (cg->dbg_file_count >= MAX_DBG_FILES)
+        return 1;
+    cg->dbg_file_names[cg->dbg_file_count] = path;
+    cg->dbg_file_count++;
+    buf_printf(cg->out, "  .file %d \"%s\"\n", cg->dbg_file_count, path);
+    return cg->dbg_file_count;
+}
+
+/* Emits a line marker so the line table maps the code about to be generated
+ * back to the statement the user wrote. */
+static void dbg_loc(CG *cg, Span span) {
+    if (!cg->debug_info || cg->measuring || span.file == NULL || span.line <= 0)
+        return;
+    int f = dbg_file(cg, span.file);
+    buf_printf(cg->out, "  .loc %d %d %d\n", f, span.line, span.col > 0 ? span.col : 0);
+}
+
+/* The base type a Z type maps onto, as a code, or 0 when there is no honest
+ * mapping: `int` is a 64-bit signed value, `bool` is an int holding 0 or 1, and
+ * a string is a NUL-terminated char pointer.
+ *
+ * A code rather than an offset, because the base type DIEs are written after
+ * every function has been recorded, and their offsets are only known once the
+ * compile unit's layout is fixed. The code is translated to an offset at the
+ * end, in one place. */
+/* The .debug_info offset of the base type a dbg_type_of code stands for, or 0
+ * for a type Z has no DWARF spelling for. One function so the subprogram's
+ * return type and a variable's type cannot disagree about which offset a code
+ * means. */
+static int dbg_type_ref(int code, int off_long, int off_bool, int off_str, int off_ptr,
+                        int off_double, int off_void) {
+    switch (code) {
+    case 1:
+        return off_long;
+    case 2:
+        return off_bool;
+    case 3:
+        return off_str;
+    case 4:
+        return off_ptr;
+    case 5:
+        return off_double;
+    case 6:
+        return off_void;
+    default:
+        return 0;
+    }
+}
+
+static int dbg_type_of(Type *t) {
+    if (t == NULL)
+        return 0;
+    if (is_kind(t, TK_INT))
+        return 1;
+    if (is_kind(t, TK_BOOL))
+        return 2;
+    if (is_kind(t, TK_STRING))
+        return 3;
+    if (is_kind(t, TK_F64))
+        return 5;
+    if (is_kind(t, TK_PTR))
+        return 4;
+    if (is_kind(t, TK_VOID))
+        return 6;
+    return 0;
+}
+
+/* Records a described variable for a function, ignoring the ones that cannot be
+ * described honestly or do not fit. */
+static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot,
+                        int type_code) {
+    if (f->nvars >= DBUG_MAX_VARS)
+        return;
+    if (name == NULL || name[0] == '\0')
+        return;
+    /* A name the compiler generated, not one the user wrote. */
+    if (name[0] == '$')
+        return;
+    DbgVar *v = &f->vars[f->nvars++];
+    v->name = name;
+    v->file = dbg_file(cg, span.file);
+    v->line = span.line > 0 ? span.line : 0;
+    v->slot = slot;
+    v->type_code = type_code;
+}
+
+/* Collects the locals of a function body, in source order.
+ *
+ * A local is skipped when the register allocator gave it a register: its value
+ * is not in the frame at all, and there is no single address that describes it
+ * for the whole of its life. */
+static void dbg_collect_locals(CG *cg, DbgFunc *f, Stmt *s) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            dbg_collect_locals(cg, f, s->items[i]);
+        return;
+    case S_FOR:
+        dbg_collect_locals(cg, f, s->for_init);
+        dbg_collect_locals(cg, f, s->body);
+        return;
+    case S_IF:
+    case S_WHILE:
+        dbg_collect_locals(cg, f, s->body);
+        dbg_collect_locals(cg, f, s->orelse);
+        return;
+    case S_VAR: {
+        if (s->name == NULL || s->slot <= 0)
+            return;
+        LocalInfo *li = li_lookup(cg, s->slot);
+        if (li != NULL && li->assigned >= 0)
+            return; /* promoted to a register: no address to name */
+        dbg_add_var(cg, f, s->name, s->span, s->slot, dbg_type_of(s->type));
+        return;
+    }
+    default:
+        return;
+    }
+}
+
+/* Writes the .debug_info section: the compile unit, the three base types Z can
+ * describe, and one subprogram per emitted function.
+ *
+ * The base types come first and have a known shape, so their offsets within the
+ * section can be computed ahead of writing the variables that refer to them.
+ * ref4 offsets are measured from the first byte of .debug_info, which is the
+ * unit length field. */
+static void dbg_write_info(CG *cg) {
+    Buf *b = cg->out;
+    if (cg->dbg_nfuncs == 0)
+        return;
+
+    /* A file to name the unit after: the first one any function came from. */
+    const char *primary = cg->dbg_file_count > 0 ? cg->dbg_file_names[0] : "z";
+
+    /* Offsets of the base types, worked out from the layout below.
+     *
+     *   0x00  unit length                     4
+     *   0x04  version                         2
+     *   0x06  abbrev table offset             4   (a reloc, but fixed width)
+     *   0x0a  address size                    1
+     *   0x0b  CU DIE: abbrev code             1
+     *   0x0c  producer string                 len("z")+1
+     *   ...   language                        2
+     *   ...   stmt_list (a 4-byte section offset)
+     *   ...   name string                     len(primary)+1
+     */
+    int off = 4 + 2 + 4 + 1 + 1 + (int)strlen("z") + 1 + 2 + 4;
+    off += (int)strlen(primary) + 1;
+
+    /* long: abbrev, "long\0", size, encoding */
+    int off_long = off;
+    off += 1 + 5 + 1 + 1;
+    /* int (Z's bool): abbrev, "int\0", size, encoding */
+    int off_bool = off;
+    off += 1 + 4 + 1 + 1;
+    /* char, the pointee of a string: abbrev, "char\0", size, encoding */
+    int off_char = off;
+    off += 1 + 5 + 1 + 1;
+    /* char *: abbrev, size, ref4 to char */
+    int off_str = off;
+    off += 1 + 1 + 4;
+    /* double: Z's `float` is binary64, which is the name DWARF uses for it. */
+    int off_double = off;
+    off += 1 + 7 + 1 + 1;
+    /* void, the pointee of any other pointer. Without a target type a reader
+     * treats a pointer as something to dereference and reports an error instead
+     * of showing the address; void* at least shows the address. */
+    int off_void = off;
+    off += 1 + 5 + 1 + 1;
+    /* void *: abbrev, size, ref4 to void */
+    int off_ptr = off;
+    off += 1 + 1 + 4;
+
+    buf_puts(b, "  .section .debug_info\n.Lz_info:\n");
+    /* The unit length covers every byte after itself -- the version, the abbrev
+     * offset, the address size and all the DIEs -- so it is measured from a
+     * label placed just past the length field, not from the start of the
+     * section. Expressed as a label difference because the size is not known
+     * until the last DIE is written. */
+    buf_puts(b, "  .long .Lz_info_end - .Lz_info_after_len\n");
+    buf_puts(b, ".Lz_info_after_len:\n");
+    dbg16(b, DWARF_VERSION);
+    /* 32-bit DWARF format throughout: a 4-byte unit length and a 4-byte abbrev
+     * offset. Mixing a 32-bit length with a 64-bit abbrev offset produces a
+     * unit every reader rejects. */
+    buf_puts(b, "  .long .Lz_abbrev\n");
+    dbg8(b, 8); /* address size */
+    buf_puts(b, ".Lz_info_body:\n");
+
+    /* The compile unit. */
+    dbg8(b, DW_ABBREV_CU);
+    dbg_asciz(b, "z");
+    dbg16(b, 0x1d); /* DW_LANG_C99: the closest thing DWARF has to "Z" */
+    buf_puts(b, "  .long .Lz_line\n"); /* the assembler's own line program */
+    dbg_asciz(b, primary);
+
+    /* Base types. */
+    dbg8(b, DW_ABBREV_BASE);
+    dbg_asciz(b, "long");
+    dbg8(b, 8);
+    dbg8(b, DW_ATE_signed);
+
+    dbg8(b, DW_ABBREV_BASE);
+    dbg_asciz(b, "int");
+    dbg8(b, 8);
+    dbg8(b, DW_ATE_boolean);
+
+    dbg8(b, DW_ABBREV_BASE);
+    dbg_asciz(b, "char");
+    dbg8(b, 1);
+    dbg8(b, DW_ATE_signed_char);
+
+    dbg8(b, DW_ABBREV_POINTER);
+    dbg8(b, 8);
+    dbg32(b, (unsigned long)off_char);
+
+    dbg8(b, DW_ABBREV_BASE);
+    dbg_asciz(b, "double");
+    dbg8(b, 8);
+    dbg8(b, DW_ATE_float);
+
+    dbg8(b, DW_ABBREV_BASE);
+    dbg_asciz(b, "void");
+    dbg8(b, 0); /* no size: an incomplete type */
+    dbg8(b, DW_ATE_signed);
+
+    dbg8(b, DW_ABBREV_POINTER);
+    dbg8(b, 8);
+    dbg32(b, (unsigned long)off_void);
+
+    for (int i = 0; i < cg->dbg_nfuncs; i++) {
+        DbgFunc *f = &cg->dbg_funcs[i];
+        dbg8(b, DW_ABBREV_SUBPROGRAM);
+        dbg_asciz(b, f->name);
+        dbg32(b, (unsigned long)dbg_type_ref(f->ret_type, off_long, off_bool, off_str,
+                                             off_ptr, off_double, off_void));
+        dbg8(b, (unsigned)f->file);
+        dbg8(b, (unsigned)f->line);
+        /* The two addresses. Each is a reference to a label placed around the
+         * function body, which the linker resolves; the extent is measured to a
+         * label after the final ret rather than to a byte count, because the
+         * size of the emitted code is not known here either. */
+        buf_printf(b, "  .quad %s\n", f->begin_label);
+        buf_printf(b, "  .quad %s\n", f->end_label);
+        /* frame base = rbp + 0, the same register the locations below are
+         * relative to, so the two agree. */
+        dbg8(b, 2);
+        dbg8(b, DW_OP_breg6);
+        dbg8(b, 0);
+
+        for (int j = 0; j < f->nvars; j++) {
+            DbgVar *v = &f->vars[j];
+            int toff = dbg_type_ref(v->type_code, off_long, off_bool, off_str, off_ptr,
+                                    off_double, off_void);
+            int typed = toff != 0;
+            /* A formal_parameter and a variable have separate abbreviations for
+             * both the typed and untyped shapes; which pair applies is fixed by
+             * the function that recorded the variable. */
+            int is_param = j < f->nparams;
+            unsigned code;
+            if (is_param)
+                code = typed ? DW_ABBREV_PARAM_TYPED : DW_ABBREV_PARAM;
+            else
+                code = typed ? DW_ABBREV_VAR_TYPED : DW_ABBREV_VAR;
+            dbg8(b, code);
+            dbg_asciz(b, v->name);
+            dbg8(b, (unsigned)v->file);
+            dbg8(b, (unsigned)v->line);
+            if (typed)
+                dbg32(b, (unsigned long)toff);
+            /* DW_OP_breg6 <sleb>: the value lives at rbp-slot, and rbp holds
+             * exactly the address the prologue built the frame against, so the
+             * offset is just -slot.
+             *
+             * The obvious alternative, DW_OP_fbreg, is relative to the canonical
+             * frame address -- and a reader cannot work out where that is
+             * without unwind information, which codegen does not emit. With only
+             * a line table, a reader falls back to assuming the frame pointer is
+             * unchanged since the call, which is true at the call site and false
+             * everywhere in the body, so every variable read back as whatever
+             * happened to be on the stack. Addressing rbp directly needs no
+             * unwind information at all. */
+            long o = -(long)v->slot;
+            dbg8(b, (unsigned)(1 + sleb128_len(o)));
+            dbg8(b, DW_OP_breg6);
+            sleb128_put(b, o);
+        }
+        dbg8(b, 0); /* end of the subprogram's children */
+    }
+
+    dbg8(b, 0); /* end of the compile unit's children */
+    buf_puts(b, ".Lz_info_end:\n");
+    buf_puts(b, "  .section .text\n");
+}
 
 /* Every Z-level function is emitted under a reserved prefix.
  *
@@ -1862,6 +3859,7 @@ static const char *z_sym(CG *cg, const char *name) {
     return out;
 }
 
+
 /* Emits one function. The body is generated twice: once to measure peak
  * temporary-slot usage (to size the stack frame), then for real. */
 static void emit_function(CG *cg, Stmt *fn) {
@@ -1885,8 +3883,10 @@ static void emit_function(CG *cg, Stmt *fn) {
     size_t saved_len = cg->out->len;
     cg->temp_top = 0;
     cg->temp_high = 0;
+    cg->measuring = 1;
     gen_block_items(cg, fn->fbody); /* measure pass */
 
+    cg->measuring = 0;
     cg->out->len = saved_len;
     if (cg->out->data != NULL)
         cg->out->data[saved_len] = '\0';
@@ -1913,6 +3913,51 @@ static void emit_function(CG *cg, Stmt *fn) {
     /* An exported symbol has to be visible outside this translation unit. */
     if (fn->is_export)
         buf_printf(cg->out, "  .globl %s\n", sym);
+
+    /* The two labels that bracket the body, for DWARF's low_pc and high_pc. A
+     * counter keeps them unique: a generic instantiated twice emits the same
+     * function twice, and one repeated label would not assemble. */
+    int have_dbg = cg->debug_info;
+    DbgFunc *df = NULL;
+    char dbg_begin[32], dbg_end[32];
+    if (have_dbg) {
+        snprintf(dbg_begin, sizeof dbg_begin, ".Ldbg_b%d", cg->dbg_nfuncs);
+        snprintf(dbg_end, sizeof dbg_end, ".Ldbg_e%d", cg->dbg_nfuncs);
+        if (cg->dbg_nfuncs == cg->dbg_funcs_cap) {
+            int ncap = cg->dbg_funcs_cap == 0 ? 32 : cg->dbg_funcs_cap * 2;
+            DbgFunc *nf = realloc(cg->dbg_funcs, (size_t)ncap * sizeof(DbgFunc));
+            if (nf == NULL)
+                die_oom();
+            cg->dbg_funcs = nf;
+            cg->dbg_funcs_cap = ncap;
+        }
+        df = &cg->dbg_funcs[cg->dbg_nfuncs++];
+        memset(df, 0, sizeof *df);
+        /* The name the reader wrote, not the emitted symbol: a nested function's
+         * symbol is `$fn<owner>_<name>` and a hoisted lambda's is `$lam<n>`,
+         * neither of which appears anywhere in the source. */
+        df->name = fn->src_fname != NULL ? fn->src_fname
+                  : fn->fname != NULL       ? fn->fname
+                                             : sym;
+        df->ret_type = dbg_type_of(fn->ret_type);
+        df->file = dbg_file(cg, fn->span.file);
+        df->line = fn->span.line > 0 ? fn->span.line : 0;
+        df->begin_label = arena_strdup(cg->arena, dbg_begin);
+        df->end_label = arena_strdup(cg->arena, dbg_end);
+
+        /* Parameters first, so the writer can tell them from locals. vis_start
+         * skips `this` and the hidden sret buffer, neither of which the user
+         * named. Params are always spilled to the frame in the prologue, so
+         * their location is exact. */
+        (void)npool_used;
+        for (int i = fn->vis_start; i < fn->nparams && i < fn->vis_start + 8; i++) {
+            Expr *pe = fn->params[i];
+            dbg_add_var(cg, df, pe->name, pe->span, pe->slot, dbg_type_of(pe->type));
+        }
+        df->nparams = df->nvars;
+
+        buf_printf(cg->out, "%s:\n", dbg_begin);
+    }
     buf_printf(cg->out, "%s:\n", sym);
     buf_printf(cg->out, "  push rbp\n  mov rbp, rsp\n");
     for (int r = 0; r < NPOOL; r++)
@@ -1926,10 +3971,49 @@ static void emit_function(CG *cg, Stmt *fn) {
         buf_printf(cg->out, "  lea rbp, [rbp - %d]\n", 8 * npool_used);
     if (frame > 0)
         buf_printf(cg->out, "  sub rsp, %d\n", frame);
-    for (int i = 0; i < fn->nparams; i++) {
-        buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot, ARG_REGS[i]);
+    /* Spill the parameters into their frame slots.
+     *
+     * Where each one arrived is decided by assign_args, the same function the
+     * call sites use. A float comes in a vector register, and the vector sequence
+     * is numbered independently of the integer one, so a float parameter is read
+     * from xmm<n> even when a hidden argument -- a closure's environment, a
+     * struct-return buffer -- already occupies rdi. That is what the System V ABI
+     * actually says, and the two conventions cannot be mixed: a method reached
+     * both directly and through a method pointer would otherwise read its float
+     * parameter from a different register depending on how it was called.
+     *
+     * An argument past its register cap is read from the caller's stack, one
+     * eight-byte slot per argument in order. The frame is anchored at rbp, so the
+     * first one is at [rbp+16]: the saved frame pointer and the return address
+     * sit below it. */
+    if (fn->nparams > 0) {
+        Type **ptypes = arena_alloc_array(cg->arena, (size_t)fn->nparams, sizeof(Type *));
+        for (int i = 0; i < fn->nparams; i++)
+            ptypes[i] = fn->params[i]->type;
+        ArgAssign aa;
+        assign_args(ptypes, fn->nparams, 0, &aa);
+        for (int i = 0; i < fn->nparams; i++) {
+            if (is_kind(fn->params[i]->type, TK_F64) && aa.reg[i] != NULL) {
+                buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n",
+                           fn->params[i]->slot, aa.reg[i]);
+            } else if (aa.reg[i] == NULL) {
+                buf_printf(cg->out, "  mov r11, QWORD PTR [rbp + %d]\n", 16 + aa.soff[i]);
+                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], r11\n", fn->params[i]->slot);
+            } else if (fn->params[i]->boxed) {
+                /* A captured parameter: the slot must hold the box, not the
+                 * value, or a closure reading the environment would find an
+                 * integer where it expects a pointer. */
+                buf_printf(cg->out, "  mov rdi, %s\n  call z_box\n", aa.reg[i]);
+                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", fn->params[i]->slot);
+            } else {
+                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot,
+                           aa.reg[i]);
+            }
+        }
     }
     gen_block_items(cg, fn->fbody);
+    if (have_dbg)
+        dbg_collect_locals(cg, df, fn->fbody);
     /* rsp is already at the deepest saved pool register once rbp is rebased,
      * so pop them in reverse push order and then rbp. The return value stays
      * in rax. */
@@ -1938,6 +4022,8 @@ static void emit_function(CG *cg, Stmt *fn) {
         if (cg->pool_mask & (1 << r))
             buf_printf(cg->out, "  pop %s\n", POOL_REGS[r]);
     buf_printf(cg->out, "  pop rbp\n  ret\n", sym);
+    if (have_dbg)
+        buf_printf(cg->out, "%s:\n", dbg_end);
 }
 
 static void emit_escaped(CG *cg, const char *s) {
@@ -1979,8 +4065,16 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
     cg.out = &out;
     cg.strings = strings;
     cg.arena = arena;
-    if (opts != NULL)
+    cg.opt = Z_OPT_DEFAULT;
+    if (opts != NULL) {
         cg.bounds_checks = opts->bounds_checks;
+        cg.debug_info = opts->debug_info;
+        cg.opt = opts->opt_level;
+        if (cg.opt < Z_OPT_MIN)
+            cg.opt = Z_OPT_MIN;
+        if (cg.opt > Z_OPT_MAX)
+            cg.opt = Z_OPT_MAX;
+    }
 
     buf_puts(&out, "  .intel_syntax noprefix\n  .text\n");
 
@@ -2036,6 +4130,45 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
             buf_printf(&out, "  .quad %s\n",
                        sd->vtable_impl[v] ? z_sym(&cg, sd->vtable_impl[v]) : "0");
     }
+    /* Interface tables, one per (implementing type, interface) pair the program
+     * actually converted to. Each is an array of code pointers in the interface's
+     * declaration order; a class's entries are trampolines that go through the
+     * receiver's vtable, so a subclass stored in an interface still calls the
+     * override. */
+    for (int i = 0; i < cg.nitabs; i++) {
+        StructDef *impl = cg.itabs[i].impl;
+        IfaceDef *id = cg.itabs[i].idef;
+        if (impl == NULL || id == NULL)
+            continue;
+        if (impl->is_class) {
+            /* One trampoline per slot, and these are instructions rather than
+             * data: they are reached by jumping to them, so they have to be in
+             * .text. Emitting them here among the vtables put executable bytes in
+             * .rodata, and calling one jumped into the string table. */
+            buf_puts(&out, "  .text\n");
+            for (int m = 0; m < id->nmethods; m++) {
+                StructMethod *sm = struct_find_method(impl, id->methods[m].name);
+                if (sm == NULL)
+                    continue;
+                buf_printf(&out, "$tr$%s$%s$%d:\n", impl->name, id->name, m);
+                buf_printf(&out, "  mov rax, QWORD PTR [rdi]\n");
+                buf_printf(&out, "  mov rax, QWORD PTR [rax + %d]\n", sm->vtable_index * 8);
+                buf_puts(&out, "  jmp rax\n");
+            }
+            buf_puts(&out, "  .section .rodata\n");
+        }
+        buf_printf(&out, "%s:\n", iface_itab_symbol(id, impl));
+        for (int m = 0; m < id->nmethods; m++) {
+            StructMethod *sm = struct_find_method(impl, id->methods[m].name);
+            if (impl->is_class) {
+                buf_printf(&out, "  .quad $tr$%s$%s$%d\n", impl->name, id->name, m);
+            } else if (sm != NULL && sm->body != NULL) {
+                buf_printf(&out, "  .quad %s\n", z_sym(&cg, sm->body->fname));
+            } else {
+                buf_puts(&out, "  .quad 0\n");
+            }
+        }
+    }
     /* 64-bit magic multipliers and divisors referenced by [rip + .Lro<i>]. */
     for (int i = 0; i < cg.nrodata; i++)
         buf_printf(&out, ".Lro%d:\n  .quad %llu\n", i, (unsigned long long)cg.rodata[i]);
@@ -2047,6 +4180,15 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
     buf_puts(&out, ".Lfmt_int:\n  .asciz \"%ld\\n\"\n");
     buf_puts(&out, ".Ltrue_str:\n  .asciz \"true\"\n");
     buf_puts(&out, ".Lfalse_str:\n  .asciz \"false\"\n");
+
+    /* The debug sections go last, once every function's description is known.
+     * They return to .text afterwards so the section note below is not left
+     * pointing into .debug_info. */
+    if (cg.debug_info) {
+        dbg_write_abbrev(&out);
+        dbg_write_info(&cg);
+    }
+
     buf_puts(&out, "  .section .note.GNU-stack,\"\",@progbits\n");
 
     if (out.data == NULL) {
@@ -2057,6 +4199,7 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
     }
     free(cg.locals);
     free(cg.rodata);
+    free(cg.dbg_funcs);
     return out.data;
 }
 

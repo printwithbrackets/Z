@@ -1,0 +1,1 @@
+returns a lambda, so its return type must be 'closure(...) -> ...'

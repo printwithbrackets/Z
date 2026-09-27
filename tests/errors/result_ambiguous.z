@@ -1,0 +1,8 @@
+// `Ok(3)` does not say what the error type is, so it needs somewhere to be going:
+// a declared type, a return, or a parameter. Without one there is nothing to
+// build, and guessing would make `Result<int,string>` and `Result<int,io>`
+// silently different types.
+int main() {
+    var r = Ok(3);
+    return 0;
+}

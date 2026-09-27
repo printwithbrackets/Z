@@ -69,7 +69,17 @@ static int run_command(const char *cmd) {
 }
 
 static void usage(void) {
-    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [--bounds] [linker args...]\n");
+    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]\n"
+            "       [-w] [-Werror] [-Wno-<name>] [linker args...]\n"
+            "  -O0 naive codegen (no register allocation, no folding)\n"
+            "  -O1 default: folding, register allocation, strength reduction\n"
+            "  -O2 adds loop-invariant code motion\n"
+            "  -O3 adds loop unrolling\n"
+            "  -g        emit DWARF debug info (line table, functions, locals)\n"
+            "  -w         silence all warnings\n"
+            "  -Werror    treat warnings as errors\n"
+            "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
+            "            unreachable)\n");
 }
 
 /* ---- imports ----
@@ -259,7 +269,8 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
  * links an executable. Returns the process exit status. */
 static int compile(const char *src, const char *exe, const char *asm_path,
-                   int bounds_checks, const char *link_args) {
+                   int bounds_checks, int opt_level, int debug_info,
+                   const char *link_args) {
     long len = 0;
     char *text = read_file(src, &len);
     if (text == NULL)
@@ -294,7 +305,7 @@ static int compile(const char *src, const char *exe, const char *asm_path,
     toks[ntoks].span.file = src;
     ntoks++;
 
-    Stmt *program = parse_program(&arena, toks, ntoks, &strings);
+    Stmt *program = parse_program(&arena, toks, ntoks, &strings, opt_level);
     if (diag_error_count() > 0) {
         arena_free(&arena);
         free(text);
@@ -303,6 +314,8 @@ static int compile(const char *src, const char *exe, const char *asm_path,
 
     CodegenOptions copt;
     copt.bounds_checks = bounds_checks;
+    copt.debug_info = debug_info;
+    copt.opt_level = opt_level;
     char *asm_text = codegen_emit_opts(&arena, program, &strings, &copt);
 
     if (asm_path != NULL) {
@@ -373,6 +386,10 @@ int main(int argc, char **argv) {
     const char *src = argv[2];
     const char *out = NULL;
     int bounds_checks = 0;
+    int debug_info = 0;
+    /* -O0..-O3, spelled like gcc's. The default matches what the compiler has
+     * always done, so an invocation without a flag behaves exactly as before. */
+    int opt_level = Z_OPT_DEFAULT;
     /* Everything the compiler does not recognize is collected verbatim and
      * handed to the link step. */
     char link_args[3072];
@@ -383,6 +400,20 @@ int main(int argc, char **argv) {
             out = argv[++i];
         } else if (strcmp(argv[i], "--bounds") == 0) {
             bounds_checks = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            /* Consumed here rather than passed to the link: the debug sections
+             * are produced by codegen emitting .loc and .debug_* directives, and
+             * forwarding -g would only ask the C toolchain for debug info about
+             * code it did not compile. */
+            debug_info = 1;
+        } else if (diag_set_warn_flag(argv[i])) {
+            /* A warning flag we know. Anything else beginning -W falls through
+             * to the linker untouched, as it always has. */
+        } else if (strncmp(argv[i], "-O", 2) == 0 && argv[i][2] >= '0' && argv[i][2] <= '9' &&
+                   argv[i][3] == 0) {
+            /* -O0..-O3. Anything else starting -O is not ours, so it falls
+             * through to the linker untouched. */
+            opt_level = argv[i][2] - '0';
         } else {
             const char *a = argv[i];
             size_t need = strlen(a) + 1;
@@ -420,7 +451,7 @@ int main(int argc, char **argv) {
                 *dot = '\0';
             out = default_out;
         }
-        int rc = compile(src, out, NULL, bounds_checks, link_args) == 0 ? 0 : 1;
+        int rc = compile(src, out, NULL, bounds_checks, opt_level, debug_info, link_args) == 0 ? 0 : 1;
         free(default_out);
         return rc;
     }
@@ -428,7 +459,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, link_args) != 0)
+        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, link_args) != 0)
             return 1;
         char run_cmd[512];
         snprintf(run_cmd, sizeof run_cmd, "'%s'", exe);
@@ -439,7 +470,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
-        return compile(src, NULL, "/dev/stdout", bounds_checks, link_args) == 0 ? 0 : 1;
+        return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info, link_args) == 0 ? 0 : 1;
     }
 
     usage();

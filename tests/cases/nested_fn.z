@@ -1,0 +1,99 @@
+// Functions declared inside another function, written where a statement goes.
+//
+// A nested function is hoisted out to the top level like a lambda, and emitted
+// under a symbol built from the enclosing function's id -- so two functions that
+// each declare `helper` do not collide on one symbol.
+
+struct P { int x; int y; }
+
+class Box {
+    int v;
+    Box(int a) { v = a; }
+    int Scaled(int k) {
+        int dbl(int n) { return n * 2; }   // nested inside a method
+        return dbl(v) * k;
+    }
+}
+
+int apply(fn(int) -> int f, int v) { return f(v); }
+
+int outer() {
+    int helper(int n) { return n + 1; }
+    int twice(int n) { return n * 2; }
+    return helper(twice(5));
+}
+
+int other() {
+    // The same name as the `helper` in outer(). One symbol cannot serve both.
+    int helper(int n) { return n * 100; }
+    return helper(5);
+}
+
+int main() {
+    print(outer());
+    print(other());
+
+    // ---- recursion ----
+    int fact(int n) {
+        if (n < 2) { return 1; }
+        return n * fact(n - 1);
+    }
+    print(fact(5));
+
+    // ---- struct parameters, by value and by pointer ----
+    int sumFields(P q) { return q.x + q.y; }
+    int bumpX(P* q, int by) { q.x = q.x + by; return q.x; }
+    var p = new P(3, 4);
+    print(sumFields(p));
+    print(bumpX(&p, 10));
+    print(p.x);
+
+    // ---- a float parameter and result ----
+    float half(float v) { return v / 2.0; }
+    print(half(5.0));
+
+    // ---- an expression body ----
+    int square(int n) => n * n;
+    print(square(7));
+
+    // ---- as a function pointer, and passed as one ----
+    int dbl(int n) { return n * 2; }
+    var fp = &dbl;
+    print(fp(21));
+    print(apply(&dbl, 5));
+
+    // ---- calling a sibling declared before it ----
+    int b(int n) { return n * 3; }
+    int a(int n) { return b(n) + 1; }
+    print(a(2));
+
+    // ---- declared inside a nested block ----
+    {
+        int scoped(int n) { return n + 100; }
+        print(scoped(1));
+    }
+
+    // ---- declared inside a method, a loop body, and a conditional ----
+    print(new Box(3).Scaled(5));
+    var i = 0;
+    while (i < 2) {
+        int step(int n) { return n + 1; }
+        print(step(i));
+        i = i + 1;
+    }
+    if (true) {
+        int pick(int a, int b) {
+            if (a > b) { return a; }
+            return b;
+        }
+        print(pick(3, 9));
+    }
+
+    // ---- a function name and a variable of the same name coexist ----
+    // They live in different namespaces, as in C.
+    var f = 1;
+    int f2(int n) { return n; }
+    print(f2(3));
+    print(f);
+    return 0;
+}

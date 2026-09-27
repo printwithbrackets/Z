@@ -10,6 +10,7 @@
  * root is a top-level S_BLOCK item. Returns NULL only if allocation fails;
  * recoverable syntax/type errors are reported through diag_error and cause a
  * non-zero diag_error_count(). */
-Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings);
+Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings,
+                    int opt_level);
 
 #endif /* Z_PARSER_H */

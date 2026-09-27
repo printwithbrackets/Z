@@ -1,0 +1,10 @@
+// A class satisfies an interface through its vtable, so every method it offers
+// has to be dispatchable. A non-virtual one has no slot, and an itab entry
+// pointing straight at it would bind the implementation named here rather than
+// the subclass's.
+interface Sized { int Scale(int k); }
+class Thing { int n; int Scale(int k) { return n * k; } }
+int main() {
+    Sized t = new Thing();
+    return 0;
+}

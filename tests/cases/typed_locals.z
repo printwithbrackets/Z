@@ -1,0 +1,60 @@
+// Explicitly typed locals: `Type name = expr;` where the type is spelled by name.
+//
+// A statement that begins with a type is a declaration, and the type may be a
+// struct or union name, not only a keyword. Reaching that used to need a keyword:
+// any leading identifier was reported as an unknown type without a lookup, so
+// `P r = new P(3, 4);` could not be written at all and `P* q = &r;` fell through
+// to the expression parser and read as a variable named `P`.
+
+struct P { int x; int y; }
+
+// A type parameter works in the same position.
+T firstOf<T>(T a, T b) {
+    T r = a;
+    if (r == b) { return r; }
+    return b;
+}
+
+int main() {
+    // ---- a named struct local ----
+    var r = new P(3, 4);
+    print(r.x);
+    print(r.y);
+
+    // ---- by pointer ----
+    var q = &r;
+    print(q.x);
+
+    // ---- a struct local initializes from a struct literal, and copies by value
+    P copy = r;
+    copy.x = 99;
+    print(r.x);
+    print(copy.x);
+
+    // ---- zero, then assign ----
+    P z = new P(0, 0);
+    z.x = 7;
+    z.y = 8;
+    print(z.x + z.y);
+
+    // ---- an array of a named type ----
+    P[] arr = new P[2];
+    arr[0] = new P(1, 2);
+    print(arr[0].x + arr[0].y);
+    print(arr.length);
+
+    // ---- a named struct as a parameter type, and a pointer parameter ----
+    int sum(P s) { return s.x + s.y; }
+    int bumpFirst(P* s) { s.x = s.x + 100; return s.x; }
+    print(sum(r));
+    print(bumpFirst(&r));
+    print(sum(r));
+
+    // ---- a type parameter in a local declaration ----
+    print(firstOf(42, 7));
+
+    // ---- a pointer to a named struct, initialized to null ----
+    P* nothing = null;
+    if (nothing == null) { print(-1); }
+    return 0;
+}

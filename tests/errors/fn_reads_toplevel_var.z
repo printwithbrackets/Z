@@ -1,0 +1,5 @@
+// The same rule at the top level. This used to compile and print 0, because the
+// function read its own frame rather than the statement's.
+var g = 5;
+int f() { return g; }
+print(f());

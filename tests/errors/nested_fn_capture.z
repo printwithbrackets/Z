@@ -1,0 +1,9 @@
+// A nested function has its own frame, so it cannot read a variable declared
+// beside it. Slot numbers are per function: naming one would read whatever the
+// nested frame happened to hold. Use a lambda, which does capture.
+int main() {
+    var k = 7;
+    int peek() { return k; }
+    print(peek());
+    return 0;
+}

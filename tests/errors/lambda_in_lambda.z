@@ -1,0 +1,6 @@
+// One nesting level only: a lambda written inside another lambda has nowhere to
+// put its captured environment.
+var outer = () => {
+    var k = 1;
+    return () => k + 1;
+};

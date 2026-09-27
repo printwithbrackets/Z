@@ -1,0 +1,8 @@
+// A type satisfies an interface by having the methods. This one has Area but not
+// Name, and the diagnostic says which is missing rather than only that it fails.
+interface Shape { int Area(); string Name(); }
+struct Half { int side; int Area() { return side * side; } }
+int main() {
+    Shape s = new Half(3);
+    return 0;
+}

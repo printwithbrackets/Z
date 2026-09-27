@@ -1,0 +1,6 @@
+// A function that returns a lambda has to declare `closure`, not `fn`. The
+// hidden environment takes the first argument register, which is the difference
+// the two types name.
+fn(int) -> int makeAdder(int n) {
+    return (int x) => x + n;
+}

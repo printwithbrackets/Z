@@ -1,0 +1,7 @@
+// A Result's payload is one machine word, which is what keeps every Result the
+// same shape and makes `?` a copy rather than a conversion. A struct by value
+// does not fit in one.
+struct Big { int a; int b; int c; int d; }
+Result<Big, string> f() {
+    return Ok(new Big(1, 2, 3, 4));
+}

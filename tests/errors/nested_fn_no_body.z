@@ -1,0 +1,6 @@
+// A body-less declaration exists to be satisfied by a definition elsewhere, and
+// a nested function has nowhere else to be defined.
+int main() {
+    int helper(int x);
+    return 0;
+}

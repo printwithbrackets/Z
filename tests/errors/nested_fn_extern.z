@@ -1,0 +1,6 @@
+// A function inside another has no outside to be named from, so `extern` and
+// `export` cannot mean anything there.
+int main() {
+    extern int puts(string s);
+    return 0;
+}

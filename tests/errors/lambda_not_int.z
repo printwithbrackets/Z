@@ -1,0 +1,6 @@
+// A closure is its own type. `fn` means a plain code address, so a lambda cannot
+// stand in for an int -- nor for an fn, nor the other way round.
+var f = (int x) => x + 1;
+var n = 0;
+n = f;
+print(n);

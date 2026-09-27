@@ -1,0 +1,78 @@
+// Interfaces: a named set of method signatures that unrelated types satisfy.
+//
+// A type implements an interface by having the methods -- nothing is declared,
+// because a struct has no vtable of its own to list them in. An interface value
+// is a pointer to a { itab, receiver } cell; the itab is an array of code
+// pointers in the interface's declaration order, and a call site resolves a
+// method name to an index there once, at compile time.
+
+interface Shape {
+    int Area();
+    string Name();
+}
+
+struct Square { int side; int Area() { return side * side; } string Name() => "square"; }
+struct Rect { int w; int h; int Area() { return w * h; } string Name() { return "rect"; } }
+
+class Circle {
+    int r;
+    Circle(int rr) { r = rr; }
+    virtual int Area() { return 3 * r * r; }
+    virtual string Name() => "circle";
+}
+
+// A subclass stored as the interface must still call the override, which is why
+// a class's itab entries are trampolines through the vtable rather than the
+// symbols of the implementations the conversion site happened to name.
+class BigCircle : Circle {
+    BigCircle(int rr) { base(rr); }
+    override int Area() { return 100 * 3 * r * r; }
+    override string Name() => "bigcircle";
+}
+
+int total(Shape a, Shape b) { return a.Area() + b.Area(); }
+
+Shape bigger(Shape a, Shape b) {
+    if (a.Area() >= b.Area()) { return a; }
+    return b;
+}
+
+int main() {
+    // ---- two structs through one interface ----
+    var s = new Square(5);
+    var r = new Rect(3, 4);
+    Shape a = s;
+    Shape b = r;
+    print(a.Area());
+    print(b.Area());
+    print(a.Name() + " " + b.Name());
+
+    // ---- structs and classes in the same array ----
+    // Nothing in common but the interface, and the struct has no vtable at all.
+    var shapes = new Shape[3];
+    shapes[0] = new Circle(2);
+    shapes[1] = new BigCircle(2);
+    shapes[2] = new Square(3);
+    for (var i = 0; i < 3; i = i + 1) {
+        print(shapes[i].Name() + " " + shapes[i].Area());
+    }
+
+    // ---- as parameters and as a result ----
+    print(total(s, r));
+    var win = bigger(s, r);
+    print(win.Area());
+    print(total(bigger(r, s), s));
+
+    // ---- the interface is a pointer, so null is meaningful ----
+    Shape nothing = null;
+    if (nothing == null) { print("null"); }
+
+    // ---- declared after its use, like any other type ----
+    var late = new Deferred(3);
+    Late l = late;
+    print(l.Area());
+    return 0;
+}
+
+interface Late { int Area(); }
+struct Deferred { int n; int Area() { return n * 11; } }

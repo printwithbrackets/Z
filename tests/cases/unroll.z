@@ -1,0 +1,95 @@
+// Loop unrolling, which -O3 applies to every loop that has a condition and a
+// body small enough to copy.
+//
+// The condition is tested before each copy rather than once per pass, so the
+// body runs exactly as many times as it did rolled. What the test catches is the
+// part that could differ: `break` and `continue` inside a copy, a trip count
+// that is not a multiple of the factor, a zero-trip loop, and nested loops.
+
+int classify(int n) {
+    // partial trip count: 7 iterations, factor 4, so the last group runs 3
+    var s = 0;
+    for (var i = 0; i < n; i = i + 1) { s = s + i; }
+    return s;
+}
+
+int zeroTrip() {
+    var s = 0;
+    for (var i = 0; i < 0; i = i + 1) { s = 99; }
+    return s;
+}
+
+int breaksOut() {
+    var n = 0;
+    for (var i = 0; i < 100; i = i + 1) {
+        if (i == 6) { break; }
+        n = n + 1;
+    }
+    return n;
+}
+
+int continuesOn() {
+    // `continue` has to run the step of the copy it appears in, and then branch
+    // on to the next copy -- not jump back to the top and re-run the body.
+    var s = 0;
+    for (var i = 0; i < 10; i = i + 1) {
+        if (i % 2 == 0) { continue; }
+        s = s + i;
+    }
+    return s;
+}
+
+int nested() {
+    var s = 0;
+    for (var i = 0; i < 5; i = i + 1) {
+        for (var j = 0; j < 3; j = j + 1) { s = s + 1; }
+    }
+    return s;
+}
+
+int nestedBreak() {
+    var s = 0;
+    for (var i = 0; i < 4; i = i + 1) {
+        for (var j = 0; j < 10; j = j + 1) {
+            if (j == 2) { break; }
+            s = s + 1;
+        }
+    }
+    return s;
+}
+
+int bigBody() {
+    // 25 statements: over the unrolling threshold, so left rolled. The result
+    // must be the same either way.
+    var s = 0;
+    for (var i = 0; i < 3; i = i + 1) {
+        s = s + 1; s = s + 1; s = s + 1; s = s + 1; s = s + 1;
+        s = s + 1; s = s + 1; s = s + 1; s = s + 1; s = s + 1;
+        s = s + 1; s = s + 1; s = s + 1; s = s + 1; s = s + 1;
+        s = s + 1; s = s + 1; s = s + 1; s = s + 1; s = s + 1;
+        s = s + 1; s = s + 1; s = s + 1; s = s + 1; s = s + 1;
+    }
+    return s;
+}
+
+int floatLoop() {
+    // A float condition cannot take the branch-on-compare path, so the unrolled
+    // copies test it a different way. The result has to match.
+    var s = 0.0;
+    for (var i = 0; i < 7; i = i + 1) { s = s + 0.5; }
+    return (int)(s * 2.0);
+}
+
+int main() {
+    print(classify(7));    // 0+1+2+3+4+5+6 = 21
+    print(classify(0));    // 0
+    print(classify(16));   // 0..15 = 120
+    print(zeroTrip());     // 0
+    print(breaksOut());    // 6
+    print(continuesOn());  // 1+3+5+7+9 = 25
+    print(nested());       // 15
+    print(nestedBreak());  // 4 * 2 = 8
+    print(bigBody());      // 3 * 25 = 75
+    print(floatLoop());    // 3.5 * 2 = 7
+    return 0;
+}

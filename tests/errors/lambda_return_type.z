@@ -1,0 +1,9 @@
+// A lambda's return type is inferred from its body, so a `return` inside one
+// cannot be checked until the body has been read. Reporting the *enclosing*
+// function's return type here was the bug: this is `int` returned from a lambda
+// whose own type is `string`.
+var s = "hi";
+var f = () => {
+    if (s == "hi") { return "yes"; }
+    return 1;
+};

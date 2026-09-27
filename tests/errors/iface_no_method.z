@@ -1,0 +1,11 @@
+// Calling a method the interface does not require is not a call: there is no itab
+// slot to load, so it is a diagnostic rather than a jump through whatever the
+// index happened to be.
+interface Sized { int Scale(int k); }
+struct Thing { int n; int Scale(int k) { return n * k; } }
+int main() {
+    var t = new Thing(0);
+    Sized s = t;
+    print(s.Missing(1));
+    return 0;
+}

@@ -1,0 +1,61 @@
+// Types declared inside a function: struct, class, and enum.
+//
+// A local declaration is queued with the other hoisted declarations rather than
+// emitted where it stands. A class's vtable is emitted by walking the top-level
+// items, so a local class left in the enclosing body would have had no vtable
+// and a virtual call through it would jump through a null slot.
+//
+// A type name is registered by a pre-scan of every token, so a local type may be
+// referred to before it is declared, and its name is program-wide rather than
+// scoped to the function -- two local structs cannot share a name.
+
+int main() {
+    // ---- a struct ----
+    struct Local { int a; int b; }
+    var v = new Local(3, 4);
+    print(v.a + v.b);
+
+    // ---- a struct with a method ----
+    struct WithMethod { int n; int Twice() { return n * 2; } }
+    var w = new WithMethod(21);
+    print(w.Twice());
+
+    // ---- a class, with virtual dispatch ----
+    class Shape {
+        int id;
+        Shape(int i) { id = i; }
+        virtual int Area() { return 0; }
+        int Id() { return id; }
+    }
+    class Square : Shape {
+        int side;
+        Square(int s) { base(1); side = s; }
+        override int Area() { return side * side; }
+    }
+    var sh = new Square(5);
+    print(sh.Area());
+    print(sh.Id());
+    // through a base-class pointer, so the vtable is what decides
+    Shape* asShape = sh;
+    print(asShape.Area());
+
+    // ---- an enum, with an exhaustive match ----
+    enum Colour { Red, Green, Blue }
+    string name(Colour c) => match c {
+        Red => "r",
+        Green => "g",
+        Blue => "b"
+    };
+    print(name(Green));
+    print(name(Red));
+
+    // ---- referred to before it is declared ----
+    // The pre-scan registers every type name, so this resolves.
+    struct Wrapper { Holder* h; }
+    struct Holder { int n; }
+    var hold = new Holder(9);
+    var wrap = new Wrapper(null);
+    wrap.h = &hold;
+    print(wrap.h.n);
+    return 0;
+}

@@ -1,0 +1,11 @@
+// A pointer has no length, so there is nothing for a foreach to iterate to.
+// This used to compile and walk off into unrelated memory.
+var a = new int[3];
+a[0] = 1;
+a[1] = 2;
+a[2] = 3;
+var p = &a[0];
+
+foreach (var x in p) {
+    print(x);
+}

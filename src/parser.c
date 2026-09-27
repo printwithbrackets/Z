@@ -8,19 +8,41 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* How many variables one closure can capture. Each costs a word in the
+ * environment and a word in the cell, so the bound is generous but real. */
+#define MAX_CAPTURES 64
+
 /* A local variable binding in a lexical scope. */
 typedef struct Var {
     char *name;
     Type *type;
     int offset;    /* byte offset from rbp within the function frame */
     int agg_param; /* parameter of struct/union type: slot holds a pointer */
+    int captured;  /* referenced by a closure: the slot holds a box pointer */
+    int owner;     /* func_counter value of the function that declared it */
+    int used;      /* referenced anywhere; drives -Wunused-local */
+    int is_param;  /* a parameter rather than a local statement */
+    int is_synth;  /* compiler-generated, or in a body we never see: not warnable */
+    Span decl_span; /* where the name was written, for diagnostics */
     struct Var *next;
 } Var;
 
 typedef struct Scope {
     Var *vars;
     struct Scope *parent;
+    /* The outermost scope of a function body. Name lookup stops here: a variable
+     * declared outside a function lives in a different frame, so naming it from
+     * inside would read a slot holding something else entirely. */
+    int is_fn_body;
 } Scope;
+
+/* A function declared inside another function, mapping the name the program
+ * writes to the symbol emitted for it. */
+typedef struct LocalFn {
+    char *name;
+    char *sym;
+    struct LocalFn *next;
+} LocalFn;
 
 /* A function signature discovered by the pre-scan, used to resolve and check
  * calls (including forward references). */
@@ -112,15 +134,177 @@ typedef struct {
     Stmt **pending; /* concrete instances awaiting append to program items */
     int npending, pending_cap;
     int in_instantiate; /* set while re-parsing a template for an instance */
+
+    /* ---- closures ----
+     *
+     * See the closure section below. `captured` is every variable in the current
+     * function that a lambda captured: their frame slots hold a box rather than
+     * the value. `lam_caps` is per-lambda -- the variables *this* lambda
+     * captured, in the order the body first mentioned them, which is the order
+     * its environment is laid out in. */
+    int lambda_counter;
+    int func_counter; /* owner id stamped on each Var; see capture_for */
+    struct Var *captured[MAX_CAPTURES];
+    int ncaptured;
+    struct Var *lam_caps[MAX_CAPTURES];
+    int nlamcaps;
+    int lam_owner;  /* func id of the lambda being parsed */
+    int lam_active; /* nonzero while inside a lambda body */
+    int cur_owner;  /* func id of the function whose frame is being built */
+
+    /* The `Result` type the expression being parsed is expected to have, when
+     * that is known: the declared type of a variable's initializer, the return
+     * type of a `return`, or a parameter's type. `Ok` and `Err` need it because
+     * neither can be written without the type it is completing. NULL whenever
+     * there is no expectation, which is the normal case for everything else. */
+    Type *expect_result;
+
+    /* 1 when -O2 or above is in effect. Set once by parse_program from the
+     * command line; the tree rewrites that improve code rather than check it --
+     * closed-form loops, and whatever joins them -- are gated on it, so that -O1
+     * output stays exactly what it was. */
+    int opt_level;
+
+    /* Functions declared inside another function. Each is emitted under a symbol
+     * derived from the enclosing function's id, because two functions in
+     * different bodies may both declare `helper` and one symbol cannot serve
+     * both. This maps the name the program writes to the symbol emitted. */
+    struct LocalFn *local_fns;
 } Parser;
+
+static int is_kind(Type *t, TypeKind k);
+
+/* True when any `return` in this body yields a closure. Only the last statement
+ * of a block can be a value-returning one in practice, but a return nested in an
+ * `if` still counts, so the walk covers every branch. */
+static int expr_is_closure(Expr *e) {
+    if (e == NULL)
+        return 0;
+    if (e->kind == E_CLOSURE)
+        return 1;
+    if (expr_is_closure(e->lhs) || expr_is_closure(e->rhs) || expr_is_closure(e->env))
+        return 1;
+    for (int i = 0; i < e->nargs; i++)
+        if (expr_is_closure(e->args[i]))
+            return 1;
+    for (int i = 0; i < e->narms; i++)
+        if (expr_is_closure(e->arms[i].body))
+            return 1;
+    if (e->kind == E_VAR && is_kind(e->type, TK_CLOSURE))
+        return 1;
+    return 0;
+}
+
+static int stmt_returns_closure(Stmt *s) {
+    if (s == NULL)
+        return 0;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            if (stmt_returns_closure(s->items[i]))
+                return 1;
+        return 0;
+    case S_FOR:
+        return stmt_returns_closure(s->for_init) || stmt_returns_closure(s->body);
+    case S_IF:
+    case S_WHILE:
+        return stmt_returns_closure(s->body) || stmt_returns_closure(s->orelse);
+    case S_RETURN:
+        return expr_is_closure(s->expr);
+    default:
+        return 0;
+    }
+}
+
+static int body_returns_closure(Stmt *body) { return stmt_returns_closure(body); }
+
+/* After a function's body is parsed, every slot its lambdas captured is known.
+ * This pass marks the declaration and every reference of each such slot, so
+ * codegen can tell a boxed local from a plain one by looking at the node.
+ *
+ * It walks only this function's own body. A hoisted lambda is a separate
+ * program item, and the captures it was rewritten to reach are indirection
+ * through the environment rather than frame slots, so there is nothing to mark
+ * inside one. */
+static void mark_boxed_expr(Parser *p, Expr *e) {
+    if (e == NULL)
+        return;
+    if (e->kind == E_VAR) {
+        for (int i = 0; i < p->ncaptured; i++) {
+            if (p->captured[i]->offset == e->slot) {
+                e->boxed = 1;
+                break;
+            }
+        }
+    }
+    mark_boxed_expr(p, e->lhs);
+    mark_boxed_expr(p, e->rhs);
+    mark_boxed_expr(p, e->env);
+    for (int i = 0; i < e->nargs; i++)
+        mark_boxed_expr(p, e->args[i]);
+    for (int i = 0; i < e->narms; i++)
+        mark_boxed_expr(p, e->arms[i].body);
+}
+
+static void mark_boxed_stmt(Parser *p, Stmt *s) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            mark_boxed_stmt(p, s->items[i]);
+        return;
+    case S_FOR:
+        mark_boxed_stmt(p, s->for_init);
+        mark_boxed_stmt(p, s->body);
+        return;
+    case S_IF:
+    case S_WHILE:
+        mark_boxed_stmt(p, s->body);
+        mark_boxed_stmt(p, s->orelse);
+        return;
+    case S_VAR:
+        if (s->slot > 0) {
+            for (int i = 0; i < p->ncaptured; i++) {
+                if (p->captured[i]->offset == s->slot) {
+                    s->boxed = 1;
+                    break;
+                }
+            }
+        }
+        mark_boxed_expr(p, s->init);
+        return;
+    case S_EXPR:
+    case S_RETURN:
+        mark_boxed_expr(p, s->expr);
+        return;
+    default:
+        return;
+    }
+}
+
+
+
+
 
 /* Forward declarations. */
 static Expr *parse_expr(Parser *p);
 static Stmt *parse_stmt(Parser *p);
+static void close_form_stmts(Parser *p, Stmt **items, int n);
+static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_index);
 static Stmt *parse_block(Parser *p);
-static Stmt *parse_func(Parser *p);
+static Stmt *parse_func(Parser *p, int nested);
 static Type *parse_type_at(Parser *p, int i);
 static Expr *parse_match(Parser *p, Span start);
+static Expr *parse_lambda(Parser *p, Span span);
+static void capture_for(Parser *p, struct Var *v, Span span);
+static int lambda_ahead(Parser *p, int i);
+static int is_kind(Type *t, TypeKind k);
+static int body_returns_closure(Stmt *body);
+static Expr *parse_unary(Parser *p);
+static Expr *make_cvt(Parser *p, Type *to, Expr *e, Span span);
+static void mark_synth(Parser *p, const char *name);
+static void skip_braced_block(Parser *p);
 static ConstDef *const_find(Parser *p, const char *name);
 static Expr *const_expr(Parser *p, ConstDef *c, Span span);
 static int const_fold_static(Parser *p, Expr *e, long long *out);
@@ -183,6 +367,8 @@ static Type *base_type_from_token(Parser *p, TokenKind k) {
         return type_int(&p->ty);
     case T_KW_BOOL:
         return type_bool(&p->ty);
+    case T_KW_FLOAT:
+        return type_f64(&p->ty);
     case T_KW_STRING:
         return type_string(&p->ty);
     case T_KW_VOID:
@@ -194,8 +380,8 @@ static Type *base_type_from_token(Parser *p, TokenKind k) {
 
 static int is_type_token(TokenKind k) {
     /* `fn` starts a function type, so anywhere a type may begin it counts. */
-    return k == T_KW_INT || k == T_KW_BOOL || k == T_KW_STRING || k == T_KW_VOID ||
-           k == T_KW_FN || k == T_KW_METHOD;
+    return k == T_KW_INT || k == T_KW_BOOL || k == T_KW_FLOAT || k == T_KW_STRING ||
+           k == T_KW_VOID || k == T_KW_FN || k == T_KW_METHOD || k == T_KW_CLOSURE;
 }
 
 /* Parses a type possibly followed by `*` stars and `[]` array suffixes.
@@ -206,6 +392,11 @@ static Type *base_type_or_name(Parser *p, Token *t) {
     if (b != NULL)
         return b;
     if (t->kind == T_IDENT) {
+        /* An interface name resolves here too, so a parameter, a return type and
+         * a local can all be written `I` with nothing else to go on. */
+        Type *ifc = type_find_iface(&p->ty, t->text);
+        if (ifc != NULL)
+            return ifc;
         /* An in-scope generic type-parameter binding (T) shadows any struct of
          * the same name. */
         for (int i = p->ntbind - 1; i >= 0; i--)
@@ -225,9 +416,12 @@ static Type *parse_type_at(Parser *p, int i);
 /* Reads a function type: `fn` "(" type ("," type)* ")" "->" type. A null
  * parameter list means the function takes nothing. */
 static Type *parse_fn_type(Parser *p) {
-    /* `fn(...)` is a plain function pointer; `method(...)` is a bound method
-     * pointer. Same syntax, different value. */
+    /* `fn(...)` is a plain code address; `method(...)` binds a receiver; and
+     * `closure(...)` is a lambda that captured something. Same syntax, different
+     * value -- and the three are distinct types, because they are called
+     * differently: only a method or a closure passes a hidden first argument. */
     int mptr = cur(p)->kind == T_KW_METHOD;
+    int clos = cur(p)->kind == T_KW_CLOSURE;
     advance(p);
     if (!match(p, T_LPAREN)) {
         diag_error(cur(p)->span, "expected '(' after 'fn'");
@@ -267,12 +461,58 @@ static Type *parse_fn_type(Parser *p) {
         diag_error(cur(p)->span, "expected a return type in function type");
         return NULL;
     }
+    if (clos)
+        return type_closure(&p->ty, ptypes, np, ret);
     return mptr ? type_mptr(&p->ty, ptypes, np, ret) : type_fnptr(&p->ty, ptypes, np, ret);
 }
 
+/* `Result<T,E>` is a builtin generic type: two type arguments in angle brackets.
+ * Recognized by name rather than by a keyword so that a program could still use
+ * `Result` as an ordinary identifier outside type position. */
+static int at_result_type(Parser *p, int i) {
+    return i + 1 < p->ntoks && p->toks[i].kind == T_IDENT &&
+           strcmp(p->toks[i].text, "Result") == 0 && p->toks[i + 1].kind == T_LT;
+}
+
+/* Parses `Result<T,E>` with the cursor on `Result`. Returns NULL and reports if
+ * the arguments do not name one-word types. */
+static Type *parse_result_type(Parser *p) {
+    Span start = cur(p)->span;
+    advance(p); /* Result */
+    if (!match(p, T_LT)) {
+        diag_error(start, "'Result' needs two type arguments: Result<T, E>");
+        return NULL;
+    }
+    Type *ok = parse_type(p);
+    if (ok == NULL || !match(p, T_COMMA)) {
+        diag_error(start, "'Result' needs two type arguments: Result<T, E>");
+        return NULL;
+    }
+    Type *err = parse_type(p);
+    if (err == NULL) {
+        diag_error(start, "'Result' needs two type arguments: Result<T, E>");
+        return NULL;
+    }
+    if (!match(p, T_GT)) {
+        diag_error(cur(p)->span, "expected '>' to close 'Result<...>'");
+        return NULL;
+    }
+    Type *r = type_result(&p->ty, ok, err);
+    if (r == NULL) {
+        diag_error(start,
+                   "'Result<%s, %s>' is not available: each side must be one word "
+                   "(int, bool, float, string, or a pointer)",
+                   type_name(&p->ty, ok), type_name(&p->ty, err));
+        return NULL;
+    }
+    return r;
+}
+
 static Type *parse_type(Parser *p) {
-    if (at(p, T_KW_FN) || at(p, T_KW_METHOD))
+    if (at(p, T_KW_FN) || at(p, T_KW_METHOD) || at(p, T_KW_CLOSURE))
         return parse_fn_type(p);
+    if (at_result_type(p, p->pos))
+        return parse_result_type(p);
     Type *t = base_type_or_name(p, cur(p));
     if (t == NULL)
         return NULL;
@@ -300,7 +540,8 @@ static Type *parse_type_at(Parser *p, int i) {
     /* A function type in a pre-scanned parameter list: the parameter types are
      * separated by commas at depth 0 of the inner list, so a flat scan is
      * enough -- the only thing that matters is how many there are. */
-    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD) {
+    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD ||
+        p->toks[i].kind == T_KW_CLOSURE) {
         int mptr = p->toks[i].kind == T_KW_METHOD;
         int j = i + 1;
         if (j < p->ntoks && p->toks[j].kind == T_LPAREN) {
@@ -330,10 +571,37 @@ static Type *parse_type_at(Parser *p, int i) {
                 if (r != NULL)
                     ret = r;
             }
+            if (p->toks[i].kind == T_KW_CLOSURE)
+                return type_closure(&p->ty, ptypes, np, ret);
             return mptr ? type_mptr(&p->ty, ptypes, np, ret)
                         : type_fnptr(&p->ty, ptypes, np, ret);
         }
         return NULL;
+    }
+    if (at_result_type(p, i)) {
+        /* Reuse the real parser by pointing a shallow copy of the cursor at the
+         * type arguments. parse_type walks p->toks and p->pos, so a copy of the
+         * Parser with only the position moved parses the same thing without
+         * disturbing the caller's cursor. */
+        Parser sub = *p;
+        sub.pos = i;
+        Type *r = parse_result_type(&sub);
+        if (r == NULL)
+            return NULL;
+        i = sub.pos;
+        for (;;) {
+            if (i < p->ntoks && p->toks[i].kind == T_STAR) {
+                i++;
+                r = type_ptr(&p->ty, r);
+            } else if (i + 1 < p->ntoks && p->toks[i].kind == T_LBRACKET &&
+                       p->toks[i + 1].kind == T_RBRACKET) {
+                i += 2;
+                r = type_array(&p->ty, r, -1);
+            } else {
+                break;
+            }
+        }
+        return r;
     }
     Type *t = base_type_or_name(p, &p->toks[i]);
     if (t == NULL)
@@ -361,9 +629,20 @@ static void scope_push(Parser *p) {
     p->scope = s;
 }
 
+/* Leaves a scope, reporting any variable declared in it that was never
+ * referenced. Runs whether or not the block turned out to be well-formed, so a
+ * program that fails to compile still gets its warnings. */
 static void scope_pop(Parser *p) {
-    if (p->scope != NULL)
-        p->scope = p->scope->parent;
+    Scope *s = p->scope;
+    if (s == NULL)
+        return;
+    if (warn_enabled(W_UNUSED_LOCAL)) {
+        for (Var *v = s->vars; v != NULL; v = v->next) {
+            if (!v->used && !v->is_synth)
+                diag_warn(W_UNUSED_LOCAL, v->decl_span, "'%s' is declared but never used", v->name);
+        }
+    }
+    p->scope = s->parent;
 }
 
 static Var *lookup_var_local(Parser *p, const char *name) {
@@ -374,12 +653,32 @@ static Var *lookup_var_local(Parser *p, const char *name) {
     return NULL;
 }
 
+/* Marks a just-declared binding as compiler-generated, so -Wunused-local does
+ * not report the desugarer's own temporaries or a hidden result buffer. */
+static void mark_synth(Parser *p, const char *name) {
+    Var *v = lookup_var_local(p, name);
+    if (v != NULL)
+        v->is_synth = 1;
+}
+
 static Var *lookup_var(Parser *p, const char *name) {
     for (Scope *s = p->scope; s != NULL; s = s->parent) {
         for (Var *v = s->vars; v != NULL; v = v->next) {
-            if (strcmp(v->name, name) == 0)
+            if (strcmp(v->name, name) == 0) {
+                /* Resolving the name is a use. lookup_var_local deliberately
+                 * does not do this, since it also serves the redeclaration
+                 * check, where merely testing for a name is not a use. */
+                v->used = 1;
                 return v;
+            }
         }
+        /* A function body is a frame of its own, so its outermost scope is where
+         * name lookup stops. Continuing past it would let a function read a
+         * variable declared beside it: `var g = 5; int f() { return g; }` used
+         * to compile, and returned 0, because slot numbers are assigned per
+         * function and f read whatever f's own frame happened to hold. */
+        if (s->is_fn_body)
+            break;
     }
     return NULL;
 }
@@ -390,13 +689,31 @@ static int align_up(int n, int a) {
     return (n + a - 1) / a * a;
 }
 
+/* The symbol a call to `name` should reach. A function declared inside another
+ * one was emitted under a mangled name, and its signature is filed under that
+ * same mangled name, so both the lookup and the emitted call have to go through
+ * here. Anything not declared locally keeps the name the program wrote. */
+static const char *resolve_fn_sym(Parser *p, const char *name) {
+    for (LocalFn *f = p->local_fns; f != NULL; f = f->next)
+        if (strcmp(f->name, name) == 0)
+            return f->sym;
+    return name;
+}
+
 static int declare_var(Parser *p, const char *name, Type *type) {
     /* Shadowing an outer variable in a nested block is legal (as in C#); only
      * redeclaring within the same scope is an error. */
-    if (lookup_var_local(p, name) != NULL) {
+    Var *existing = lookup_var_local(p, name);
+    if (existing != NULL) {
         diag_error(cur(p)->span, "variable '%s' is already declared in this scope", name);
         return -1;
     }
+    /* Shadowing an outer variable in a nested block is legal; it is also almost
+     * always a mistake, because the inner value is what the rest of the block
+     * sees and the outer one silently stops evolving. */
+    if (warn_enabled(W_SHADOWED_LOCAL) && lookup_var(p, name) != NULL)
+        diag_warn(W_SHADOWED_LOCAL, cur(p)->span,
+                  "'%s' shadows a declaration in an enclosing scope", name);
     /* Locals live inline in the frame, growing *upward* from their base but
      * placed *below* rbp-8 so a multi-byte value never overwrites the saved
      * frame pointer / return address. A value of `size` bytes is anchored so
@@ -414,9 +731,38 @@ static int declare_var(Parser *p, const char *name, Type *type) {
     v->name = arena_strdup(p->arena, name);
     v->type = type;
     v->offset = base;
+    /* Stamped so a reference from inside a lambda can tell, by ownership alone,
+     * whether this is one of its own locals or something it captured. Without
+     * the stamp every variable looks captured -- the lambda's own parameters
+     * included, which is how the first version ended up building an environment
+     * out of the parameters it had just been given. */
+    v->owner = p->cur_owner;
+    v->captured = 0;
+    v->is_param = 0;
+    v->is_synth = 0;
+    v->decl_span = cur(p)->span;
+    v->used = 0;
     v->next = p->scope->vars;
     p->scope->vars = v;
     return base;
+}
+
+/* Consumes a `{ .. }` block without parsing it, so a construct that has already
+ * been reported as malformed does not cascade into an error for every name
+ * inside its body. Used on the error path only. */
+static void skip_braced_block(Parser *p) {
+    if (!at(p, T_LBRACE))
+        return;
+    int depth = 0;
+    do {
+        if (at(p, T_LBRACE))
+            depth++;
+        else if (at(p, T_RBRACE))
+            depth--;
+        else if (at(p, T_EOF))
+            return;
+        advance(p);
+    } while (depth > 0);
 }
 
 /* ---- function signature table (pre-scan) ---- */
@@ -489,7 +835,8 @@ static int skip_fn_type(Parser *p, int i) {
         i++;
     /* The return type may itself be a function type. */
     if (i < p->ntoks &&
-        (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD))
+        (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD ||
+         p->toks[i].kind == T_KW_CLOSURE))
         return skip_fn_type(p, i);
     return skip_type_tokens(p, i);
 }
@@ -497,11 +844,39 @@ static int skip_fn_type(Parser *p, int i) {
 static int skip_type_tokens(Parser *p, int i) {
     if (i >= p->ntoks)
         return i;
-    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD)
+    if (p->toks[i].kind == T_KW_FN || p->toks[i].kind == T_KW_METHOD ||
+        p->toks[i].kind == T_KW_CLOSURE)
         return skip_fn_type(p, i);
     if (!is_type_token(p->toks[i].kind) && p->toks[i].kind != T_IDENT)
         return i;
-    i++;
+    if (at_result_type(p, i)) {
+        /* `Result<T,E>` carries its own type arguments, so step over the whole
+         * thing. Skipping only the name would leave the `<` behind, and every
+         * caller here is deciding where a type ends. The angle brackets nest, and
+         * the lexer makes `>>` a single token, so `Result<Result<int,string>,int>`
+         * needs the `>>` to count as two closers. */
+        int depth = 0;
+        for (; i < p->ntoks; i++) {
+            TokenKind k = p->toks[i].kind;
+            if (k == T_LT) {
+                depth++;
+            } else if (k == T_GT) {
+                if (--depth == 0) {
+                    i++;
+                    break;
+                }
+            } else if (k == T_SHR) {
+                depth -= 2;
+                i++;
+                if (depth <= 0)
+                    break;
+            } else if (k == T_EOF) {
+                break;
+            }
+        }
+    } else {
+        i++;
+    }
     for (;;) {
         if (i < p->ntoks && p->toks[i].kind == T_STAR) {
             i++;
@@ -553,6 +928,25 @@ static int at_func_decl(Parser *p) {
     return j < p->ntoks && p->toks[j].kind == T_LPAREN;
 }
 
+/* An explicitly typed local declaration at the start of a statement:
+ * `Type name`, where the type may be a keyword, a struct/union/enum name, a type
+ * parameter or a function type, followed by any number of `*` and `[]`.
+ *
+ * This is the same shape at_func_decl recognizes, and the difference is the token
+ * after the name: `(` makes it a nested function, anything else a declaration.
+ * Requiring the name to be an identifier is what keeps an ordinary expression
+ * statement out -- `foo();` and `foo.bar();` have `(` or `.` there, never a
+ * second identifier. */
+static int at_typed_decl(Parser *p) {
+    int j = p->pos;
+    if (j >= p->ntoks)
+        return 0;
+    if (!is_type_token(p->toks[j].kind) && p->toks[j].kind != T_IDENT)
+        return 0;
+    j = skip_type_tokens(p, j);
+    return j < p->ntoks && p->toks[j].kind == T_IDENT;
+}
+
 /* Registers every top-level `struct Name` so the signature pre-scan can
  * resolve struct-typed parameters (declarations are parsed later). */
 static void prescan_struct_names(Parser *p) {
@@ -571,8 +965,391 @@ static void prescan_struct_names(Parser *p) {
     }
 }
 
-/* Scans top-level tokens for function signatures so calls resolve regardless
- * of declaration order. */
+/* Registers the *signature* of a method without its body, for the pre-scan.
+ *
+ * Field layout alone was not enough to let a type be used before it is declared:
+ * `Sq` has to be seen to have the methods an interface requires, and a struct
+ * declared below the function that converts it had none registered yet. The body
+ * is left to the real parser, which finds this entry by name and fills it in
+ * rather than adding a second one -- so the method is emitted once.
+ *
+ * Returns the index just past the signature, or `i` unchanged if this is not a
+ * method. Recognised shapes: `[virtual|override] type name ( params )`, and a
+ * property `type name {`, which is a zero-argument method of the field's type. */
+static int scan_method_signature(Parser *p, int i, StructDef *sd) {
+    int j = i;
+    int is_virtual = 0, is_override = 0;
+    if (j < p->ntoks && p->toks[j].kind == T_KW_VIRTUAL) {
+        is_virtual = 1;
+        j++;
+    } else if (j < p->ntoks && p->toks[j].kind == T_KW_OVERRIDE) {
+        is_virtual = 1;
+        is_override = 1;
+        j++;
+    }
+    int tstart = j;
+    if (j >= p->ntoks)
+        return i;
+    if (!is_type_token(p->toks[j].kind) && p->toks[j].kind != T_IDENT)
+        return i;
+    /* A constructor is named after the class: `C(params)`. It has no return
+     * type, so the name is where the type would be. */
+    int is_ctor = 0;
+    if (j < p->ntoks && p->toks[j].kind == T_IDENT &&
+        strcmp(p->toks[j].text, sd->name) == 0 && j + 1 < p->ntoks &&
+        p->toks[j + 1].kind == T_LPAREN) {
+        is_ctor = 1;
+    } else {
+        j = skip_type_tokens(p, j);
+        if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+            return i;
+    }
+    char *mname = p->toks[j].text;
+    j++;
+    if (j >= p->ntoks)
+        return i;
+
+    /* A property: `type Name { ... }` reads as a zero-argument method. */
+    if (!is_ctor && j < p->ntoks && p->toks[j].kind == T_LBRACE) {
+        if (struct_find_method(sd, mname) != NULL)
+            return i;
+        Parser sub = *p;
+        sub.pos = tstart;
+        Type *rt = parse_type(&sub);
+        if (rt == NULL)
+            return i;
+        StructMethod *m = arena_alloc(p->arena, sizeof *m);
+        m->name = arena_strdup(p->arena, mname);
+        m->ret = rt;
+        m->ptypes = NULL;
+        m->nparams = 0;
+        m->body = NULL; /* the real parser fills this in */
+        m->is_virtual = 0;
+        m->is_override = 0;
+        m->vtable_index = -1;
+        struct_add_method(&p->ty, sd, m);
+        return j; /* the '{' and everything in it is the real parser's */
+    }
+
+    if (p->toks[j].kind != T_LPAREN)
+        return i;
+    /* Scan the parameter list for its shape only; the types come from the real
+     * parse, and a signature here is enough to satisfy an interface. */
+    int depth = 1;
+    int nparams = 0;
+    int expect_type = 1;
+    for (j++; j < p->ntoks && depth > 0; j++) {
+        TokenKind k = p->toks[j].kind;
+        if (k == T_LPAREN) {
+            depth++;
+        } else if (k == T_RPAREN) {
+            depth--;
+        } else if (k == T_COMMA && depth == 1) {
+            expect_type = 1;
+        } else if (depth == 1 && expect_type &&
+                   (is_type_token(k) || k == T_IDENT)) {
+            expect_type = 0;
+            nparams++;
+        }
+    }
+    if (depth != 0)
+        return i;
+    if (is_ctor || struct_find_method(sd, mname) != NULL)
+        return i; /* a constructor is not part of an interface's surface */
+    Parser sub = *p;
+    sub.pos = tstart;
+    Type *rt = parse_type(&sub);
+    if (rt == NULL)
+        return i;
+    Type **ptypes = arena_alloc_array(p->arena, (size_t)(nparams > 0 ? nparams : 1),
+                                      sizeof(Type *));
+    int np = 0;
+    for (int k = tstart; k < j && np < nparams; k++) {
+        if (!is_type_token(p->toks[k].kind) && p->toks[k].kind != T_IDENT)
+            continue;
+        int e = skip_type_tokens(p, k);
+        if (e >= p->ntoks || p->toks[e].kind != T_IDENT)
+            continue;
+        Parser s2 = *p;
+        s2.pos = k;
+        Type *pt = parse_type(&s2);
+        if (pt != NULL)
+            ptypes[np++] = pt;
+        k = e;
+    }
+    StructMethod *m = arena_alloc(p->arena, sizeof *m);
+    m->name = arena_strdup(p->arena, mname);
+    m->ret = rt;
+    m->ptypes = ptypes;
+    m->nparams = np;
+    m->body = NULL; /* the real parser fills this in */
+    m->is_virtual = is_virtual;
+    m->is_override = is_override;
+    m->vtable_index = -1;
+    struct_add_method(&p->ty, sd, m);
+    return j;
+}
+
+/* Index just past one plain field, `type name ;`, or `i` unchanged if this is
+ * not one. A plain field is exactly that shape, which is what lets the pre-scan
+ * stop at the first method and leave it to the real parser -- registering a
+ * method twice would emit it twice. */
+static int scan_plain_field(Parser *p, int i, StructDef *sd) {
+    if (i >= p->ntoks)
+        return i;
+    if (!is_type_token(p->toks[i].kind) && p->toks[i].kind != T_IDENT)
+        return i;
+    int j = skip_type_tokens(p, i);
+    if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+        return i;
+    char *name = p->toks[j].text;
+    j++;
+    if (j >= p->ntoks || p->toks[j].kind != T_SEMI)
+        return i;
+    j++;
+    /* Resolve the type with the cursor on it, without moving the caller's. */
+    Parser sub = *p;
+    sub.pos = i;
+    Type *ft = parse_type(&sub);
+    if (ft == NULL)
+        return i;
+    struct_add_field(&p->ty, sd, name, ft);
+    return j;
+}
+
+/* Gives every struct, class and enum its layout before anything is parsed.
+ *
+ * The name pre-scan above exists so a signature can name a struct declared later
+ * in the file. A name alone is not enough: `p.x` needs the field and
+ * `new Pt(3, 4)` needs the size, and both were filled in by parse_struct_decl,
+ * which runs in source order. A struct declared after its use was therefore
+ * registered as a name and nothing more, and using it read a struct with no
+ * fields at all.
+ *
+ * Only plain fields are read here, and only as far as they run. A method, a
+ * property or a constructor needs the real parser, so the scan stops at the
+ * first of those; the declaration is completed as before when the parser reaches
+ * it, after discarding what this pass filled in so the fields are not added
+ * twice. The result is that a type may be used before it is declared. */
+static void prescan_struct_fields(Parser *p) {
+    for (int i = 0; i < p->ntoks; i++) {
+        int is_class = p->toks[i].kind == T_KW_CLASS;
+        if (!is_class && p->toks[i].kind != T_KW_STRUCT)
+            continue;
+        int j = i + 1;
+        if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+            continue;
+        char *name = p->toks[j].text;
+        j++;
+        StructDef *sd = type_define_struct(&p->ty, name);
+        if (sd == NULL)
+            continue;
+        sd->is_class = is_class;
+        int base_size = 0;
+        if (is_class) {
+            sd->align = 8;
+            sd->size = 8; /* vptr */
+            base_size = 8;
+            if (j < p->ntoks && p->toks[j].kind == T_COLON) {
+                j++;
+                if (j < p->ntoks && p->toks[j].kind == T_IDENT) {
+                    Type *bt = type_find_struct(&p->ty, p->toks[j].text);
+                    if (bt != NULL && bt->sdef->is_class) {
+                        sd->base = bt->sdef;
+                        base_size = bt->sdef->size;
+                        sd->size = base_size;
+                    }
+                    j++;
+                }
+            }
+        }
+        if (j >= p->ntoks || p->toks[j].kind != T_LBRACE)
+            continue;
+        j++;
+        int base_off = base_size;
+        while (j < p->ntoks) {
+            if (p->toks[j].kind == T_RBRACE)
+                break;
+            int next = scan_plain_field(p, j, sd);
+            if (next != j) {
+                j = next;
+                continue;
+            }
+            next = scan_method_signature(p, j, sd);
+            if (next != j) {
+                j = next;
+                /* Step over the body. A method's is not this pass's to read, but
+                 * stopping in front of it would mean every member after the first
+                 * method went unregistered -- so a struct with two methods looked
+                 * like it had one. */
+                if (j < p->ntoks && p->toks[j].kind == T_LBRACE) {
+                    int d = 0;
+                    while (j < p->ntoks) {
+                        if (p->toks[j].kind == T_LBRACE) {
+                            d++;
+                        } else if (p->toks[j].kind == T_RBRACE) {
+                            d--;
+                            if (d == 0) {
+                                j++;
+                                break;
+                            }
+                        }
+                        j++;
+                    }
+                } else if (j < p->ntoks && p->toks[j].kind == T_FATARROW) {
+                    /* An expression-bodied member: skip to its semicolon. */
+                    while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
+                        j++;
+                    if (j < p->ntoks)
+                        j++;
+                }
+                continue;
+            }
+            break;
+        }
+        (void)base_off;
+        if (sd->align < 1)
+            sd->align = 1;
+        sd->size = (sd->size + sd->align - 1) / sd->align * sd->align;
+        sd->complete = 1;
+        sd->prescanned = 1;
+        i = j - 1;
+    }
+
+    /* Interfaces: the same problem again. A signature that names an interface is
+     * prescanned before any interface declaration is parsed, so without this the
+     * name did not resolve yet and a function returning one came back typed
+     * `int`. The methods are read here too, because a call site resolves a method
+     * name to an itab index, and that has to work whatever order the declarations
+     * are in. An interface is only signatures, so there is no body to skip. */
+    for (int i = 0; i < p->ntoks; i++) {
+        if (p->toks[i].kind != T_KW_INTERFACE)
+            continue;
+        int j = i + 1;
+        if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+            continue;
+        char *name = p->toks[j].text;
+        j++;
+        IfaceDef *id = type_define_iface(&p->ty, name);
+        if (id == NULL || id->prescanned)
+            continue;
+        if (j >= p->ntoks || p->toks[j].kind != T_LBRACE)
+            continue;
+        j++;
+        while (j < p->ntoks && p->toks[j].kind != T_RBRACE && p->toks[j].kind != T_EOF) {
+            int tstart = j;
+            if (!is_type_token(p->toks[j].kind) && p->toks[j].kind != T_IDENT)
+                break;
+            j = skip_type_tokens(p, j);
+            if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+                break;
+            char *mname = p->toks[j].text;
+            j++;
+            if (j >= p->ntoks || p->toks[j].kind != T_LPAREN)
+                break;
+            int depth = 1;
+            for (j++; j < p->ntoks && depth > 0; j++) {
+                if (p->toks[j].kind == T_LPAREN)
+                    depth++;
+                else if (p->toks[j].kind == T_RPAREN)
+                    depth--;
+            }
+            if (depth != 0)
+                break;
+            Parser sub = *p;
+            sub.pos = tstart;
+            Type *rt = parse_type(&sub);
+            if (rt == NULL)
+                break;
+            /* Re-read the parameter list for its types. */
+            Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+            int np = 0;
+            for (int k = tstart + 1; k < j - 1 && np < Z_MAX_ARGS; k++) {
+                if (!is_type_token(p->toks[k].kind) && p->toks[k].kind != T_IDENT)
+                    continue;
+                int e = skip_type_tokens(p, k);
+                if (e >= p->ntoks || p->toks[e].kind != T_IDENT)
+                    continue;
+                Parser s2 = *p;
+                s2.pos = k;
+                Type *pt = parse_type(&s2);
+                if (pt != NULL)
+                    ptypes[np++] = pt;
+                k = e;
+            }
+            if (iface_find_method(id, mname) == NULL)
+                iface_add_method(&p->ty, id, mname, type_fnptr(&p->ty, ptypes, np, rt));
+            if (j < p->ntoks && p->toks[j].kind == T_SEMI)
+                j++;
+            else
+                break;
+        }
+        id->prescanned = 1;
+        i = j - 1;
+    }
+
+    /* Enums: the same problem, with variants instead of fields. A `match` on an
+     * enum declared later needs its variant list to check exhaustiveness and to
+     * bind payloads. */
+    for (int i = 0; i < p->ntoks; i++) {
+        if (p->toks[i].kind != T_KW_ENUM)
+            continue;
+        int j = i + 1;
+        if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+            continue;
+        char *name = p->toks[j].text;
+        j++;
+        UnionDef *ud = type_define_union(&p->ty, name);
+        if (ud == NULL)
+            continue;
+        if (j >= p->ntoks || p->toks[j].kind != T_LBRACE)
+            continue;
+        j++;
+        while (j < p->ntoks && p->toks[j].kind != T_RBRACE && p->toks[j].kind != T_EOF) {
+            if (p->toks[j].kind != T_IDENT)
+                break;
+            char *vname = p->toks[j].text;
+            j++;
+            Type *ftypes[16];
+            const char *fnames[16];
+            int nf = 0;
+            if (j < p->ntoks && p->toks[j].kind == T_LPAREN) {
+                j++;
+                while (j < p->ntoks && p->toks[j].kind != T_RPAREN && p->toks[j].kind != T_EOF) {
+                    if (!is_type_token(p->toks[j].kind) && p->toks[j].kind != T_IDENT)
+                        break;
+                    int k = skip_type_tokens(p, j);
+                    if (k >= p->ntoks || p->toks[k].kind != T_IDENT)
+                        break;
+                    Parser sub = *p;
+                    sub.pos = j;
+                    Type *ft = parse_type(&sub);
+                    if (nf < 16) {
+                        ftypes[nf] = ft;
+                        fnames[nf] = p->toks[k].text;
+                    }
+                    nf++;
+                    j = k + 1;
+                    if (j < p->ntoks && p->toks[j].kind == T_COMMA)
+                        j++;
+                }
+                if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
+                    j++;
+            }
+            union_add_variant(&p->ty, ud, vname, ftypes, fnames, nf);
+            if (j < p->ntoks && p->toks[j].kind == T_COMMA) {
+                j++;
+                continue;
+            }
+            break;
+        }
+        union_finish(ud);
+        ud->prescanned = 1;
+        i = j - 1;
+    }
+}
+
+
 static void prescan_signatures(Parser *p) {
     int depth = 0;
     int i = 0;
@@ -649,6 +1426,35 @@ static void prescan_signatures(Parser *p) {
                     continue;
                 }
             }
+        }
+        /* A lambda's parameter list is shaped exactly like a function
+         * declaration's -- a type, a name, and a '(' -- so the scan below would
+         * read `(int x) => ...` as the declaration of a function called `x` and
+         * register a nonsense signature under a name the program never declared.
+         *
+         * Skipping the body is enough to tell them apart: a lambda can only
+         * appear where an expression can, and the `=>` is unambiguous. The skip
+         * runs to the statement's semicolon, tracking brace depth so a
+         * block-bodied lambda's own semicolons are not mistaken for the end. */
+        if (depth == 0 && t->kind == T_FATARROW) {
+            int braces = 0;
+            while (i < p->ntoks) {
+                TokenKind k = p->toks[i].kind;
+                if (k == T_LBRACE) {
+                    braces++;
+                } else if (k == T_RBRACE) {
+                    if (braces == 0)
+                        break; /* the end of the enclosing block */
+                    braces--;
+                } else if (k == T_SEMI && braces == 0) {
+                    i++;
+                    break;
+                } else if (k == T_EOF) {
+                    break;
+                }
+                i++;
+            }
+            continue;
         }
         if (depth == 0 && (is_type_token(t->kind) || t->kind == T_IDENT)) {
             int j = skip_type_tokens(p, i);
@@ -767,6 +1573,123 @@ static int intrinsic_arity(const char *name) {
     Z_INTRINSIC_LIST(Z_ARITY)
 #undef Z_ARITY
     return 0;
+}
+
+/* Materialises a concrete value as an interface value, when that is what the
+ * destination type calls for. Returns `e` unchanged when no conversion is due,
+ * so every site that assigns one expression to a place of a known type can call
+ * this without testing first.
+ *
+ * Which types satisfy an interface is decided here rather than declared, so a
+ * struct implements one by having the methods and nothing else. A class goes in
+ * its object pointer; a struct value has to be copied to the heap first, because
+ * the cell outlives whatever frame the value was in -- the same reason a closure
+ * environment is on the heap. */
+static Expr *to_iface(Parser *p, Expr *e, Type *want, Span span) {
+    if (e == NULL || want == NULL || !is_kind(want, TK_IFACE) || is_unk(e->type))
+        return e;
+    if (is_kind(e->type, TK_IFACE))
+        return e; /* interface to the same interface: the cell is already there */
+    IfaceDef *id = want->idef;
+    if (id == NULL)
+        return e;
+    int *slots = arena_alloc_array(p->arena, (size_t)(id->nmethods > 0 ? id->nmethods : 1),
+                                   sizeof(int));
+    if (!iface_implemented_by(&p->ty, id, e->type, slots)) {
+        /* Name the first method that is actually at fault, and say which kind of
+         * fault it is: "does not implement I" on its own leaves the reader to work
+         * out whether a method is absent or merely has the wrong shape, and
+         * reporting a method that is present and correct is worse than useless. */
+        const char *absent = NULL;
+        const char *mismatched = NULL;
+        StructDef *sd = is_kind(e->type, TK_STRUCT)  ? e->type->sdef
+                        : is_kind(e->type, TK_PTR) && is_kind(e->type->base, TK_STRUCT)
+                            ? e->type->base->sdef
+                            : NULL;
+        if (sd != NULL) {
+            for (int i = 0; i < id->nmethods; i++) {
+                StructMethod *m = struct_find_method(sd, id->methods[i].name);
+                if (m == NULL) {
+                    if (absent == NULL)
+                        absent = id->methods[i].name;
+                } else if (mismatched == NULL && !iface_method_matches(m, id->methods[i].sig)) {
+                    mismatched = id->methods[i].name;
+                }
+            }
+        }
+        if (sd == NULL)
+            diag_error(span, "'%s' cannot implement '%s': it is not a struct or class",
+                       type_name(&p->ty, e->type), id->name);
+        else if (absent != NULL)
+            diag_error(span, "'%s' does not implement '%s': it has no method '%s'",
+                       type_name(&p->ty, e->type), id->name, absent);
+        else if (mismatched != NULL)
+            diag_error(span, "'%s' does not implement '%s': '%s' does not match the "
+                             "signature the interface requires",
+                       type_name(&p->ty, e->type), id->name, mismatched);
+        else
+            diag_error(span, "'%s' does not implement '%s'", type_name(&p->ty, e->type),
+                       id->name);
+        e->type = NULL;
+        return e;
+    }
+    StructDef *impl = is_kind(e->type, TK_STRUCT) ? e->type->sdef : e->type->base->sdef;
+    /* A class satisfies an interface through its vtable, so every method it
+     * offers has to be virtual: a non-virtual one has no slot to dispatch
+     * through, and an itab entry pointing at it directly would bind the
+     * implementation the conversion site happened to name. */
+    if (impl->is_class) {
+        for (int i = 0; i < id->nmethods; i++) {
+            StructMethod *m = struct_find_method(impl, id->methods[i].name);
+            if (m == NULL || (!m->is_virtual && !m->is_override)) {
+                diag_error(span,
+                           "'%s' cannot implement '%s' through a class: '%s' must be "
+                           "declared 'virtual' to be dispatched dynamically",
+                           type_name(&p->ty, e->type), id->name, id->methods[i].name);
+                e->type = NULL;
+                return e;
+            }
+        }
+    }
+    Expr *c = new_expr(p, E_IFACE, span);
+    c->lhs = e;
+    c->type = want;
+    c->impl = impl;
+    c->idef = id;
+    return c;
+}
+
+/* Looks a standard-library name up in Z_BUILTIN_LIST, returning the runtime
+ * symbol to call and, through the out parameters, its return type code and its
+ * parameter type codes. Returns NULL when the name is not a built-in. */
+static const char *builtin_lookup(const char *name, char *ret_code, const char **params) {
+#define Z_FIND(n, sym, ret, ps)                                                              \
+    if (strcmp(name, n) == 0) {                                                              \
+        *ret_code = ret;                                                                     \
+        *params = ps;                                                                        \
+        return sym;                                                                          \
+    }
+    Z_BUILTIN_LIST(Z_FIND)
+#undef Z_FIND
+    return NULL;
+}
+
+/* The type a signature code stands for. */
+static Type *builtin_type(Parser *p, char code) {
+    switch (code) {
+    case 'i':
+        return type_int(&p->ty);
+    case 'b':
+        return type_bool(&p->ty);
+    case 's':
+        return type_string(&p->ty);
+    case 'S':
+        /* The array length is -1 for every Z-written array type; the real
+         * length lives in the header the runtime allocated. */
+        return type_array(&p->ty, type_string(&p->ty), -1);
+    default:
+        return type_void(&p->ty);
+    }
 }
 
 static int is_cmp_op(TokenKind k) {
@@ -893,6 +1816,19 @@ static Expr *fold_bool_logic(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span
     return e;
 }
 
+/* Wraps `e` in a conversion to `to`, unless it is already that type or its type
+ * is not yet known. Both the implicit int-to-float widening and an explicit
+ * `(float)` / `(int)` cast go through here, so the code generator only ever sees
+ * one conversion node and never has to ask where a conversion came from. */
+static Expr *make_cvt(Parser *p, Type *to, Expr *e, Span span) {
+    if (e == NULL || to == NULL || is_unk(e->type) || type_equals(e->type, to))
+        return e;
+    Expr *c = new_expr(p, E_CVT, span);
+    c->lhs = e;
+    c->type = to;
+    return c;
+}
+
 static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span span) {
     Expr *e = new_expr(p, E_BINARY, span);
     e->op = op;
@@ -961,9 +1897,9 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
     /* String concatenation: string+string, string+int, int+string. */
     if (op == T_PLUS && (is_kind(lhs->type, TK_STRING) || is_kind(rhs->type, TK_STRING))) {
         int lok = is_kind(lhs->type, TK_STRING) || is_kind(lhs->type, TK_INT) ||
-                  is_kind(lhs->type, TK_BOOL);
+                  is_kind(lhs->type, TK_BOOL) || is_kind(lhs->type, TK_F64);
         int rok = is_kind(rhs->type, TK_STRING) || is_kind(rhs->type, TK_INT) ||
-                  is_kind(rhs->type, TK_BOOL);
+                  is_kind(rhs->type, TK_BOOL) || is_kind(rhs->type, TK_F64);
         if (lok && rok) {
             e->type = type_string(&p->ty);
             return e;
@@ -1012,6 +1948,21 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
         }
         int lok = is_kind(lhs->type, TK_INT) || is_kind(lhs->type, TK_BOOL) || lparam;
         int rok = is_kind(rhs->type, TK_INT) || is_kind(rhs->type, TK_BOOL) || rparam;
+        /* Two floats compare in all six relational operators, and a float may be
+         * compared with an int by widening the int -- so `x == 0` does not
+         * quietly mean "the integer zero" for a float x. */
+        if (is_kind(lhs->type, TK_F64) || is_kind(rhs->type, TK_F64)) {
+            if (!lparam && !rparam) {
+                if (!is_kind(lhs->type, TK_F64))
+                    lhs = make_cvt(p, type_f64(&p->ty), lhs, span);
+                if (!is_kind(rhs->type, TK_F64))
+                    rhs = make_cvt(p, type_f64(&p->ty), rhs, span);
+                e->lhs = lhs;
+                e->rhs = rhs;
+                e->type = type_bool(&p->ty);
+                return e;
+            }
+        }
         /* Strings compare lexicographically in all six relational operators. */
         int lstr = is_kind(lhs->type, TK_STRING);
         int rstr = is_kind(rhs->type, TK_STRING);
@@ -1025,6 +1976,35 @@ static Expr *make_binary(Parser *p, TokenKind op, Expr *lhs, Expr *rhs, Span spa
         }
         e->type = type_bool(&p->ty);
         return e;
+    }
+
+    /* Arithmetic. A `float` operand makes the whole expression a `float`, and an
+     * `int` operand is widened to match -- the one conversion Z performs on its
+     * own, made explicit here as a node so the code generator has exactly one
+     * shape to lower.
+     *
+     * `%` is the exception: a non-integer has no remainder, so it stays
+     * integer-only rather than quietly truncating. */
+    {
+        int lf = is_kind(lhs->type, TK_F64), rf = is_kind(rhs->type, TK_F64);
+        if ((lf || rf) && !lparam && !rparam) {
+            int allowed = op == T_PLUS || op == T_MINUS || op == T_STAR || op == T_SLASH;
+            if (!allowed) {
+                diag_error(span, "operator %s is not defined for '%s' and '%s'",
+                           token_kind_name(op), type_name(&p->ty, lhs->type),
+                           type_name(&p->ty, rhs->type));
+                e->type = NULL;
+                return e;
+            }
+            if (!lf)
+                lhs = make_cvt(p, type_f64(&p->ty), lhs, span);
+            if (!rf)
+                rhs = make_cvt(p, type_f64(&p->ty), rhs, span);
+            e->lhs = lhs;
+            e->rhs = rhs;
+            e->type = type_f64(&p->ty);
+            return e;
+        }
     }
 
     if ((!is_kind(lhs->type, TK_INT) && !lparam) || (!is_kind(rhs->type, TK_INT) && !rparam)) {
@@ -1076,11 +2056,21 @@ static void add_generic(Parser *p, Generic g) {
 
 static void add_pending(Parser *p, Stmt *fn) {
     if (p->npending == p->pending_cap) {
-        p->pending_cap = p->pending_cap ? p->pending_cap * 2 : 8;
-        p->pending = arena_alloc_array(p->arena, (size_t)p->pending_cap, sizeof(Stmt *));
+        int ncap = p->pending_cap ? p->pending_cap * 2 : 8;
+        Stmt **bigger = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Stmt *));
+        /* Copy what is already queued. Growing into a fresh block and leaving
+         * the old contents behind loses every entry added so far, so the ninth
+         * queued function replaced the first eight with garbage -- which is why
+         * a program with eight closures worked and one with nine crashed the
+         * compiler rather than failing in a way that pointed here. */
+        if (p->npending > 0)
+            memcpy(bigger, p->pending, (size_t)p->npending * sizeof(Stmt *));
+        p->pending = bigger;
+        p->pending_cap = ncap;
     }
     p->pending[p->npending++] = fn;
 }
+
 
 /* Builds a mangled instance name like `max__int` or `foo__int_bool`. */
 static char *mangle_instance(Parser *p, const char *name, Type **types, int n) {
@@ -1165,7 +2155,7 @@ static char *instantiate(Parser *p, Generic *g, Type **concrete, Span span) {
 
     p->pos = g->tok_start;
     p->in_instantiate = 1;
-    Stmt *inst = parse_func(p);
+    Stmt *inst = parse_func(p, 0);
     p->in_instantiate = 0;
     inst->fname = mangled;
     inst->is_generic_template = 0;
@@ -1263,6 +2253,12 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
 
     int cap = 4, n = 0;
     Expr **args = arena_alloc_array(p->arena, (size_t)cap, sizeof(Expr *));
+    /* When the callee's signature is already known, a parameter's type can tell
+     * an `Ok(...)`/`Err(...)` in argument position what to build. Resolved before
+     * the arguments because the arguments are parsed first; a callee that is not
+     * yet known (a generic, a builtin) simply gives no expectation, and `Ok` says
+     * so rather than guessing. */
+    Sig *pre = find_sig(p, name);
     if (!at(p, T_RPAREN)) {
         for (;;) {
             if (n == cap) {
@@ -1272,7 +2268,12 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
                 args = na;
                 cap = ncap;
             }
+            Type *saved_expect = p->expect_result;
+            p->expect_result = pre != NULL && n < pre->nparams && type_is_result(pre->ptypes[n])
+                                    ? pre->ptypes[n]
+                                    : NULL;
             args[n++] = parse_expr(p);
+            p->expect_result = saved_expect;
             if (!match(p, T_COMMA))
                 break;
         }
@@ -1291,8 +2292,9 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
             return e;
         }
         Type *at0 = args[0]->type;
-        if (!is_kind(at0, TK_INT) && !is_kind(at0, TK_BOOL) && !is_kind(at0, TK_STRING)) {
-            diag_error(span, "print expects 'int', 'bool' or 'string' but got %s",
+        if (!is_kind(at0, TK_INT) && !is_kind(at0, TK_BOOL) && !is_kind(at0, TK_STRING) &&
+            !is_kind(at0, TK_F64)) {
+            diag_error(span, "print expects 'int', 'bool', 'float' or 'string' but got %s",
                        type_name(&p->ty, at0));
         }
         e->type = type_void(&p->ty);
@@ -1322,6 +2324,84 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
             in->nargs = n;
             in->type = type_int(&p->ty);
             return in;
+        }
+    }
+
+    /* `Ok(v)` and `Err(e)`: the two ways to build a `Result`.
+     *
+     * Which one is meant, and with which types, has to come from where the value
+     * is going -- the declared type of the variable, the enclosing function's
+     * return type, or a parameter's type. There is no way to spell it inline:
+     * `Ok(3)` alone does not say what the error type is, and guessing one would
+     * make `Result<int,string>` and `Result<int,io>` silently different types
+     * that then fail to unify. The expectation is recorded in p->expect_result
+     * by the three places that know it.
+     *
+     * Resolved before the user-function lookup only in the sense that this is
+     * tried first; a program that declares its own `Ok` still gets its own. */
+    if ((strcmp(name, "Ok") == 0 || strcmp(name, "Err") == 0) && find_sig(p, name) == NULL &&
+        find_generic(p, name) == NULL) {
+        int is_ok = name[0] == 'O';
+        if (n != 1) {
+            diag_error(span, "'%s' expects 1 argument but got %d", name, n);
+            e->type = NULL;
+            return e;
+        }
+        Type *want = p->expect_result;
+        if (want == NULL || !type_is_result(want)) {
+            diag_error(span,
+                       "'%s' needs to know the other type: declare the variable's type, or "
+                       "use it where a 'Result<T, E>' is expected",
+                       name);
+            e->type = NULL;
+            return e;
+        }
+        Type *slot = is_ok ? type_result_ok(want) : type_result_err(want);
+        if (!is_unk(args[0]->type) && !type_equals(args[0]->type, slot))
+            diag_error(args[0]->span, "argument 1 of '%s' expects '%s' but got '%s'", name,
+                       type_name(&p->ty, slot), type_name(&p->ty, args[0]->type));
+        Expr *u = new_expr(p, E_UNIONLIT, span);
+        u->variant = &want->udef->variants[is_ok ? 0 : 1];
+        u->args = args;
+        u->nargs = 1;
+        u->type = want;
+        *e = *u;
+        return e;
+    }
+
+    /* Standard-library built-in. Resolved after the user-function lookup would
+     * have failed, for the same shadowing reason as an intrinsic: a program that
+     * declares its own `len` gets its own. The call is checked against the
+     * built-in's real signature and given a real result type, so from here on it
+     * is an ordinary call and needs no special handling anywhere else. */
+    if (find_sig(p, name) == NULL && find_generic(p, name) == NULL) {
+        char ret_code = 0;
+        const char *params = NULL;
+        const char *sym = builtin_lookup(name, &ret_code, &params);
+        if (sym != NULL) {
+            int want = (int)strlen(params);
+            if (n != want) {
+                diag_error(span, "'%s' expects %d argument%s but got %d", name, want,
+                           want == 1 ? "" : "s", n);
+                e->type = NULL;
+                return e;
+            }
+            for (int i = 0; i < n; i++) {
+                if (is_unk(args[i]->type))
+                    continue;
+                Type *wt = builtin_type(p, params[i]);
+                if (!type_equals(args[i]->type, wt)) {
+                    diag_error(args[i]->span, "argument %d of '%s' expects '%s' but got '%s'",
+                               i + 1, name, type_name(&p->ty, wt),
+                               type_name(&p->ty, args[i]->type));
+                }
+            }
+            /* is_extern makes codegen call the symbol verbatim, which is what
+             * reaches the runtime instead of the z$ namespaced name. */
+            e->name = arena_strdup(p->arena, sym);
+            e->is_extern = 1;
+            e->type = builtin_type(p, ret_code);
+            return e;
         }
     }
 
@@ -1356,13 +2436,17 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         e->name = mangled;
     }
 
-    /* User function. */
-    Sig *s = find_sig(p, name);
+    /* User function. A function declared inside another one answers to a mangled
+     * symbol, and its signature was filed under that symbol, so both the lookup
+     * and the emitted call go through the same resolution. */
+    const char *sym = resolve_fn_sym(p, name);
+    Sig *s = find_sig(p, sym);
     if (s == NULL) {
         diag_error(span, "undefined function '%s'", name);
         e->type = NULL;
         return e;
     }
+    e->name = arena_strdup(p->arena, sym);
     if (s->nparams != n) {
         diag_error(span, "'%s' expects %d argument%s but got %d", name, s->nparams,
                    s->nparams == 1 ? "" : "s", n);
@@ -1376,6 +2460,10 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         return e;
     }
     for (int i = 0; i < n; i++) {
+        /* A concrete value going to an interface parameter is boxed on the way
+         * in, so the conversion is made before the types are compared. */
+        if (is_kind(s->ptypes[i], TK_IFACE) && !is_kind(args[i]->type, TK_IFACE))
+            args[i] = to_iface(p, args[i], s->ptypes[i], args[i]->span);
         if (!is_unk(args[i]->type) && !is_unk(s->ptypes[i]) &&
             !type_equals(args[i]->type, s->ptypes[i])) {
             diag_error(args[i]->span, "argument %d of '%s' expects '%s' but got '%s'", i + 1, name,
@@ -1390,9 +2478,51 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
     return e;
 }
 
-/* Postfix suffixes: indexing, .length, and postfix ++/--. */
+/* Postfix suffixes: indexing, .length, postfix ++/--, and `?`. */
 static Expr *parse_postfix(Parser *p, Expr *e) {
     for (;;) {
+        if (at(p, T_QUESTION) && type_is_result(e->type)) {
+            /* `expr?` -- yield the Ok payload, or return the error from here.
+             *
+             * This cannot desugar to statements: it is an expression, and the
+             * early return has to happen in the middle of evaluating whatever
+             * contains it. So it stays a node and the code generator emits the
+             * branch inline, the same sequence an explicit `match` followed by a
+             * `return` would produce.
+             *
+             * A `?` whose left side is *not* a Result is the ternary's, and is
+             * left alone: the two share a token, and a Result is never a valid
+             * condition, so the type decides and nothing well-typed is
+             * ambiguous. */
+            Span span = cur(p)->span;
+            advance(p);
+            Expr *t = new_expr(p, E_TRY, span);
+            t->lhs = e;
+            Type *rt = e->type;
+            Type *ret = p->cur_ret;
+            if (is_unk(ret) || !type_is_result(ret)) {
+                diag_error(span,
+                           "'?' can only be used in a function that returns a "
+                           "'Result<T, E>'; this one returns '%s'",
+                           is_unk(ret) ? "nothing" : type_name(&p->ty, ret));
+                t->type = NULL;
+                e = t;
+                continue;
+            }
+            Type *want_err = type_result_err(rt);
+            Type *have_err = type_result_err(ret);
+            if (!type_equals(want_err, have_err)) {
+                diag_error(span,
+                           "'?' propagates '%s' but this function returns '%s'",
+                           type_name(&p->ty, want_err), type_name(&p->ty, have_err));
+                t->type = NULL;
+                e = t;
+                continue;
+            }
+            t->type = type_result_ok(rt);
+            e = t;
+            continue;
+        }
         if (at(p, T_LBRACKET)) {
             Span span = cur(p)->span;
             advance(p);
@@ -1422,6 +2552,67 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             }
             char *name = cur(p)->text;
             advance(p);
+            /* A call on an interface value: `v.m(args)`. The method name is
+             * resolved to an index in the interface's declaration order, and that
+             * index is what the call site loads from the itab. Everything about
+             * the signature comes from the interface, not from whatever type
+             * happens to be in the cell -- that is the point of the interface. */
+            if (is_kind(e->type, TK_IFACE)) {
+                IfaceDef *id = e->type->idef;
+                IfaceMethod *im = iface_find_method(id, name);
+                if (im == NULL) {
+                    diag_error(span, "'%s' does not require a method '%s'",
+                               id != NULL ? id->name : "this interface", name);
+                    return e;
+                }
+                if (!at(p, T_LPAREN)) {
+                    diag_error(span, "'%s' is a method, so it needs an argument list",
+                               name);
+                    return e;
+                }
+                advance(p); /* '(' */
+                int cap = 4, n = 0;
+                Expr **args = arena_alloc_array(p->arena, (size_t)cap, sizeof(Expr *));
+                if (!at(p, T_RPAREN)) {
+                    for (;;) {
+                        if (n == cap) {
+                            int ncap = cap * 2;
+                            Expr **na = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Expr *));
+                            memcpy(na, args, (size_t)n * sizeof(Expr *));
+                            args = na;
+                            cap = ncap;
+                        }
+                        args[n++] = parse_expr(p);
+                        if (!match(p, T_COMMA))
+                            break;
+                    }
+                }
+                match(p, T_RPAREN);
+                int want = im->sig->nparams;
+                if (n != want) {
+                    diag_error(span, "'%s' expects %d argument%s but got %d", name, want,
+                               want == 1 ? "" : "s", n);
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        if (is_kind(im->sig->ptypes[i], TK_IFACE) &&
+                            !is_kind(args[i]->type, TK_IFACE))
+                            args[i] = to_iface(p, args[i], im->sig->ptypes[i], args[i]->span);
+                        if (!is_unk(args[i]->type) && !is_unk(im->sig->ptypes[i]) &&
+                            !type_equals(args[i]->type, im->sig->ptypes[i]))
+                            diag_error(args[i]->span, "argument %d of '%s' expects '%s' but got '%s'",
+                                       i + 1, name, type_name(&p->ty, im->sig->ptypes[i]),
+                                       type_name(&p->ty, args[i]->type));
+                    }
+                }
+                Expr *ic = new_expr(p, E_ICALL, span);
+                ic->lhs = e;
+                ic->args = args;
+                ic->nargs = n;
+                ic->vtable_index = (int)(im - id->methods);
+                ic->type = im->sig->ret;
+                e = parse_postfix(p, ic);
+                continue;
+            }
             /* method call: recv.Name(args) */
             Type *st = e->type;
             if (is_kind(st, TK_PTR) && is_kind(st->base, TK_STRUCT))
@@ -1743,7 +2934,7 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
 static Type *parse_type_base(Parser *p) {
     /* `new fn(int) -> int[3]` allocates an array of function pointers, so a
      * function type is a valid element type here. */
-    if (at(p, T_KW_FN) || at(p, T_KW_METHOD)) {
+    if (at(p, T_KW_FN) || at(p, T_KW_METHOD) || at(p, T_KW_CLOSURE)) {
         Type *ft = parse_fn_type(p);
         if (ft != NULL) {
             while (at(p, T_STAR)) {
@@ -1881,6 +3072,24 @@ static Expr *make_str_expr(Parser *p, const char *bytes, int len, Span span) {
     return e;
 }
 
+/* Builds a literal segment of an interpolated string, dropping the backslash
+ * from an escaped brace.
+ *
+ * The lexer leaves `\{` and `\}` in an interpolated string's raw text precisely
+ * so that this pass can tell a literal brace from a hole delimiter: by the time
+ * the holes are split out, an escaped brace and a real one are otherwise the
+ * same byte, and `$\"a\{b\"` would try to interpolate a variable named b. */
+static Expr *make_interp_part(Parser *p, const char *src, int len, Span span) {
+    char *out = arena_alloc(p->arena, (size_t)len + 1);
+    int n = 0;
+    for (int i = 0; i < len; i++) {
+        if (src[i] == '\\' && i + 1 < len && (src[i + 1] == '{' || src[i + 1] == '}'))
+            i++;
+        out[n++] = src[i];
+    }
+    return make_str_expr(p, out, n, span);
+}
+
 /* Lexes and parses an embedded interpolation expression (the text inside
  * {..} of $"...{expr}...") as a sub-stream, sharing the enclosing scope and
  * type context so local variables and the string table resolve correctly. */
@@ -1908,19 +3117,35 @@ static Expr *parse_interp(Parser *p, Token *t) {
     const char *seg = s;
     const char *cur = s;
     while (*cur) {
+        /* An escaped brace is a literal brace, never a hole delimiter, and it is
+         * two bytes here rather than one. */
+        if (*cur == '\\' && cur[1] != '\0') {
+            cur += 2;
+            continue;
+        }
         if (*cur == '{') {
             int litlen = (int)(cur - seg);
-            Expr *lit = make_str_expr(p, seg, litlen, span);
+            Expr *lit = make_interp_part(p, seg, litlen, span);
             acc = acc ? make_binary(p, T_PLUS, acc, lit, span) : lit;
+            /* Scan to the matching '}', stepping over escapes so a brace inside
+             * a string literal in the hole does not close it early. */
             const char *e = cur + 1;
             int depth = 1;
             while (*e && depth > 0) {
+                if (*e == '\\' && e[1] != '\0') {
+                    e += 2;
+                    continue;
+                }
                 if (*e == '{')
                     depth++;
                 else if (*e == '}')
                     depth--;
                 if (depth > 0)
                     e++;
+            }
+            if (depth > 0) {
+                diag_error(span, "unterminated '{' in an interpolated string");
+                e = cur + 1 + strlen(cur + 1);
             }
             int exprlen = (int)(e - (cur + 1));
             Expr *sub = parse_embedded(p, cur + 1, exprlen, span);
@@ -1932,7 +3157,7 @@ static Expr *parse_interp(Parser *p, Token *t) {
         }
     }
     int litlen = (int)(cur - seg);
-    Expr *tail = make_str_expr(p, seg, litlen, span);
+    Expr *tail = make_interp_part(p, seg, litlen, span);
     acc = acc ? make_binary(p, T_PLUS, acc, tail, span) : tail;
     return acc;
 }
@@ -1945,6 +3170,13 @@ static Expr *parse_primary(Parser *p) {
         Expr *e = new_expr(p, E_INT, t->span);
         e->ival = t->ival;
         e->type = type_int(&p->ty);
+        return parse_postfix(p, e);
+    }
+    case T_F64: {
+        advance(p);
+        Expr *e = new_expr(p, E_F64, t->span);
+        e->dval = t->dval;
+        e->type = type_f64(&p->ty);
         return parse_postfix(p, e);
     }
     case T_STRING: {
@@ -1997,11 +3229,18 @@ static Expr *parse_primary(Parser *p) {
         /* lookup_var, not lookup_var_local: a function pointer held in an
          * enclosing scope -- a parameter, most often -- is just as callable. */
         Var *fplocal = lookup_var(p, name);
+        /* Inside a lambda, a name that resolves to a variable belonging to an
+         * enclosing function is a capture. Done here, at the single point where
+         * a name becomes a variable, so no other path can produce one. */
+        capture_for(p, fplocal, span);
         /* The identifier is still the current token here, so the '(' that
          * follows it is one token ahead and whatever comes after that is two. */
+        /* A local holding a function pointer, a bound method or a closure is
+         * called through the value. type_is_callable covers all three: a closure
+         * and a function pointer of the same signature are interchangeable, and
+         * a call site should not have to know which one it was handed. */
         int is_fp_call = peek(p, 1)->kind == T_LPAREN && peek(p, 2)->kind != T_KW_THIS &&
-                         fplocal != NULL &&
-                         (is_kind(fplocal->type, TK_FNPTR) || is_kind(fplocal->type, TK_MPTR));
+                         fplocal != NULL && type_is_callable(fplocal->type);
         advance(p);
         if (is_fp_call) {
             Var *lv = fplocal;
@@ -2059,6 +3298,34 @@ static Expr *parse_primary(Parser *p) {
             /* A bare variant name is a union constructor: `Circle(5)`. */
             UnionDef *owner = NULL;
             VariantDef *vd = type_find_variant(&p->ty, name, &owner);
+            /* `Ok` and `Err` are the variants of every Result, so the name alone
+             * does not say which one is meant: type_find_variant returns whichever
+             * Result was interned first, and `Ok(true)` in a function returning
+             * `Result<bool,string>` would build a `Result<int,string>`. The
+             * expectation disambiguates, so the variant is re-pointed at the
+             * expected Result's own before anything is checked against it. */
+            Type *want = NULL;
+            if (vd != NULL && type_is_result(type_find_union(&p->ty, owner->name))) {
+                want = p->expect_result;
+                if (want == NULL || !type_is_result(want)) {
+                    diag_error(span,
+                               "'%s' needs to know the other type: declare the variable's "
+                               "type, or use it where a 'Result<T, E>' is expected",
+                               name);
+                    advance(p);
+                    while (at(p, T_IDENT) || at(p, T_LPAREN) || at(p, T_RPAREN))
+                        advance(p);
+                    match(p, T_RPAREN);
+                    Expr *bad = new_expr(p, E_INT, span);
+                    bad->type = NULL;
+                    return parse_postfix(p, bad);
+                }
+                int idx = strcmp(vd->name, "Ok") == 0 ? 0 : 1;
+                if (want->udef->nvariants > idx) {
+                    vd = &want->udef->variants[idx];
+                    owner = want->udef;
+                }
+            }
             if (vd != NULL) {
                 advance(p); /* '(' */
                 int cap = 4, n = 0;
@@ -2097,7 +3364,7 @@ static Expr *parse_primary(Parser *p) {
                 e->variant = vd;
                 e->args = args;
                 e->nargs = n;
-                e->type = type_find_union(&p->ty, owner->name);
+                e->type = want != NULL ? want : type_find_union(&p->ty, owner->name);
                 return parse_postfix(p, e);
             }
             return parse_postfix(p, parse_call(p, name, span));
@@ -2165,6 +3432,34 @@ static Expr *parse_primary(Parser *p) {
         return parse_postfix(p, parse_new(p));
     }
     case T_LPAREN: {
+        /* A lambda: a parameter list followed by `=>`. Checked before the cast
+         * form, which also starts with a type keyword, and before the plain
+         * grouped-expression form, which this is a refinement of. */
+        if (lambda_ahead(p, p->pos) > 0) {
+            Expr *lam = parse_lambda(p, t->span);
+            return parse_postfix(p, lam);
+        }
+        /* `(float)x` and `(int)f`: a cast, which is how a value crosses between
+         * the two numeric types in the direction that is never implicit. A '('
+         * followed by anything that is not a type keyword is just a grouped
+         * expression, so the two are told apart by looking at the next token. */
+        if (is_kind(base_type_from_token(p, peek(p, 1)->kind), TK_INT) ||
+            is_kind(base_type_from_token(p, peek(p, 1)->kind), TK_F64)) {
+            Span cspan = cur(p)->span;
+            Type *to = base_type_from_token(p, peek(p, 1)->kind);
+            advance(p); /* '(' */
+            advance(p); /* the type */
+            if (!match(p, T_RPAREN))
+                diag_error(cur(p)->span, "expected ')' after a cast type");
+            /* parse_unary, not parse_expr: a cast binds like a unary operator, so
+             * `(float)-x` and `-(float)x` both mean what they look like. */
+            Expr *inner = parse_unary(p);
+            Expr *c = make_cvt(p, to, inner, cspan);
+            if (c == inner && !is_unk(inner->type) && !type_equals(inner->type, to))
+                diag_error(cspan, "cannot cast '%s' to '%s'", type_name(&p->ty, inner->type),
+                           type_name(&p->ty, to));
+            return parse_postfix(p, c);
+        }
         advance(p);
         Expr *inner = parse_expr(p);
         if (!match(p, T_RPAREN)) {
@@ -2209,9 +3504,16 @@ static Expr *parse_unary(Parser *p) {
         e->lhs = operand;
         if (t->kind == T_MINUS || t->kind == T_TILDE) {
             const char *what = t->kind == T_MINUS ? "negate" : "apply '~' to";
-            if (!is_unk(operand->type) && !is_kind(operand->type, TK_INT)) {
+            /* Negation works on a float -- it flips the sign bit, so -0.0 stays
+             * distinct from 0.0 -- but bitwise not has no meaning for one. */
+            int ok = t->kind == T_MINUS
+                         ? (is_kind(operand->type, TK_INT) || is_kind(operand->type, TK_F64))
+                         : is_kind(operand->type, TK_INT);
+            if (!is_unk(operand->type) && !ok) {
                 diag_error(t->span, "cannot %s '%s'", what, type_name(&p->ty, operand->type));
                 e->type = NULL;
+            } else if (is_kind(operand->type, TK_F64)) {
+                e->type = type_f64(&p->ty);
             } else {
                 e->type = type_int(&p->ty);
             }
@@ -2231,13 +3533,14 @@ static Expr *parse_unary(Parser *p) {
          * its signature. This has to be caught before the operand is parsed as
          * an expression, because a bare function name is not a variable. */
         if (at(p, T_IDENT) && peek(p, 1)->kind != T_LPAREN) {
-            Sig *fs = find_sig(p, cur(p)->text);
+            char *fn_src = cur(p)->text;
+            Sig *fs = find_sig(p, resolve_fn_sym(p, fn_src));
             if (fs != NULL) {
                 Span fspan = cur(p)->span;
-                char *fname = cur(p)->text;
+                char *fname = arena_strdup(p->arena, resolve_fn_sym(p, fn_src));
                 advance(p);
                 Expr *fe = new_expr(p, E_FNPTR, fspan);
-                fe->name = arena_strdup(p->arena, fname);
+                fe->name = fname;
                 fe->is_extern = fs->is_extern || fs->is_export;
                 Type **pts = NULL;
                 if (fs->nparams > 0) {
@@ -2357,6 +3660,22 @@ static Expr *parse_expr(Parser *p) {
         e->lhs = lhs;
         e->rhs = rhs;
         if (compound) {
+            /* A compound assignment runs the operator and stores back into the
+             * left operand, so the right side is promoted to the left's type
+             * rather than the whole expression being retyped. `f += 1` is
+             * therefore float arithmetic, and `i += 1.5` is an error rather
+             * than a silent truncation. */
+            if (is_kind(lhs->type, TK_F64) && (bop == T_PLUS || bop == T_MINUS || bop == T_STAR ||
+                                               bop == T_SLASH)) {
+                if (!is_kind(rhs->type, TK_F64) && !is_unk(rhs->type) && !is_kind(rhs->type, TK_INT))
+                    diag_error(span, "operator %s= requires 'float' or 'int' operands",
+                               token_kind_name(bop));
+                else
+                    rhs = make_cvt(p, type_f64(&p->ty), rhs, span);
+                e->rhs = rhs;
+                e->type = lhs->type;
+                return e;
+            }
             if (!is_kind(lhs->type, TK_INT) || !is_kind(rhs->type, TK_INT)) {
                 if (!is_unk(lhs->type) && !is_unk(rhs->type)) {
                     diag_error(span, "operator %s= requires 'int' operands",
@@ -2367,10 +3686,35 @@ static Expr *parse_expr(Parser *p) {
             }
             e->type = lhs->type;
         } else {
+            /* The one implicit conversion: an int widens to a float, which
+             * cannot lose a value. Everything else has to match exactly -- except
+             * a concrete value going to an interface, which boxes it. */
+            if (is_kind(lhs->type, TK_IFACE) && !is_kind(rhs->type, TK_IFACE) &&
+                !is_unk(rhs->type)) {
+                rhs = to_iface(p, rhs, lhs->type, span);
+                e->rhs = rhs;
+                e->type = lhs->type;
+                return e;
+            }
+            if (type_widens_to(lhs->type, rhs->type) && !is_unk(lhs->type) &&
+                !is_unk(rhs->type)) {
+                rhs = make_cvt(p, lhs->type, rhs, span);
+                e->rhs = rhs;
+                e->type = lhs->type;
+                return e;
+            }
             if (!type_assignable(lhs->type, rhs->type) && !is_unk(lhs->type) &&
                 !is_unk(rhs->type)) {
-                diag_error(span, "cannot assign '%s' to '%s'", type_name(&p->ty, rhs->type),
-                           type_name(&p->ty, lhs->type));
+                /* Name the cast that would work, when there is one: "cannot
+                 * assign float to int" is a true sentence but not much help. */
+                if (is_kind(lhs->type, TK_INT) && is_kind(rhs->type, TK_F64))
+                    diag_error(span,
+                               "cannot assign 'float' to 'int' without losing precision; write "
+                               "'(int)' if that is what you want",
+                               type_name(&p->ty, rhs->type), type_name(&p->ty, lhs->type));
+                else
+                    diag_error(span, "cannot assign '%s' to '%s'", type_name(&p->ty, rhs->type),
+                               type_name(&p->ty, lhs->type));
                 e->type = NULL;
                 return e;
             }
@@ -2625,10 +3969,16 @@ static Stmt *parse_var_decl(Parser *p) {
             s->type = declared;
             return s;
         }
+        /* A declared type tells `Ok(...)`/`Err(...)` what to build. */
+        Type *saved_expect = p->expect_result;
+        p->expect_result = type_is_result(declared) ? declared : NULL;
         Expr *init = parse_expr(p);
+        p->expect_result = saved_expect;
         Type *t = declared;
         if (infer)
             t = init->type;
+        if (!infer && is_kind(t, TK_IFACE))
+            init = to_iface(p, init, t, start);
         if (t == NULL)
             /* A bare `null` carries no type, but `var p = null` is a pointer
              * declaration in every other language; default to int* so the
@@ -2649,6 +3999,27 @@ static Stmt *parse_var_decl(Parser *p) {
     return new_stmt(p, S_EXPR, start);
 }
 
+/* True when control cannot fall out of the bottom of `s`, so anything after it
+ * in the same block is dead. An `if` counts only when it has an `else` and both
+ * arms leave -- otherwise the untaken arm falls through. */
+static int stmt_terminates(Stmt *s) {
+    if (s == NULL)
+        return 0;
+    switch (s->kind) {
+    case S_RETURN:
+    case S_BREAK:
+    case S_CONTINUE:
+        return 1;
+    case S_BLOCK:
+        /* A block leaves only if its last statement does. */
+        return s->nitems > 0 && stmt_terminates(s->items[s->nitems - 1]);
+    case S_IF:
+        return s->orelse != NULL && stmt_terminates(s->body) && stmt_terminates(s->orelse);
+    default:
+        return 0;
+    }
+}
+
 static Stmt *parse_block(Parser *p) {
     Span start = cur(p)->span;
     if (!match(p, T_LBRACE)) {
@@ -2666,6 +4037,11 @@ static Stmt *parse_block(Parser *p) {
             items = ni;
             cap = ncap;
         }
+        /* A statement after one that always leaves the block can never run.
+         * Say so once, at the first dead statement, and keep parsing: the rest
+         * still has to type-check so the errors below are the real ones. */
+        if (n > 0 && stmt_terminates(items[n - 1]))
+            diag_warn(W_UNREACHABLE, cur(p)->span, "this statement can never run");
         items[n++] = parse_stmt(p);
     }
     if (!match(p, T_RBRACE)) {
@@ -2678,9 +4054,468 @@ static Stmt *parse_block(Parser *p) {
     return s;
 }
 
-static Stmt *parse_func(Parser *p) {
+    /* ---- closures ----
+ *
+ * A lambda is not a distinct kind of function in the backend. It is hoisted to a
+ * top-level function with a hidden first parameter holding the captured
+ * environment, and the expression in source position becomes a pointer to a
+ * { code, env } cell -- the same cell shape a bound method already uses, which is
+ * why the runtime needed nothing new beyond a one-word box.
+ *
+ * Captured variables are moved into heap cells. The alternative, copying them
+ * into the environment, gives a closure that mutates a captured variable a
+ * private copy: a counter would climb inside the closure and stay put outside
+ * it. With boxing, both sides reach one cell, so a captured variable means what it
+ * looks like it means.
+ *
+ * Two lists are involved, and they are not the same list. The function-wide one
+ * records every variable any lambda captured, because that is what decides which
+ * frame slots hold boxes. The per-lambda one records what *this* lambda captured,
+ * in the order the body first mentioned each variable, because the environment
+ * is laid out in that order and is therefore dense.
+ */
+
+/* Looks for a parameter list followed by `=>` at `i`, returning the index just
+ * past the `=>`, or -1. Bracket-balanced, so a call like `f((a), b)` is not
+ * mistaken for a lambda. */
+static int lambda_ahead(Parser *p, int i) {
+    if (i >= p->ntoks || p->toks[i].kind != T_LPAREN)
+        return -1;
+    int depth = 0;
+    for (; i < p->ntoks; i++) {
+        TokenKind k = p->toks[i].kind;
+        if (k == T_LPAREN) {
+            depth++;
+        } else if (k == T_RPAREN) {
+            depth--;
+            if (depth == 0)
+                break;
+        } else if (k == T_SEMI || k == T_LBRACE) {
+            return -1; /* a declaration, not an expression */
+        }
+    }
+    if (i + 1 < p->ntoks && p->toks[i + 1].kind == T_FATARROW)
+        return i + 2;
+    return -1;
+}
+
+/* Notes that the body of the current lambda reads `v`.
+ *
+ * Whether a reference is a capture is decided by ownership rather than by
+ * scope depth: a variable is a capture exactly when it was declared by some
+ * other function. That is robust against nested blocks and shadowing inside the
+ * lambda, which a scope-depth test would get wrong. */
+static void capture_for(Parser *p, Var *v, Span span) {
+    if (!p->lam_active || v == NULL || v->owner == p->lam_owner)
+        return;
+    if (!v->captured) {
+        if (p->ncaptured >= MAX_CAPTURES) {
+            diag_error(span, "a closure cannot capture more than %d variables", MAX_CAPTURES);
+            return;
+        }
+        v->captured = 1;
+        p->captured[p->ncaptured++] = v;
+    }
+    /* Once per lambda. A body that mentions a variable three times still
+     * captures it once -- the environment holds one entry per variable, not one
+     * per mention -- and two lambdas over the same variable each get their own
+     * entry, since their layouts are independent. */
+    for (int i = 0; i < p->nlamcaps; i++) {
+        if (p->lam_caps[i] == v)
+            return;
+    }
+    if (p->nlamcaps >= MAX_CAPTURES)
+        return;
+    p->lam_caps[p->nlamcaps++] = v;
+}
+
+/* The value type of a block-bodied lambda: the type of its `return`, or `int` if
+ * the block never returns a value. */
+/* Gather every `return` in a lambda body. A lambda's return type is inferred
+ * from what its body returns rather than written down, so unlike a declared
+ * function there is nothing for the usual check to compare a `return` against
+ * until the whole body has been read. The returns are collected here and checked
+ * by check_lambda_returns once the type is known. */
+static void collect_returns(Stmt *s, Stmt ***out, int *n, int *cap, Arena *arena) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_RETURN:
+        if (*n == *cap) {
+            int ncap = *cap ? *cap * 2 : 8;
+            Stmt **bigger = arena_alloc_array(arena, (size_t)ncap, sizeof(Stmt *));
+            /* Copy before growing the count. Dropping the old entries would make
+             * a body with more than eight returns silently check only some. */
+            if (*n > 0)
+                memcpy(bigger, *out, (size_t)*n * sizeof(Stmt *));
+            *out = bigger;
+            *cap = ncap;
+        }
+        (*out)[(*n)++] = s;
+        break;
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            collect_returns(s->items[i], out, n, cap, arena);
+        break;
+    case S_IF:
+    case S_WHILE:
+        collect_returns(s->body, out, n, cap, arena);
+        collect_returns(s->orelse, out, n, cap, arena);
+        break;
+    case S_FOR:
+        collect_returns(s->for_init, out, n, cap, arena);
+        collect_returns(s->body, out, n, cap, arena);
+        break;
+    case S_VAR:
+    case S_EXPR:
+    case S_BREAK:
+    case S_CONTINUE:
+    case S_FUNC:
+    case S_STRUCT:
+    case S_UNION:
+        break;
+    }
+}
+
+/* Unify the types of a lambda body's returns into the single type the lambda
+ * returns. A body that returns two different types cannot be called through one
+ * signature, so the first is taken as the lambda's type and the disagreement is
+ * reported rather than dropped. `*agrees` says whether that happened: when the
+ * body disagrees with itself, the later per-return check has nothing useful to
+ * add, and reporting every return again would bury the one real mistake. */
+static Type *lambda_block_ret(Parser *p, Stmt **returns, int nret, int *agrees) {
+    Type *ret = NULL;
+    *agrees = 1;
+    for (int i = 0; i < nret; i++) {
+        Type *rt = returns[i]->expr != NULL ? returns[i]->expr->type : NULL;
+        if (rt == NULL || is_unk(rt))
+            continue;
+        if (ret == NULL) {
+            ret = rt;
+        } else if (!type_equals(ret, rt)) {
+            diag_error(returns[i]->span, "lambda returns '%s' here but '%s' elsewhere",
+                       type_name(&p->ty, rt), type_name(&p->ty, ret));
+            *agrees = 0;
+        }
+    }
+    /* A body with no value-returning path has no type to infer, and int is the
+     * long-standing fallback rather than a claim about the program. */
+    return ret != NULL ? ret : type_int(&p->ty);
+}
+
+/* Now that the lambda's return type is known, hold each return in its body to
+ * it. The wording matches the diagnostic a declared function produces, because
+ * the mistake -- returning a type the signature does not promise -- is the same
+ * one, and a lambda nested in a function that returns a different type used to
+ * report the *enclosing* function's return type here. */
+static void check_lambda_returns(Parser *p, Stmt **returns, int nret, Type *ret) {
+    for (int i = 0; i < nret; i++) {
+        Type *rt = returns[i]->expr != NULL ? returns[i]->expr->type : NULL;
+        if (rt == NULL || is_unk(rt) || is_unk(ret))
+            continue;
+        if (!type_equals(rt, ret))
+            diag_error(returns[i]->span, "cannot return '%s' from function returning '%s'",
+                       type_name(&p->ty, rt), type_name(&p->ty, ret));
+    }
+}
+
+static void rewrite_captures_expr(Parser *p, Expr *e, Var **caps, int ncaps, Type *env_ty,
+                                     int env_slot);
+
+/* Rewrites every reference to a captured variable in a freshly parsed lambda body
+ * into `*env[i]`, with `i` the variable's position in *this* lambda's capture
+ * list. The frame slot the name used to refer to holds a box pointer, and the
+ * value now lives behind it, so the reference becomes a double indirection --
+ * and an index and a dereference are both things the language already has. */
+static void rewrite_captures_expr(Parser *p, Expr *e, Var **caps, int ncaps, Type *env_ty,
+                                     int env_slot) {
+    if (e == NULL)
+        return;
+    if (e->kind == E_VAR) {
+        for (int i = 0; i < ncaps; i++) {
+            if (caps[i]->offset != e->slot)
+                continue;
+            if (!type_equals(caps[i]->type, e->type))
+                continue;
+            Type *vt = e->type;
+            char *nm = e->name;
+            Span sp = e->span;
+            Expr *envref = new_expr(p, E_VAR, sp);
+            envref->name = "$env";
+            envref->type = env_ty;
+            envref->slot = env_slot;
+            Expr *idx = new_expr(p, E_INT, sp);
+            idx->ival = i;
+            idx->type = type_int(&p->ty);
+            Expr *elem = new_expr(p, E_INDEX, sp);
+            elem->lhs = envref;
+            elem->rhs = idx;
+            elem->type = type_ptr(&p->ty, type_int(&p->ty));
+            Expr *deref = new_expr(p, E_DEREF, sp);
+            deref->lhs = elem;
+            deref->type = vt;
+            deref->name = nm; /* kept so a diagnostic can still name the variable */
+            e->kind = E_DEREF;
+            e->lhs = elem;
+            e->type = vt;
+            e->slot = 0;
+            e->name = nm;
+            return;
+        }
+    }
+    rewrite_captures_expr(p, e->lhs, caps, ncaps, env_ty, env_slot);
+    rewrite_captures_expr(p, e->rhs, caps, ncaps, env_ty, env_slot);
+    rewrite_captures_expr(p, e->env, caps, ncaps, env_ty, env_slot);
+    for (int i = 0; i < e->nargs; i++)
+        rewrite_captures_expr(p, e->args[i], caps, ncaps, env_ty, env_slot);
+    for (int i = 0; i < e->narms; i++)
+        rewrite_captures_expr(p, e->arms[i].body, caps, ncaps, env_ty, env_slot);
+}
+
+static void rewrite_captures_stmt(Parser *p, Stmt *s, Var **caps, int ncaps, Type *env_ty,
+                                      int env_slot) {
+    if (s == NULL)
+        return;
+    switch (s->kind) {
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            rewrite_captures_stmt(p, s->items[i], caps, ncaps, env_ty, env_slot);
+        return;
+    case S_FOR:
+        rewrite_captures_stmt(p, s->for_init, caps, ncaps, env_ty, env_slot);
+        rewrite_captures_stmt(p, s->body, caps, ncaps, env_ty, env_slot);
+        return;
+    case S_IF:
+    case S_WHILE:
+        rewrite_captures_stmt(p, s->body, caps, ncaps, env_ty, env_slot);
+        rewrite_captures_stmt(p, s->orelse, caps, ncaps, env_ty, env_slot);
+        return;
+    case S_EXPR:
+    case S_RETURN:
+        rewrite_captures_expr(p, s->expr, caps, ncaps, env_ty, env_slot);
+        return;
+    case S_VAR:
+        rewrite_captures_expr(p, s->init, caps, ncaps, env_ty, env_slot);
+        return;
+    default:
+        return;
+    }
+}
+
+/* Parses `(params) => body`.
+ *
+ * Only one level of nesting is supported. A lambda inside a lambda would have to
+ * forward its own captures through the frame in between, which is a different
+ * mechanism from the one here, so it is refused rather than half-implemented. */
+static Expr *parse_lambda(Parser *p, Span span) {
+    if (p->lam_active) {
+        diag_error(span, "a lambda cannot be defined inside another lambda");
+        advance(p); /* the '(' */
+        while (!at(p, T_FATARROW) && !at(p, T_EOF) && !at(p, T_SEMI) && !at(p, T_LBRACE))
+            advance(p);
+        match(p, T_FATARROW);
+        if (at(p, T_LBRACE))
+            parse_block(p);
+        else
+            parse_expr(p);
+        Expr *e = new_expr(p, E_INT, span);
+        e->type = type_int(&p->ty);
+        return e;
+    }
+
+    /* State the lambda's own parsing must not leak into the enclosing function:
+     * its return type, its frame allocator, and its `this`. */
+    Type *saved_ret = p->cur_ret;
+    int saved_offset = p->next_offset;
+    StructDef *saved_msd = p->cur_msd;
+    Expr *saved_this = p->cur_this;
+    int saved_take = p->take_method_addr;
+    int saved_nlamcaps = p->nlamcaps;
+    int lam_id = p->lambda_counter++;
+
+    /* The environment is the hidden first parameter, typed `int*` purely as an
+     * opaque carrier: the body only ever indexes it. */
+    Type *env_ty = type_ptr(&p->ty, type_int(&p->ty));
+    int lam_owner = ++p->func_counter;
+    int saved_owner = p->cur_owner;
+    p->cur_owner = lam_owner;
+    p->lam_owner = lam_owner;
+    p->lam_active = 1;
+    p->nlamcaps = 0;
+    /* The hoisted function has a frame of its own, so its locals start from zero
+     * rather than continuing the enclosing function's allocation. Without this a
+     * lambda parameter would land on top of a local in the frame that encloses
+     * the lambda. */
+    p->next_offset = 0;
+
+    Type *ptypes[Z_MAX_ARGS];
+    const char *pnames[Z_MAX_ARGS];
+    int poffset[Z_MAX_ARGS];
+    int np = 0;
+
+    advance(p); /* '(' */
+    scope_push(p);
+    /* The environment is declared first, before the body exists, because the
+     * body is rewritten to index it and so needs to know which frame slot it
+     * landed in. Frame order is irrelevant; only the recorded offsets matter. */
+    int env_slot = declare_var(p, "$env", env_ty);
+    mark_synth(p, "$env");
+    if (!at(p, T_RPAREN)) {
+        for (;;) {
+            if (np + 1 >= Z_MAX_ARGS) {
+                diag_error(span, "a lambda may take at most %d parameters", Z_MAX_ARGS - 1);
+                break;
+            }
+            Type *pt = parse_type(p);
+            if (pt == NULL || !at(p, T_IDENT)) {
+                diag_error(cur(p)->span, "expected a parameter type and name in a lambda");
+                break;
+            }
+            char *pn = cur(p)->text;
+            advance(p);
+            poffset[np] = declare_var(p, pn, pt);
+            pnames[np] = pn;
+            ptypes[np++] = pt;
+            if (!match(p, T_COMMA))
+                break;
+        }
+    }
+    match(p, T_RPAREN);
+    match(p, T_FATARROW);
+
+    /* The body: a single expression, or a block the user wrote themselves. */
+    Stmt *body_block;
+    Type *ret;
+    Stmt **returns = NULL;
+    int nreturns = 0, retcap = 0;
+    if (at(p, T_LBRACE)) {
+        /* Nothing to check a `return` against yet: the lambda's type comes out
+         * of its body. Clearing cur_ret keeps the S_RETURN check from holding
+         * each return to the *enclosing* function's return type, which for
+         * `() => { n = n + 1; return n; }` inside a function returning something
+         * else was the whole diagnostic. */
+        p->cur_ret = NULL;
+        body_block = parse_block(p);
+        collect_returns(body_block, &returns, &nreturns, &retcap, p->arena);
+        int agrees = 1;
+        ret = lambda_block_ret(p, returns, nreturns, &agrees);
+        if (agrees)
+            check_lambda_returns(p, returns, nreturns, ret);
+    } else {
+        Expr *value = parse_expr(p);
+        ret = is_unk(value->type) ? type_int(&p->ty) : value->type;
+        Stmt *ret_st = new_stmt(p, S_RETURN, span);
+        ret_st->expr = value;
+        Stmt **items = arena_alloc_array(p->arena, 1, sizeof(Stmt *));
+        items[0] = ret_st;
+        body_block = new_stmt(p, S_BLOCK, span);
+        body_block->items = items;
+        body_block->nitems = 1;
+    }
+
+    /* Whatever the body reached for outside becomes this lambda's environment,
+     * in the order the body first mentioned it. */
+    Var *caps[MAX_CAPTURES];
+    int ncaps = p->nlamcaps;
+    for (int i = 0; i < ncaps; i++)
+        caps[i] = p->lam_caps[i];
+    if (ncaps > 0)
+        rewrite_captures_stmt(p, body_block, caps, ncaps, env_ty, env_slot);
+
+    /* The hoisted function. `$lam` cannot be written in Z source, so the name
+     * cannot collide with anything the user declared. */
+    char nm[32];
+    snprintf(nm, sizeof nm, "$lam%d", lam_id);
+    Stmt *fn = new_stmt(p, S_FUNC, span);
+    fn->fname = arena_strdup(p->arena, nm);
+    fn->src_fname = NULL; /* a lambda is anonymous: `$lam0` is not a source name */
+    fn->ret_type = ret;
+    fn->fbody = body_block;
+    fn->vis_start = 1; /* the hidden environment is not a parameter a reader wrote */
+
+    /* The environment is parameter 0, and the declared parameters follow it. */
+    Expr **params = arena_alloc_array(p->arena, (size_t)(np + 1), sizeof(Expr *));
+    for (int i = 0; i < np; i++) {
+        Expr *pe = new_expr(p, E_VAR, span);
+        pe->name = arena_strdup(p->arena, pnames[i]);
+        pe->type = ptypes[i];
+        pe->slot = poffset[i];
+        params[i + 1] = pe;
+    }
+    Expr *envp = new_expr(p, E_VAR, span);
+    envp->name = "$env";
+    envp->type = env_ty;
+    envp->slot = env_slot;
+    params[0] = envp;
+    fn->params = params;
+    fn->nparams = np + 1;
+    fn->locals_bytes = p->next_offset;
+    add_pending(p, fn);
+
+    scope_pop(p);
+    p->cur_owner = saved_owner;
+    p->lam_active = 0;
+    p->nlamcaps = saved_nlamcaps;
+    p->cur_ret = saved_ret;
+    p->next_offset = saved_offset;
+    p->cur_msd = saved_msd;
+    p->cur_this = saved_this;
+    p->take_method_addr = saved_take;
+
+    /* The closure value: a { code, env } cell. Each argument is a captured
+     * variable of the *enclosing* frame, read as the box pointer it holds. */
+    Expr *cl = new_expr(p, E_CLOSURE, span);
+    cl->name = arena_strdup(p->arena, nm);
+    if (ncaps > 0) {
+        Expr **elems = arena_alloc_array(p->arena, (size_t)ncaps, sizeof(Expr *));
+        for (int i = 0; i < ncaps; i++) {
+            Expr *bp = new_expr(p, E_VAR, span);
+            bp->name = caps[i]->name;
+            bp->type = type_ptr(&p->ty, type_int(&p->ty));
+            bp->slot = caps[i]->offset;
+            bp->boxed = 1;
+            elems[i] = bp;
+        }
+        cl->args = elems;
+        cl->nargs = ncaps;
+    }
+    /* The parameter types are copied into the arena. A Type keeps the *pointer*
+     * it is given rather than the contents, and `ptypes` is a stack array that
+     * dies the moment this function returns -- so a closure whose type pointed
+     * straight at it would read whatever the next call left behind. The first
+     * lambda in a file usually still works and the second does not, which is a
+     * particularly confusing way for this to fail. */
+    Type **stored = arena_alloc_array(p->arena, (size_t)(np > 0 ? np : 1), sizeof(Type *));
+    for (int i = 0; i < np; i++)
+        stored[i] = ptypes[i];
+    cl->type = type_closure(&p->ty, stored, np, ret);
+    return cl;
+}
+
+
+
+
+static Stmt *parse_func(Parser *p, int nested) {
     int fn_tok_start = p->pos;
     Span start = cur(p)->span;
+    /* Each function owns an id, so a lambda inside it can tell its own locals
+     * from the ones it captured. */
+    int fn_owner = ++p->func_counter;
+    int saved_owner = p->cur_owner;
+    p->cur_owner = fn_owner;
+
+    /* A function starts a fresh capture list, and the enclosing one is put back
+     * on the way out. A top-level program is the enclosing context for a
+     * function declared after some top-level statements, and a plain
+     * `p->ncaptured = 0` on the way out discarded the closures that had already
+     * captured those statements -- so their declarations were never boxed, and
+     * the first call that allocated anything walked a frame slot nobody filled.
+     * The list is a fixed-size array, so copying it is cheap. */
+    Var saved_captured[MAX_CAPTURES];
+    int saved_ncaptured = p->ncaptured;
+    if (saved_ncaptured > 0)
+        memcpy(saved_captured, p->captured, (size_t)saved_ncaptured * sizeof(Var));
+    p->ncaptured = 0;
 
     /* Look ahead for a generic parameter list `name<T,...>(` and pre-bind the
      * type parameters so the return type and parameter types can reference them
@@ -2746,10 +4581,30 @@ static Stmt *parse_func(Parser *p) {
         p->pos = skip_generic_params(p, p->pos);
     match(p, T_LPAREN);
 
+    /* A function written inside another one is emitted under a symbol built from
+     * the enclosing function's id, so two `helper` declarations in two different
+     * bodies do not collide. Everything the reader sees -- diagnostics, the
+     * mapping from the written name -- keeps using the name as written. */
+    char *src_name = name;
+    char symbuf[64];
+    if (nested) {
+        snprintf(symbuf, sizeof symbuf, "$fn%d_%s", saved_owner, src_name);
+        name = arena_strdup(p->arena, symbuf);
+    }
+    /* `extern` and `export` name a symbol deliberately, and a local has no
+     * outside to be visible to. */
+    if (nested && (is_extern || is_export))
+        diag_error(start, "a function declared inside another function cannot be '%s'",
+                   is_extern ? "extern" : "export");
+    if (nested && ntparams > 0)
+        diag_error(start, "'%s' cannot be a generic function here", src_name);
+
     Scope *saved_scope = p->scope;
     int saved_slot = p->next_offset;
     Type *saved_ret = p->cur_ret;
+    LocalFn *saved_local_fns = p->local_fns;
     scope_push(p);
+    p->scope->is_fn_body = 1;
     p->next_offset = 0;
     p->cur_ret = ret;
 
@@ -2802,9 +4657,10 @@ static Stmt *parse_func(Parser *p) {
     /* A struct-returning function uses the SysV hidden-pointer convention: a
      * hidden first parameter holds the address of the caller's result buffer. */
     int ret_is_aggregate = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
-    int max_params = ret_is_aggregate ? Z_MAX_ARGS_STRUCT_RET : Z_MAX_ARGS;
+    int max_params = Z_MAX_ARGS;
     if (pn > max_params) {
-        diag_error(start, "'%s' takes %d parameters but the limit is %d%s", name, pn, max_params,
+        diag_error(start, "'%s' takes %d parameters but the limit is %d%s", src_name, pn,
+                   max_params,
                    ret_is_aggregate ? " (a struct-returning function spends one on the result"
                                           " buffer)"
                                     : "");
@@ -2816,30 +4672,66 @@ static Stmt *parse_func(Parser *p) {
         hidden->name = arena_strdup(p->arena, "$ret");
         hidden->type = type_ptr(&p->ty, ret);
         hidden->slot = declare_var(p, "$ret", hidden->type);
+        /* The hidden result buffer is written by the return sequence, not named
+         * in source, so it is never "used" by name. */
+        mark_synth(p, "$ret");
         np[0] = hidden;
         params = np;
         pn++;
     }
 
+    /* A nested function gets no pre-scan -- that only walks top-level tokens --
+     * so its signature is filed here, under the mangled symbol, before the body
+     * is read. Doing it first is what lets the body call itself. */
+    if (nested) {
+        int ivis = ret_is_aggregate ? 1 : 0;
+        int invis = pn - ivis;
+        Type **cpt = arena_alloc_array(p->arena, (size_t)(invis > 0 ? invis : 1), sizeof(Type *));
+        for (int i = 0; i < invis; i++)
+            cpt[i] = params[ivis + i]->type;
+        add_sig(p, name, ret, cpt, invis, is_ext);
+        /* Pushed onto the list the enclosing function is using, not a fresh one:
+         * the body has to resolve its own name, and a fresh list would discard
+         * the mapping on the way out of parse_func. The mapping outlives this
+         * parse_func call so calls that follow the declaration still find it. */
+        LocalFn *lf = arena_alloc(p->arena, sizeof *lf);
+        lf->name = src_name;
+        lf->sym = name;
+        lf->next = p->local_fns;
+        p->local_fns = lf;
+    }
+
     Stmt *fn = new_stmt(p, S_FUNC, start);
     fn->fname = name;
+    fn->src_fname = src_name;
     fn->ret_type = ret;
     fn->params = params;
     fn->nparams = pn;
+    /* A struct-returning function's parameter 0 is the hidden result buffer, so
+     * the first one a reader can match to the source is 1. */
+    fn->vis_start = ret_is_aggregate ? 1 : 0;
     fn->is_ext = is_ext;
     fn->is_extern = is_extern;
     fn->is_export = is_export;
     if (is_export && at(p, T_SEMI))
         diag_error(start, "'export' function '%s' needs a body; use 'extern' to declare a C "
                           "function",
-                   name);
+                   src_name);
     if (at(p, T_SEMI) || is_extern) {
         /* Declaration only. Nothing is emitted; the pre-scan already recorded
          * the signature. */
+        if (nested && !is_extern)
+            diag_error(start, "a function declared inside another function needs a body; "
+                              "a body-less declaration only makes sense at the top level");
         if (is_extern && at(p, T_LBRACE))
-            diag_error(start, "'extern' function '%s' cannot have a body", name);
+            diag_error(start, "'extern' function '%s' cannot have a body", src_name);
         else
             expect_semi(p);
+        /* There is no body, so nothing in this scope can ever be referenced.
+         * Claiming the parameters are unused would be reporting on C code we
+         * have not seen. */
+        for (Var *v = p->scope->vars; v != NULL; v = v->next)
+            v->is_synth = 1;
         fn->fbody = NULL;
         fn->is_extern = is_extern;
         fn->locals_bytes = 0;
@@ -2901,10 +4793,150 @@ static Stmt *parse_func(Parser *p) {
     p->scope = saved_scope;
     p->next_offset = saved_slot;
     p->cur_ret = saved_ret;
+    /* The mapping a nested function pushed belongs to the *enclosing* function:
+     * its scope runs to the end of that function, so calls after the declaration
+     * still find it. Only leaving the scope that owns it clears the list, and
+     * that is this function's own `saved_local_fns` when the function being left
+     * is a top-level one. A nested function's exit must not clear it. */
+    if (!nested)
+        p->local_fns = saved_local_fns;
+
+    /* Every variable a lambda in this body captured is now known, so the slots
+     * that hold boxes can be marked before codegen ever sees the tree. Done
+     * after the body is complete and the scope is gone, so the marks are the
+     * final word on which slots are indirect. */
+    /* A function that returns a lambda has a closure, not a bare code address,
+     * and the two are called differently: a closure carries an environment in the
+     * second word of its cell and the call site has to pass it. The static type
+     * has to say so, or a caller cannot generate the right call.
+     *
+     * A `fn` and a `closure` are different types and are called differently, so
+     * a function that hands one back has to say which it is. Declaring `fn` and
+     * returning a lambda is an error naming the right spelling. */
+    if (is_kind(fn->ret_type, TK_FNPTR) && body_returns_closure(fn->fbody)) {
+        diag_error(fn->span,
+                   "'%s' returns a lambda, so its return type must be "
+                   "'closure(...) -> ...' rather than 'fn(...) -> ...'",
+                   fn->fname);
+    }
+
+    if (p->ncaptured > 0) {
+        mark_boxed_stmt(p, fn->fbody);
+        /* A captured parameter is a capture like any other: its slot holds a box,
+         * so the prologue has to box the incoming value rather than store it
+         * straight into the frame. mark_boxed_stmt does not see parameters --
+         * they are not in the body -- so they are marked here. */
+        for (int i = fn->vis_start; i < fn->nparams; i++) {
+            for (int k = 0; k < p->ncaptured; k++) {
+                if (p->captured[k]->offset == fn->params[i]->slot) {
+                    fn->params[i]->boxed = 1;
+                    break;
+                }
+            }
+        }
+    }
+    /* Closed-form loops, once the body is complete: the pass reads variables, so
+     * it cannot run before the whole function has been parsed. */
+    if (fn->fbody != NULL)
+        close_form_stmts(p, &fn->fbody, 1);
+
+    if (saved_ncaptured > 0)
+        memcpy(p->captured, saved_captured, (size_t)saved_ncaptured * sizeof(Var));
+    p->ncaptured = saved_ncaptured;
+    p->cur_owner = saved_owner;
 
     if (strcmp(name, "main") == 0)
         fn->is_entry = 1;
+
+    /* A nested function is not emitted where it was written: it is queued with
+     * the other hoisted functions and emitted alongside them, under its mangled
+     * symbol. Its declaration site produces no code of its own. */
+    if (nested)
+        add_pending(p, fn);
     return fn;
+}
+
+/* interface Name { ret m(params); ... }
+ *
+ * A declaration only: the body is semicolon-terminated signatures, and which
+ * types satisfy it is decided per use rather than declared. That is what lets a
+ * struct implement an interface without naming it -- a struct has no vtable of
+ * its own, so a declared `struct S : I` would have nowhere to put the methods.
+ *
+ * The order of the methods is the contract. A call resolves a name to an index
+ * here, once, and every implementing type lays its itab out in this same order.
+ */
+static Stmt *parse_interface_decl(Parser *p) {
+    Span start = cur(p)->span;
+    advance(p); /* 'interface' */
+    if (!at(p, T_IDENT)) {
+        diag_error(cur(p)->span, "expected interface name after 'interface'");
+        return new_stmt(p, S_EXPR, start);
+    }
+    char *name = cur(p)->text;
+    advance(p);
+    IfaceDef *id = type_define_iface(&p->ty, name);
+    /* A pre-scan already built the method list, so that a signature naming this
+     * interface -- and a call resolving one of its methods -- could work above the
+     * declaration. The members are about to be read again, so start over rather
+     * than append. */
+    if (id != NULL && id->prescanned) {
+        id->prescanned = 0;
+        id->methods = NULL;
+        id->nmethods = 0;
+    }
+    if (!match(p, T_LBRACE)) {
+        diag_error(cur(p)->span, "expected '{' to open interface body");
+        return new_stmt(p, S_EXPR, start);
+    }
+    while (!at(p, T_RBRACE) && !at(p, T_EOF)) {
+        Type *ret = parse_type(p);
+        if (ret == NULL) {
+            diag_error(cur(p)->span, "expected a return type in interface body");
+            break;
+        }
+        if (!at(p, T_IDENT)) {
+            diag_error(cur(p)->span, "expected a method name in interface body");
+            break;
+        }
+        char *mname = cur(p)->text;
+        advance(p);
+        if (!match(p, T_LPAREN)) {
+            diag_error(cur(p)->span, "expected '(' after method name");
+            break;
+        }
+        Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+        int np = 0;
+        if (!at(p, T_RPAREN)) {
+            for (;;) {
+                if (np >= Z_MAX_ARGS) {
+                    diag_error(cur(p)->span, "'%s' takes too many parameters", mname);
+                    break;
+                }
+                Type *pt = parse_type(p);
+                if (pt == NULL || !at(p, T_IDENT)) {
+                    diag_error(cur(p)->span, "expected a parameter type and name");
+                    break;
+                }
+                advance(p); /* parameter name; an interface has no body to read */
+                ptypes[np++] = pt;
+                if (!match(p, T_COMMA))
+                    break;
+            }
+        }
+        match(p, T_RPAREN);
+        if (iface_find_method(id, mname) != NULL) {
+            diag_error(start, "interface '%s' already requires '%s'", name, mname);
+        } else {
+            iface_add_method(&p->ty, id, mname, type_fnptr(&p->ty, ptypes, np, ret));
+        }
+        if (!match(p, T_SEMI))
+            break;
+    }
+    if (!match(p, T_RBRACE)) {
+        diag_error(cur(p)->span, "expected '}' to close interface body");
+    }
+    return new_stmt(p, S_BLOCK, start);
 }
 
 /* foreach (T x in coll) body  ->  a hidden index-based while loop. */
@@ -2935,23 +4967,42 @@ static Stmt *parse_foreach(Parser *p, Span start) {
     Expr *coll = parse_expr(p);
     match(p, T_RPAREN);
 
-    if (!is_kind(coll->type, TK_ARRAY) && !is_kind(coll->type, TK_PTR)) {
+    /* Only an array. A pointer has no length -- there is nothing for the
+     * loop's bound to compare against -- and reading `ptr.length` off one
+     * yields the pointer's own address, which used to turn a `foreach` over a
+     * `T*` into an unbounded walk into unrelated memory. To walk part of an
+     * array, use an explicit index loop. */
+    if (!is_kind(coll->type, TK_ARRAY)) {
         if (!is_unk(coll->type)) {
-            diag_error(start, "foreach requires an array or pointer, got %s",
-                       type_name(&p->ty, coll->type));
+            if (is_kind(coll->type, TK_PTR))
+                diag_error(start,
+                           "cannot foreach over '%s': a pointer has no length, so there is no "
+                           "bound to iterate to; use an index loop over the array instead",
+                           type_name(&p->ty, coll->type));
+            else
+                diag_error(start, "foreach requires an array, got %s",
+                           type_name(&p->ty, coll->type));
         }
-        Stmt *dummy = parse_stmt(p);
-        return dummy;
+        /* The body is skipped rather than parsed: nothing in it can be
+         * meaningful once the collection is rejected, and parsing it would bury
+         * the one real diagnostic under a pile of undefined-name errors. */
+        match(p, T_SEMI);
+        skip_braced_block(p);
+        return new_stmt(p, S_BLOCK, start);
     }
 
     /* Loop variables live in their own scope. */
     scope_push(p);
     char hname[32];
-    snprintf(hname, sizeof hname, "__arr%d", p->foreach_counter);
+    int loop_id = p->foreach_counter++;
+    /* __arr/__fi are this desugaring's own bookkeeping and are never named in
+     * source, so they are exempt from -Wunused-local. */
+    snprintf(hname, sizeof hname, "__arr%d", loop_id);
     int arr_slot = declare_var(p, hname, coll->type);
-    snprintf(hname, sizeof hname, "__fi%d", p->foreach_counter);
-    p->foreach_counter++;
+    mark_synth(p, hname);
+    snprintf(hname, sizeof hname, "__fi%d", loop_id);
     int idx_slot = declare_var(p, hname, type_int(&p->ty));
+    mark_synth(p, hname);
     int elem_slot = declare_var(p, name, infer ? coll->type->base : et);
 
     /* Build the desugared loop by hand (normal parser helpers would redeclare
@@ -3075,6 +5126,9 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     this_var->name = arena_strdup(p->arena, "this");
     this_var->type = this_ty;
     this_var->slot = declare_var(p, "this", this_ty);
+    /* The receiver is reached through every unqualified field and method name,
+     * so a method that never writes `this` is still using it. */
+    mark_synth(p, "this");
     params[pn++] = this_var;
     p->cur_msd = sd;
     p->cur_this = this_var;
@@ -3118,7 +5172,7 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
 
     {
         int agg = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
-        int max_params = agg ? Z_MAX_ARGS_STRUCT_RET : Z_MAX_ARGS;
+        int max_params = Z_MAX_ARGS;
         if (nexplicit > max_params) {
             diag_error(start, "method '%s' takes %d parameters but the limit is %d%s", mname,
                        nexplicit, max_params,
@@ -3135,6 +5189,9 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
         hidden->name = arena_strdup(p->arena, "$ret");
         hidden->type = type_ptr(&p->ty, ret);
         hidden->slot = declare_var(p, "$ret", hidden->type);
+        /* The hidden result buffer is written by the return sequence, not named
+         * in source, so it is never "used" by name. */
+        mark_synth(p, "$ret");
         np[0] = hidden;
         params = np;
         pn++;
@@ -3145,9 +5202,14 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
 
     Stmt *fn = new_stmt(p, S_FUNC, start);
     fn->fname = mangled;
+    fn->src_fname = arena_strdup(p->arena, mname);
     fn->ret_type = ret;
     fn->params = params;
     fn->nparams = pn;
+    /* A method's parameter 0 is the receiver, and a struct-returning one pushes
+     * the hidden result buffer in front of that, so neither is a parameter a
+     * reader can match to the source. */
+    fn->vis_start = params[0] != NULL && strcmp(params[0]->name, "$ret") == 0 ? 2 : 1;
     if (match(p, T_FATARROW)) {
         Expr *e = parse_expr(p);
         Stmt *ret_st = new_stmt(p, S_RETURN, start);
@@ -3172,8 +5234,18 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
         for (int i = 0; i < nexplicit; i++)
             ptypes[i] = params[i + 1 + regoff]->type;
     }
-    StructMethod *m = arena_alloc(p->arena, sizeof *m);
-    m->name = arena_strdup(p->arena, mname);
+    /* A pre-scan may already have registered this method's signature so that
+     * code above the declaration could see the type has the method -- which is
+     * how a struct declared later can still satisfy an interface. Fill that entry
+     * in rather than adding a second one, or the method would be emitted twice
+     * and found twice. */
+    StructMethod *m = struct_find_method(sd, mname);
+    if (m == NULL || m->body != NULL) {
+        m = arena_alloc(p->arena, sizeof *m);
+        m->name = arena_strdup(p->arena, mname);
+        m->vtable_index = -1;
+        struct_add_method(&p->ty, sd, m);
+    }
     m->ret = ret;
     m->ptypes = ptypes;
     m->nparams = nexplicit;
@@ -3181,7 +5253,6 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     m->is_virtual = is_virtual;
     m->is_override = is_override;
     m->vtable_index = -1;
-    struct_add_method(&p->ty, sd, m);
 
     scope_pop(p);
     p->scope = saved_scope;
@@ -3206,6 +5277,16 @@ static Stmt *parse_enum_decl(Parser *p) {
     UnionDef *ud = type_define_union(&p->ty, name);
     if (ud == NULL) {
         diag_error(start, "enum '%s' is already defined", name);
+    }
+    /* A pre-scan already built the variant list, so that a `match` above this
+     * declaration could check exhaustiveness. Rebuild it rather than appending:
+     * the variants are about to be read again. */
+    if (ud != NULL && ud->prescanned) {
+        ud->prescanned = 0;
+        ud->variants = NULL;
+        ud->nvariants = 0;
+        ud->size = 0;
+        ud->align = 0;
     }
     if (!match(p, T_LBRACE)) {
         diag_error(cur(p)->span, "expected '{' to open enum body");
@@ -3300,6 +5381,12 @@ static Expr *parse_match(Parser *p, Span start) {
             break;
         }
 
+        /* Each arm gets its own scope for its payload bindings. They are only
+         * frame slots as far as codegen is concerned, so the scope is purely a
+         * name-resolution device -- and without it two arms binding `v` collide,
+         * which matters for Result because matching one is two arms whose
+         * bindings naturally want the same names. */
+        scope_push(p);
         int bcap = 4, bn = 0;
         int *slots = NULL;
         if (match(p, T_LPAREN)) {
@@ -3324,6 +5411,13 @@ static Expr *parse_match(Parser *p, Span start) {
                 if (ft == NULL)
                     ft = type_int(&p->ty);
                 slots[bn] = declare_var(p, bname, ft);
+                /* `_` is a binding that is deliberately not read. It still needs
+                 * a slot -- the arm's payload is copied into one either way -- but
+                 * it is not a name, so it is not a use and must not be warned
+                 * about. This is how an arm discards the payload it does not
+                 * need, which with a per-arm scope is now the common case. */
+                if (strcmp(bname, "_") == 0)
+                    mark_synth(p, bname);
                 bn++;
                 if (!match(p, T_COMMA))
                     break;
@@ -3342,6 +5436,7 @@ static Expr *parse_match(Parser *p, Span start) {
             diag_error(cur(p)->span, "expected '=>' in match arm");
         }
         Expr *body = parse_expr(p);
+        scope_pop(p);
         if (restype == NULL)
             restype = body->type;
         else if (!is_unk(restype) && !is_unk(body->type) && !type_equals(restype, body->type)) {
@@ -3392,6 +5487,20 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
     StructDef *sd = type_define_struct(&p->ty, name);
     if (sd == NULL) {
         diag_error(start, "%s '%s' is already defined", is_class ? "class" : "struct", name);
+    }
+    /* A pre-scan already gave this declaration its fields, so that code above it
+     * in the file could use it. Start the field list over: the members are about
+     * to be read again, and appending to the pre-scanned list would double every
+     * field and make every offset wrong. */
+    if (sd != NULL && sd->prescanned) {
+        sd->prescanned = 0;
+        sd->fields = NULL;
+        sd->nfields = 0;
+        sd->props = NULL;
+        sd->nprops = 0;
+        sd->prop_cap = 0;
+        sd->size = 0;
+        sd->align = 1;
     }
     if (sd != NULL && is_class) {
         sd->is_class = 1;
@@ -3504,6 +5613,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
             tv->name = arena_strdup(p->arena, "this");
             tv->type = sty ? type_ptr(&p->ty, sty) : NULL;
             tv->slot = declare_var(p, "this", tv->type);
+            mark_synth(p, "this");
             p->cur_msd = sd;
             p->cur_this = tv;
             Expr *e = parse_expr(p);
@@ -3562,6 +5672,20 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
 
 static Stmt *parse_stmt(Parser *p) {
     Token *t = cur(p);
+
+    /* A function declared inside another function, written where a statement
+     * goes. `at_func_decl` requires a type, then a name, then '(', so this
+     * cannot swallow `print(x);` (no leading type), `var v = 1;` (`var` is not a
+     * type token), or `P p = ...;` (an '=' where the '(' would be). It also
+     * tolerates a leading `extern`/`export`, which parse_func then rejects. */
+    if (at_func_decl(p)) {
+        parse_func(p, 1);
+        /* The declaration emits nothing where it stands; the function is emitted
+         * as a hoisted one, under a symbol of its own. An empty block is the
+         * honest shape for a statement that produces no code. */
+        return new_stmt(p, S_BLOCK, t->span);
+    }
+
     switch (t->kind) {
     case T_KW_IF: {
         Span start = t->span;
@@ -3642,7 +5766,14 @@ static Stmt *parse_stmt(Parser *p) {
         if (at(p, T_SEMI)) {
             s->expr = NULL;
         } else {
+            /* The function's return type tells `Ok(...)`/`Err(...)` what to
+             * build, which is what makes `return Ok(3);` work unannotated. */
+            Type *saved_expect = p->expect_result;
+            p->expect_result = type_is_result(p->cur_ret) ? p->cur_ret : NULL;
             s->expr = parse_expr(p);
+            p->expect_result = saved_expect;
+            if (is_kind(p->cur_ret, TK_IFACE))
+                s->expr = to_iface(p, s->expr, p->cur_ret, start);
             if (!is_unk(s->expr->type) && !is_unk(p->cur_ret) &&
                 !type_equals(s->expr->type, p->cur_ret)) {
                 diag_error(start, "cannot return '%s' from function returning '%s'",
@@ -3658,6 +5789,25 @@ static Stmt *parse_stmt(Parser *p) {
         return parse_var_decl(p);
     case T_KW_CONST:
         return parse_const_decl(p);
+    /* A type declared inside a function. It is queued with the other hoisted
+     * declarations rather than emitted where it stands: a class's vtable is
+     * emitted by walking the top-level items, so a local class that stayed in
+     * this body would have no vtable and a virtual call through it would jump
+     * through a null slot. The declaration itself produces no code, so the
+     * statement it parsed to is an empty block. */
+    case T_KW_INTERFACE: {
+        Stmt *s = parse_interface_decl(p);
+        add_pending(p, s);
+        return new_stmt(p, S_BLOCK, t->span);
+    }
+    case T_KW_CLASS:
+    case T_KW_STRUCT:
+    case T_KW_ENUM: {
+        Stmt *s = at(p, T_KW_ENUM) ? parse_enum_decl(p)
+                                    : parse_struct_decl(p, at(p, T_KW_CLASS));
+        add_pending(p, s);
+        return new_stmt(p, S_BLOCK, t->span);
+    }
     case T_KW_BREAK: {
         Span bs = t->span;
         advance(p);
@@ -3678,10 +5828,23 @@ static Stmt *parse_stmt(Parser *p) {
         break;
     }
 
+    /* An explicitly typed local: `Type name = expr;`.
+     *
+     * This used to be reachable only for the keyword types. A named type -- the
+     * spelling a struct is declared and used with -- never got here: the code
+     * below treated any leading identifier as an unknown type and reported it
+     * without a lookup, so `P r = new P();` could not be written at all, and
+     * `P* q = null;` fell through to the expression parser and read as a
+     * variable named `P`. Both are fixed by resolving the name first. */
+    if (at_typed_decl(p) && base_type_or_name(p, cur(p)) != NULL)
+        return parse_var_decl(p);
+
     if (is_type_token(cur(p)->kind)) {
         return parse_var_decl(p);
     }
-    if (t->kind == T_IDENT && peek(p, 1)->kind == T_IDENT) {
+    if (t->kind == T_IDENT && at_typed_decl(p)) {
+        /* The name is in declaration position but is not a type. Say which one,
+         * then skip the declaration so the rest of the block still parses. */
         diag_error(t->span, "unknown type '%s'", t->text);
         int guard = 0;
         while (!at(p, T_SEMI) && !at(p, T_EOF) && guard++ < 256)
@@ -3698,7 +5861,8 @@ static Stmt *parse_stmt(Parser *p) {
     return s;
 }
 
-Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) {
+Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings,
+                    int opt_level) {
     Parser p;
     memset(&p, 0, sizeof p);
     p.arena = arena;
@@ -3707,8 +5871,10 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
     typectx_init(&p.ty, arena);
     p.strings = strings;
     p.cur_ret = NULL;
+    p.opt_level = opt_level;
 
     prescan_struct_names(&p);
+    prescan_struct_fields(&p);
     prescan_signatures(&p);
 
     Stmt *program = new_stmt(&p, S_BLOCK, cur(&p)->span);
@@ -3729,7 +5895,7 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
             cap = ncap;
         }
         if (at_func_decl(&p)) {
-            Stmt *fn = parse_func(&p);
+            Stmt *fn = parse_func(&p, 0);
             if (fn->is_entry)
                 has_main = 1;
             items[n++] = fn;
@@ -3737,6 +5903,8 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
             items[n++] = parse_struct_decl(&p, 1); /* a class decl */
         } else if (at(&p, T_KW_STRUCT)) {
             items[n++] = parse_struct_decl(&p, 0); /* a type decl, not a statement */
+        } else if (at(&p, T_KW_INTERFACE)) {
+            items[n++] = parse_interface_decl(&p);
         } else if (at(&p, T_KW_ENUM)) {
             items[n++] = parse_enum_decl(&p); /* a type decl, not a statement */
         } else if (at(&p, T_KW_CONST)) {
@@ -3749,6 +5917,16 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
             top_stmts++;
         }
     }
+
+    /* A lambda marks the captured declarations in the body of the function that
+     * encloses it, and it does that by walking an S_BLOCK. Top-level statements
+     * are appended to `items` one at a time and only gathered into a block below,
+     * after the whole file is read, so nothing walked them: a `var` a lambda
+     * captured kept no box, and the closure's environment read the raw frame slot
+     * that the initializer was supposed to fill. No parse_func runs for a
+     * top-level program, so p->captured is still the whole file's list here. */
+    for (int i = 0; i < n; i++)
+        mark_boxed_stmt(&p, items[i]);
 
     /* Append monomorphized generic instances so codegen emits them. */
     for (int i = 0; i < p.npending; i++) {
@@ -3796,6 +5974,480 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings) 
 
     program->items = items;
     program->nitems = n;
+    /* Inlining runs over the finished program, so a call is inlinable no matter
+     * which order the two functions were written in, and the synthesized entry is
+     * a function like any other as far as it is concerned. */
     scope_pop(&p);
     return program;
 }
+
+/* ---- closed-form induction variables ----
+ *
+ * A counted loop whose body only accumulates loop-invariant amounts has a value
+ * computable without running the loop:
+ *
+ *     var sum = 0; var i = 0;
+ *     while (i < 20000000) { sum = sum + 82; i = i + 1; }
+ *
+ * adds 82 twenty million times, which is `sum = 82 * 20000000` written once. The
+ * loop disappears. The body of that loop is invariant, so this is the limit of
+ * what loop-invariant code motion can do -- it hoists the pieces, and this
+ * notices there is nothing left to run.
+ *
+ * It runs as a tree rewrite in the parser rather than as a code-generation
+ * trick, so everything downstream -- the register allocator, constant folding,
+ * the strength reducer -- sees the finished statement and optimizes it for free.
+ * In the example the result is a product of two constants, which the folder then
+ * evaluates outright.
+ *
+ * The pattern is deliberately narrow. Every condition below is there because
+ * getting it wrong is a wrong answer, not a missed speedup:
+ *
+ *   - the step is `i = i + C` or `i -= C` with C a nonzero constant;
+ *   - the condition compares that same variable against a bound with `<`, `<=`,
+ *     `>` or `>=`, and the bound does not change in the body;
+ *   - the body is a straight-line run of `x = x + E`, `x = x - E`, `x += E`,
+ *     `x -= E` and plain `x = E`, where x is a scalar local that is not the
+ *     induction variable;
+ *   - no contribution reads the induction variable, the accumulators, or the
+ *     trip count, so each iteration really does add the same amount;
+ *   - nothing in the body calls, allocates, or branches, and there is no `break`
+ *     or `continue` -- an early exit means the trip count is not this one.
+ *
+ * Overflow behaves as it did: the closed form computes the same total the loop
+ * would have, so a loop that overflowed was already outside what Z defines. */
+
+#define CLOSE_FORM_MAX_ACC 8
+#define CLOSE_FORM_MAX_VARS 16
+
+typedef struct {
+    int slot;
+    char *name;
+    Type *type;
+    Expr *amount; /* the signed contribution of one iteration */
+    /* The statement's own left-hand side, reused as the assignment target rather
+     * than looked up again: this pass runs after the function's scope has been
+     * popped, so a lookup by name would find nothing. */
+    Expr *target;
+} CloseFormAcc;
+
+/* 1 when `e` reads any slot in `variant`, which is what stops it being
+ * loop-invariant. A local's address counts as a read: the body could write
+ * through it. */
+static int expr_reads_any(Expr *e, const int *variant, int nvariant) {
+    if (e == NULL)
+        return 0;
+    if (e->kind == E_VAR) {
+        for (int i = 0; i < nvariant; i++)
+            if (variant[i] == e->slot)
+                return 1;
+        return 0;
+    }
+    if (expr_reads_any(e->lhs, variant, nvariant) || expr_reads_any(e->rhs, variant, nvariant))
+        return 1;
+    for (int i = 0; i < e->nargs; i++)
+        if (expr_reads_any(e->args[i], variant, nvariant))
+            return 1;
+    if (expr_reads_any(e->env, variant, nvariant))
+        return 1;
+    return 0;
+}
+
+/* Flattens an additive chain into the sum of everything it adds to the
+ * accumulator, discarding the accumulator itself.
+ *
+ *     sum = sum + a*b + c*d - (a + c)
+ *
+ * parses as a left-leaning tree of `+` and `-` rooted at `sum`, and the terms are
+ * a*b, c*d and -(a+c). Only the root has to be the variable: an interior `+` is a
+ * term in its own right, and `a + c` is just an expression that happens to add.
+ * Keeping the terms signed and summing them is what lets the loop be solved --
+ * the amount per iteration is a constant, and three separately-hoisted
+ * subexpressions would not say so.
+ *
+ * Returns 0 if any term reads the accumulator, which would make the contribution
+ * differ between iterations. `*out` accumulates the running sum and starts NULL. */
+static int flatten_accum(Parser *p, Expr *e, int slot, int neg, Span span, Expr **out,
+                         int *found_base) {
+    if (e == NULL)
+        return 0;
+    if (e->kind == E_VAR) {
+        /* The accumulator itself contributes nothing -- that is the base the
+         * chain is rooted at. A *different* variable here is an ordinary term:
+         * `sum + a` has `a` in exactly this position. A stray read of the
+         * accumulator further along is caught below as a term that reads it,
+         * which is what makes `x = x * E` and `x = x + x` both fail. */
+        if (e->slot == slot) {
+            *found_base = 1;
+            return 1;
+        }
+    }
+    if (e->kind == E_BINARY && (e->op == T_PLUS || e->op == T_MINUS)) {
+        int rneg = neg;
+        if (e->op == T_MINUS)
+            rneg = !neg;
+        if (!flatten_accum(p, e->lhs, slot, neg, span, out, found_base))
+            return 0;
+        return flatten_accum(p, e->rhs, slot, rneg, span, out, found_base);
+    }
+    /* A term. It must be an integer, or the algebra below does not hold: `s = s +
+     * "x"` looks exactly like an accumulate, and multiplying a string by the trip
+     * count is not a thing. And it must not read the accumulator, or the amount
+     * would depend on how many times the loop has already run. */
+    if (!is_kind(e->type, TK_INT) || expr_reads_any(e, &slot, 1))
+        return 0;
+    Expr *term = e;
+    if (neg) {
+        Expr *zero = new_expr(p, E_INT, span);
+        zero->type = type_int(&p->ty);
+        term = make_binary(p, T_MINUS, zero, e, span);
+    }
+    *out = *out == NULL ? term : make_binary(p, T_PLUS, *out, term, span);
+    return 1;
+}
+
+/* Matches one accumulate-into-a-local statement and reduces it to the signed
+ * amount it adds per iteration.
+ *
+ *   `x += E` / `x = x + E`  -> +E
+ *   `x -= E` / `x = x - E`  -> -E
+ *
+ * Returns 0 for anything else, including a compound form that is not additive
+ * (`x = x * E` would need a power, `x = x / E` a logarithm) and a plain `x = E`,
+ * whose result does not depend on the trip count at all. */
+static int close_form_match(Parser *p, Stmt *st, CloseFormAcc *acc) {
+    if (st == NULL || st->kind != S_EXPR || st->expr == NULL || st->expr->kind != E_ASSIGN)
+{ fprintf(stderr, "MATCH fail 1\n"); return 0; }
+    Expr *a = st->expr;
+    if (a->lhs == NULL || a->lhs->kind != E_VAR || a->lhs->slot <= 0)
+{ fprintf(stderr, "MATCH fail 2\n"); return 0; }
+    if (is_kind(a->lhs->type, TK_STRUCT) || is_kind(a->lhs->type, TK_UNION) ||
+        is_kind(a->lhs->type, TK_ARRAY) || is_kind(a->lhs->type, TK_PTR) ||
+        is_kind(a->lhs->type, TK_F64))
+{ fprintf(stderr, "MATCH fail 3\n"); return 0; }
+    Expr *amount = NULL;
+    if (a->compound) {
+        if (a->op != T_PLUS && a->op != T_MINUS)
+{ fprintf(stderr, "MATCH fail 4\n"); return 0; }
+        if (expr_reads_any(a->rhs, &a->lhs->slot, 1))
+{ fprintf(stderr, "MATCH fail 5\n"); return 0; }
+        if (a->op == T_MINUS) {
+            Expr *zero = new_expr(p, E_INT, st->span);
+            zero->type = type_int(&p->ty);
+            amount = make_binary(p, T_MINUS, zero, a->rhs, st->span);
+        } else {
+            amount = a->rhs;
+        }
+    } else {
+        /* `x = <chain rooted at x>` and nothing else. A self-update that is not
+         * additive has the same shape, so the flatten below is what rejects it:
+         * `x = x * E` reaches it as a term that reads x. */
+        int found_base = 0;
+        if (!flatten_accum(p, a->rhs, a->lhs->slot, 0, st->span, &amount, &found_base) ||
+            !found_base)
+            return 0; /* not rooted at the accumulator: a plain set, not an update */
+        if (amount == NULL)
+            return 0; /* `x = x`: nothing accumulates */
+    }
+    acc->slot = a->lhs->slot;
+    acc->name = a->lhs->name;
+    acc->type = a->lhs->type;
+    acc->amount = amount;
+    acc->target = a->lhs;
+    return 1;
+}
+
+/* The induction variable, its stride, and the bound, from a loop's step and
+ * condition. Returns 1 on a match. */
+static int close_form_trip(Parser *p, Stmt *loop, Expr *step_in, int *ivar, long long *stride,
+                           Expr **bound, int *strict) {
+    /* A `for` carries its step in the header; a `while` carries it as the last
+     * statement of its body, which the caller peels off and passes in. */
+    Expr *step = step_in != NULL ? step_in : loop->for_step;
+    if (step == NULL || step->kind != E_ASSIGN)
+        return 0;
+    if (step->lhs == NULL || step->lhs->kind != E_VAR)
+        return 0;
+    int slot = step->lhs->slot;
+    if (slot <= 0 || step->rhs == NULL)
+        return 0;
+    /* Four spellings of the same step, all a self-update by a constant:
+     *
+     *     i = i + C    i = i - C    i += C    i -= C
+     *
+     * The compound forms carry the operator on the assignment node and the bare
+     * amount on the right; the spelled-out forms carry it on a binary node whose
+     * left has to be the same variable, since `i = j + 1` walks a different one
+     * and its trip count is not a stride. `i = i` is a zero stride and is
+     * rejected below, along with a non-constant amount. */
+    long long c = 0;
+    if (step->compound) {
+        if (step->op != T_PLUS && step->op != T_MINUS)
+            return 0;
+        long long d;
+        if (!const_fold_static(p, step->rhs, &d))
+            return 0;
+        c = step->op == T_MINUS ? -d : d;
+    } else if (step->rhs->kind == E_VAR) {
+        if (step->rhs->slot != slot || !const_fold_static(p, step->rhs, &c))
+            return 0;
+    } else if (step->rhs->kind == E_BINARY && step->rhs->lhs != NULL &&
+               step->rhs->lhs->kind == E_VAR && step->rhs->lhs->slot == slot &&
+               (step->rhs->op == T_PLUS || step->rhs->op == T_MINUS)) {
+        long long d;
+        if (!const_fold_static(p, step->rhs->rhs, &d))
+            return 0;
+        c = step->rhs->op == T_MINUS ? -d : d;
+    } else {
+        return 0;
+    }
+    if (c == 0)
+        return 0; /* a zero stride never terminates */
+    Expr *cond = loop->cond;
+    if (cond == NULL || cond->kind != E_BINARY)
+        return 0;
+    Expr *cv = NULL;
+    Expr *cb = NULL;
+    switch (cond->op) {
+    case T_LT:
+    case T_LE:
+        cv = cond->lhs;
+        cb = cond->rhs;
+        *strict = cond->op == T_LT;
+        break;
+    case T_GT:
+    case T_GE:
+        cv = cond->lhs;
+        cb = cond->rhs;
+        *strict = cond->op == T_GT;
+        c = -c; /* a downward loop, so the stride is negative */
+        break;
+    default:
+        return 0;
+    }
+    if (cv == NULL || cb == NULL || cv->kind != E_VAR || cv->slot != slot)
+        return 0;
+    *ivar = slot;
+    *stride = c;
+    *bound = cb;
+    return 1;
+}
+
+/* Applies close_form_loop to every loop in a function body, innermost first, so
+ * that a closed form computed for an inner loop is visible to an enclosing one's
+ * analysis. An inner loop that collapses leaves an ordinary block of assignments
+ * behind, which the enclosing pass then sees as accumulate statements and can
+ * close over in turn. */
+static void close_form_stmts(Parser *p, Stmt **items, int n) {
+    for (int i = 0; i < n; i++) {
+        Stmt *s = items[i];
+        if (s == NULL)
+            continue;
+        switch (s->kind) {
+        case S_BLOCK:
+            close_form_stmts(p, s->items, s->nitems);
+            continue;
+        case S_FOR:
+        case S_WHILE:
+            close_form_stmts(p, s->body != NULL && s->body->kind == S_BLOCK ? s->body->items
+                                                                            : NULL,
+                             s->body != NULL && s->body->kind == S_BLOCK ? s->body->nitems : 0);
+            break;
+        case S_IF:
+            close_form_stmts(p, s->body != NULL && s->body->kind == S_BLOCK ? s->body->items
+                                                                            : NULL,
+                             s->body != NULL && s->body->kind == S_BLOCK ? s->body->nitems : 0);
+            break;
+        default:
+            continue;
+        }
+        Stmt *replaced = close_form_loop(p, s, items, i);
+        if (replaced != s)
+            items[i] = replaced;
+    }
+}
+
+/* Rewrites a counted accumulate loop into its closed form, or returns it
+ * unchanged. */
+static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_index) {
+    if (p->opt_level < 2)
+return loop;
+    if (loop->kind != S_FOR && loop->kind != S_WHILE)
+return loop;
+    /* A `while` keeps its step in the body, so peel it off and count only what is
+     * left as the body's accumulators. The trip count does not include the step,
+     * which runs one extra time -- as it does in the original loop. */
+    Stmt *wbody = loop->body;
+    int peel = 0;
+    Expr *step_expr = NULL;
+    if (loop->kind == S_WHILE) {
+        if (wbody == NULL || wbody->kind != S_BLOCK || wbody->nitems < 1)
+return loop;
+        Stmt *last = wbody->items[wbody->nitems - 1];
+        if (last->kind != S_EXPR || last->expr == NULL || last->expr->kind != E_ASSIGN)
+return loop;
+        step_expr = last->expr;
+        peel = 1;
+    }
+    int ivar;
+    long long stride;
+    Expr *bound = NULL;
+    int strict = 0;
+    if (!close_form_trip(p, loop, step_expr, &ivar, &stride, &bound, &strict))
+return loop;
+    long long limit;
+    if (!const_fold_static(p, bound, &limit))
+return loop;
+
+    Stmt *body = loop->body;
+    if (body == NULL)
+return loop;
+    /* Only a straight-line block. A nested loop, a branch or a `break` means the
+     * trip count is not the one computed here. */
+    if (body->kind != S_BLOCK)
+return loop;
+    int nbody = body->nitems - peel;
+
+    /* Collect the accumulators, and the slots the body writes, so a later
+     * contribution can be checked against them. */
+    CloseFormAcc accs[CLOSE_FORM_MAX_ACC];
+    int nacc = 0;
+    int written[CLOSE_FORM_MAX_VARS];
+    int nwritten = 0;
+
+    for (int i = 0; i < nbody; i++) {
+        Stmt *st = body->items[i];
+        if (st->kind == S_BREAK || st->kind == S_CONTINUE || st->kind == S_RETURN)
+return loop;
+        if (st->kind != S_EXPR) {
+            /* A declaration or a nested control-flow statement: not this shape. */
+            /* A declaration, a nested loop or any other control flow: not this
+             * shape. (S_EXPR and the loop kinds are all that reach here.) */
+return loop;
+        }
+        CloseFormAcc one;
+        if (!close_form_match(p, st, &one))
+return loop;
+        if (one.slot == ivar)
+            return loop; /* the loop variable is also an accumulator */
+        if (nwritten < CLOSE_FORM_MAX_VARS)
+            written[nwritten++] = one.slot;
+        int found = -1;
+        for (int k = 0; k < nacc; k++)
+            if (accs[k].slot == one.slot)
+                found = k;
+        if (found >= 0) {
+            /* Two updates to one accumulator in one iteration: add them, which is
+             * exact for integers and is what the loop would have done. */
+            accs[found].amount = make_binary(p, T_PLUS, accs[found].amount, one.amount, st->span);
+        } else {
+            if (nacc >= CLOSE_FORM_MAX_ACC)
+return loop;
+            accs[nacc++] = one;
+        }
+    }
+    if (nacc == 0)
+return loop;
+
+    /* Every contribution must be the same on every iteration: it may not read the
+     * induction variable, nor an accumulator, since the value of an accumulator
+     * changes each iteration. */
+    for (int k = 0; k < nacc; k++) {
+        if (expr_reads_any(accs[k].amount, &ivar, 1))
+return loop;
+        if (expr_reads_any(accs[k].amount, written, nwritten))
+return loop;
+    }
+
+    /* Trip count. The start has to be a constant: it is the one number this
+     * cannot otherwise recover. A `for` that declares its own loop variable
+     * carries it in the initializer; a `while` leaves it wherever the preceding
+     * statements put it, so scan backwards for the nearest write to it. */
+    long long start = 0;
+    int have_start = 0;
+    if (loop->for_init != NULL && loop->for_init->kind == S_VAR &&
+        loop->for_init->init != NULL && loop->for_init->init->kind == E_INT &&
+        loop->for_init->slot == ivar) {
+        start = loop->for_init->init->ival;
+        have_start = 1;
+    }
+    if (!have_start && siblings != NULL) {
+        /* Only the *nearest* write counts. An earlier one whose value is not a
+         * constant would make any guess wrong, so the search stops there. The
+         * induction variable is known by now, which matters: a scan that did not
+         * know it latched onto whichever local it saw first. */
+        for (int k = sib_index - 1; k >= 0 && !have_start; k--) {
+            Stmt *prev = siblings[k];
+            if (prev == NULL)
+                continue;
+            if (prev->kind == S_VAR && prev->slot == ivar) {
+                if (prev->init != NULL && prev->init->kind == E_INT) {
+                    start = prev->init->ival;
+                    have_start = 1;
+                }
+                break;
+            }
+            if (prev->kind == S_EXPR && prev->expr != NULL && prev->expr->kind == E_ASSIGN &&
+                prev->expr->lhs != NULL && prev->expr->lhs->kind == E_VAR &&
+                prev->expr->lhs->slot == ivar) {
+                if (!prev->expr->compound && prev->expr->rhs != NULL &&
+                    prev->expr->rhs->kind == E_INT) {
+                    start = prev->expr->rhs->ival;
+                    have_start = 1;
+                }
+                break;
+            }
+        }
+    }
+    if (!have_start)
+        return loop;
+
+    long long span = limit - start;
+    long long n;
+    if (stride > 0) {
+        if (span <= 0)
+            return loop; /* the loop never runs: the trip count is 0, and the
+                          * code below assumes at least one iteration */
+        n = strict ? (span + stride - 1) / stride : span / stride + 1;
+    } else {
+        if (span >= 0)
+return loop;
+        long long d = -stride;
+        long long sp = -span;
+        n = strict ? (sp + d - 1) / d : sp / d + 1;
+    }
+    if (n < 1)
+return loop;
+
+    /* Build the replacement: a run of statements assigning each accumulator its
+     * closed form, in place of the loop. */
+    int cap = nacc + 1;
+    Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
+    int nitems = 0;
+    Expr *count = new_expr(p, E_INT, loop->span);
+    count->type = type_int(&p->ty);
+    count->ival = n;
+
+    for (int k = 0; k < nacc; k++) {
+        Expr *scaled = make_binary(p, T_STAR, accs[k].amount, count, loop->span);
+        Expr *cur = accs[k].target;
+        Expr *sum = make_binary(p, T_PLUS, cur, scaled, loop->span);
+        if (sum->type == NULL)
+            sum->type = accs[k].type;
+        Expr *asg = new_expr(p, E_ASSIGN, loop->span);
+        asg->lhs = cur;
+        asg->rhs = sum;
+        asg->type = accs[k].type;
+        Stmt *st = new_stmt(p, S_EXPR, loop->span);
+        st->expr = asg;
+        items[nitems++] = st;
+    }
+    if (nitems == 0)
+return loop;
+    Stmt *blk = new_stmt(p, S_BLOCK, loop->span);
+    blk->items = items;
+    blk->nitems = nitems;
+    return blk;
+}
+
+

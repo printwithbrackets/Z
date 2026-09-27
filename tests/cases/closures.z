@@ -1,0 +1,107 @@
+// Closures: a lambda that captures nothing, a lambda that captures a local, and
+// one that outlives the frame that made it.
+
+struct Point { int x; int y; }
+
+int Twice(this int n) { return n * 2; }
+
+int applyTwice(closure(int) -> int f, int v) { return f(f(v)); }
+
+closure(int) -> int makeAdder(int n) {
+    var add = (int x) => x + n;
+    return add;
+}
+
+int main() {
+    // ---- capturing nothing ----
+    var add = (int a, int b) => a + b;
+    print(add(2, 3));
+    var zero = () => 42;
+    print(zero());
+    // The member access must still win over a fraction: the '.' is followed by a
+    // letter, not a digit.
+    print(21.Twice());
+
+    // ---- capturing a local, and sharing it ----
+    // Both the closure and the function that made it must see the same counter.
+    // A counter that only moved inside the lambda would report 0 here.
+    var count = 0;
+    var bump = () => {
+        count = count + 1;
+        return count;
+    };
+    print(bump());
+    print(bump());
+    print(count);
+
+    // ---- outliving the frame ----
+    // The captured value has to be on the heap: by the time this runs, the frame
+    // of makeAdder is gone.
+    var escape = makeAdder(10);
+    print(escape(5));
+    print(escape(1));
+    print(applyTwice(escape, 1));
+
+    // ---- each lambda captures its own copy ----
+    // Three lambdas built in one function, each over a different local. If the
+    // environment were shared, all three would report the same number.
+    var k0 = 0;
+    var k1 = 1;
+    var k2 = 2;
+    var f0 = (int x) => x * 10 + k0;
+    var f1 = (int x) => x * 10 + k1;
+    var f2 = (int x) => x * 10 + k2;
+    print(f0(1));
+    print(f1(1));
+    print(f2(1));
+
+    // ---- a lambda over a float, and one over a struct field ----
+    var scale = (float f) => f * 2.0;
+    print(scale(1.5));
+    var pt = new Point(3, 4);
+    var getX = () => pt.x;
+    print(getX());
+
+    // ---- a lambda passed straight to a call ----
+    print(applyTwice((int v) => v + 1, 5));
+
+    // ---- more than eight lambdas in one function ----
+    // add_pending grows its array by allocating a new one, and a grow that
+    // forgets to copy leaves the first eight pointing at garbage. Eight worked
+    // and nine crashed the compiler, so this has to run past that boundary.
+    var l1 = (int x) => x + 1;
+    var l2 = (int x) => x + 2;
+    var l3 = (int x) => x + 3;
+    var l4 = (int x) => x + 4;
+    var l5 = (int x) => x + 5;
+    var l6 = (int x) => x + 6;
+    var l7 = (int x) => x + 7;
+    var l8 = (int x) => x + 8;
+    var l9 = (int x) => x + 9;
+    print(l9(0));
+    print(l1(0) + l2(0) + l3(0) + l4(0) + l5(0) + l6(0) + l7(0) + l8(0) + l9(0));
+
+    // ---- a captured constant ----
+    // Constant propagation drops the store for a plain local because every read
+    // is inlined. A captured local is different: its slot holds a pointer to a
+    // heap cell that the closure's environment reads, so the box still has to be
+    // built even though the value was folded. This read 0 or garbage before.
+    var konst = 41;
+    var readConst = () => konst + 1;
+    print(readConst());
+
+    // ---- more than eight returns in one lambda body ----
+    var many = (int x) => {
+        if (x < 2) { return 100; }
+        if (x < 4) { return 200; }
+        if (x < 6) { return 300; }
+        if (x < 8) { return 400; }
+        if (x < 10) { return 500; }
+        if (x < 12) { return 600; }
+        if (x < 14) { return 700; }
+        return 800;
+    };
+    print(many(0));
+    print(many(13));
+    return 0;
+}
