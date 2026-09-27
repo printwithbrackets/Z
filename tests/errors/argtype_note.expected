@@ -1,0 +1,2 @@
+argument 2 of 'add' expects 'int' but got 'string'
+'add' is declared int add(int, int)

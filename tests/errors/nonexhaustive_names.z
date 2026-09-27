@@ -1,0 +1,6 @@
+enum Shape { Circle(int r), Square(int side), Tri(int b, int h) }
+
+int area(Shape s) => match s {
+    Circle(r) => 3 * r * r,
+    Square(side) => side * side
+};

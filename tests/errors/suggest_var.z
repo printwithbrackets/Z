@@ -1,0 +1,6 @@
+// A name one keystroke away is the single most common way to fail to compile,
+// and a bare "undefined variable" gives the reader nothing to go on.
+void tally(int n) {
+    int total_count = 0;
+    total_counts = total_count + n;
+}

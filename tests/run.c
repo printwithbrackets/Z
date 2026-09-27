@@ -114,6 +114,8 @@ int main(int argc, char **argv) {
         "nested_fn_capture", "fn_reads_toplevel_var", "nested_fn_extern", "nested_fn_no_body",
         "result_mismatch", "result_no_ret", "result_ambiguous", "result_too_big",
         "iface_missing_method", "iface_bad_signature", "iface_nonvirtual", "iface_no_method",
+        "suggest_var", "suggest_method", "suggest_type", "nonexhaustive_names", "enclosing_fn",
+        "sig_note", "argtype_note",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -330,6 +332,53 @@ int main(int argc, char **argv) {
                 fail++;
             } else {
                 printf("ok   warnflag %s\n", flagcases[i].label);
+                pass++;
+            }
+        }
+    }
+
+    /* Diagnostic output shape. The same file is compiled three ways and each
+     * rendering is checked for the properties a consumer depends on: `gcc` is
+     * one line per problem and per note and nothing else, `json` is one object
+     * per line carrying a stable code and an explicit span, and `--color=never`
+     * puts no escape sequence in the output when it is not wanted. */
+    {
+        static const struct {
+            const char *label;
+            const char *flag;
+            const char *must_contain;
+            const char *must_not_contain;
+        } shape[] = {
+            {"gcc is one line per problem", "--error-format=gcc", "note: did you mean", NULL},
+            {"gcc drops the source frame", "--error-format=gcc", "undefined variable", "|"},
+            {"json carries a code and a span", "--error-format=json",
+             "\"code\":\"undefined_variable\"", "\n  "},
+            {"json puts the note inside the object", "--error-format=json",
+             "\"notes\":[{\"message\":\"did you mean", NULL},
+            {"color=never emits no escape codes", "--color=never", "undefined variable", "\033["},
+            {"color=always emits them", "--color=always", "\033[", NULL},
+            {"an unknown format is a usage error", "--error-format=nope", "unknown --error-format",
+             NULL},
+        };
+        snprintf(path, sizeof path, "%s/suggest_var.z", err_dir);
+        for (size_t i = 0; i < sizeof shape / sizeof(*shape); i++) {
+            snprintf(cmd, sizeof cmd, "%s build %s -o /dev/null %s %s 2>&1", zc, path, opt_flag(),
+                     shape[i].flag);
+            char actual[1 << 16];
+            int rc = run_cmd_capture(cmd, actual, sizeof actual);
+            int ok = strstr(actual, shape[i].must_contain) != NULL;
+            if (shape[i].must_not_contain != NULL &&
+                strstr(actual, shape[i].must_not_contain) != NULL)
+                ok = 0;
+            /* A bad --error-format value is a usage error (2), not a compile
+             * error (1), because nothing was compiled. */
+            int want_rc = strstr(shape[i].label, "usage error") != NULL ? 2 : 1;
+            if (!ok || rc != want_rc) {
+                fprintf(stderr, "FAIL diagfmt %s (rc=%d)\n--- actual ---\n%s\n", shape[i].label, rc,
+                        actual);
+                fail++;
+            } else {
+                printf("ok   diagfmt %s\n", shape[i].label);
                 pass++;
             }
         }

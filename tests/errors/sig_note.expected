@@ -1,0 +1,2 @@
+'clamp_to' expects 3 arguments but got 2
+'clamp_to' is declared int clamp_to(int, int, int)

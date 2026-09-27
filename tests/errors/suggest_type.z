@@ -1,0 +1,6 @@
+struct Vector { int x; int y; }
+
+void go() {
+    var v = new Vecotr(1, 2);
+    print(v.x);
+}

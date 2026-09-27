@@ -1,0 +1,13 @@
+class Bag {
+    int[] items;
+    int used;
+    Bag() { items = new int[4]; used = 0; }
+    void Push(int v) { items[used++] = v; }
+    int Size() { return used; }
+}
+
+void go() {
+    var b = new Bag();
+    b.puch(1);
+    print(b.size());
+}

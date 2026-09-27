@@ -17,11 +17,17 @@ if !executable(s:z)
   let s:z = "z"
 endif
 
-execute "setlocal makeprg=" . escape(s:z, " ") . '\ build\ %:S'
+" --error-format=gcc asks for one `file:line:col: severity: message` line per
+" problem and per note, and nothing else. That is the shape errorformat wants,
+" so the quickfix list needs no multi-line state machine and each note becomes
+" its own entry -- a "did you mean" line that can be jumped to directly.
+"
+" --color=never because the quickfix list is not the terminal, and escape codes
+" in a message are literal characters in it.
+execute "setlocal makeprg=" .. escape(s:z, " ")
+      \ .. " build\ %:S --error-format=gcc --color=never"
 
-" Diagnostics look like `file:line:col: error: msg`, followed by the source
-" line and a caret line; the trailing `%-G%m` discards those two.
-setlocal errorformat=%f:%l:%c:\ error:\ %m,%-G%m
+setlocal errorformat=%f:%l:%c:\ %t%*[^:]:\ %m
 
 let b:undo_ftplugin = get(b:, "undo_ftplugin", "") .. "|setl makeprg< errorformat<"
 

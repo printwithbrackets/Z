@@ -1,0 +1,5 @@
+int clamp_to(int value, int low, int high) { return value; }
+
+void go() {
+    print(clamp_to(1, 2));
+}

@@ -334,23 +334,36 @@ question is, because picking the wrong answer is the expensive way to find out.
   language whose imports all share one global namespace distributes name
   collisions instead of fixing them.
 
-- **M14 (planned): error message quality.** Diagnostics carry a file, line,
-  column and a caret, and the error tests pin their text — but the messages are
-  written to be *correct* rather than to be *read*. A reader who mistypes a
-  name gets "undefined name 'foo'" and no idea that `foo` is three characters
-  away; one who passes the wrong type gets the type mismatch and nothing about
-  which argument was wrong or what was expected there.
-
-  Concretely: a "did you mean" suggestion from edit distance over the names in
-  scope, which is a few lines over a symbol table the compiler already builds;
-  the name of the function or method the error is inside, so a message in a
-  hundred-line body is locatable; the *constraint* that was violated rather
-  than only the violation ("a `struct` cannot be returned by value across the C
-  boundary" is the model — it says what to do); and a note when the failing call
-  is inside a loop, a lambda, or a macro-like expansion, where the span points
-  at generated text. Colour on a tty, none when redirected or piped, and a
-  machine-readable format so an editor can put the squiggle under the right word
-  without scraping prose.
+- **M14 (done): error message quality.** A diagnostic now carries the three
+  things that were missing: what the reader was probably trying to write, where
+  they were when they wrote it, and what the constraint actually was.
+  - **"Did you mean"** over the names in scope, by edit distance. A wrong-case
+    name always suggests, an extension or prefix (`helper` for `main_helper`)
+    outranks a one-edit match because a human would say nothing else, and the
+    candidate list is split by what the name is — a *type* position never
+    suggests a function, because naming something that is not a type is worse
+    than saying nothing. Covers undefined variables, functions, types, methods,
+    fields and match variants.
+  - **The enclosing function or method is named** in every message, so a report
+    in a hundred-line body is locatable. A message inside a lambda or inside a
+    monomorphized generic also says *that*, and points at the line the lambda
+    started on or the call that asked for the instance — because the span in
+    the message points at text the reader wrote somewhere else entirely.
+  - **The constraint, not only the violation.** An argument type error and an
+    arity error both print the declaration they violated
+    (`'add' is declared int add(int, int)`), and a non-exhaustive `match` names
+    the variants it does not handle instead of counting them.
+  - **Cascades are suppressed.** `print(ghost)` used to report both the
+    undefined name and `print expects 'int' but got <null>`; the second is a
+    second complaint about one mistake, and it buries the first.
+  - **Colour** on a terminal, off when redirected or piped, forced with
+    `--color=always|never|auto`, and off under `NO_COLOR`.
+  - **`--error-format=human|gcc|json`.** `gcc` is one line per problem and one
+    per note, which is what an editor's error parser already wants. `json` is
+    one object per line with a stable `code`, an explicit span in both line/col
+    and byte offset, and the notes inline — so an editor can put a squiggle
+    under the right word without scraping prose. The Vim plugin uses the `gcc`
+    form, which makes each note its own quickfix entry.
 
 ### Known miscompiles found and fixed
 

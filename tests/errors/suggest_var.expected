@@ -1,0 +1,3 @@
+undefined variable 'total_counts'
+did you mean the variable 'total_count'?
+in function 'tally'

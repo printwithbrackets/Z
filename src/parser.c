@@ -691,6 +691,131 @@ static int align_up(int n, int a) {
     return (n + a - 1) / a * a;
 }
 
+/* Every name a reader could have meant at the point they wrote one: the
+ * variables in scope, the constants, the functions and the type names.
+ *
+ * "undefined variable 'gt'" is true and useless on its own -- the reader has a
+ * name they typed one character away and no way to learn what it was. This
+ * collects the candidates so diag_suggest can find it. The list is bounded and
+ * deduplicated by `out_used` because the same function is a candidate for both
+ * an undefined variable and an undefined type, and a repeated entry can only
+ * make the distance look better than it is. */
+/* Candidate names for a "did you mean", split by what kind of name the reader
+ * was reaching for.
+ *
+ * The split is the point. Offering `char_at` when someone wrote `char` in type
+ * position, or `len` when they wrote `Vec`, is worse than saying nothing: the
+ * name is *there* in the message, and it is not a type, so the reader's next
+ * move is to wonder what is wrong with the compiler. Each list holds only names
+ * that would actually have worked in the position. */
+typedef enum { SK_VALUE, SK_TYPE, SK_FUNC } SuggKind;
+
+#define MAX_SUGGEST 512
+static int collect_names(Parser *p, SuggKind kind, const char **out, int cap) {
+    int n = 0;
+    /* The type and value lists are disjoint, and the function list gets a
+     * reserved tail so the built-ins always fit. */
+    int limit = cap - 24;
+    if (kind == SK_FUNC) {
+        for (int i = 0; i < p->nsigs && n < limit; i++) {
+            if (p->sigs[i].name[0] != '$')
+                out[n++] = p->sigs[i].name;
+        }
+        /* The built-in names are candidates too, and they live in no table the
+         * parser owns -- they are the two macros in limits.h, reached through
+         * the same lookup a call site uses. */
+#define Z_ADD_BUILTIN(nm, sym, ret, ps)                                                       \
+    if (n < cap)                                                                              \
+    out[n++] = nm;
+        Z_BUILTIN_LIST(Z_ADD_BUILTIN)
+#undef Z_ADD_BUILTIN
+#define Z_ADD_INTRIN(nm, k)                                                                   \
+    if (n < cap)                                                                              \
+    out[n++] = nm;
+        Z_INTRINSIC_LIST(Z_ADD_INTRIN)
+#undef Z_ADD_INTRIN
+        /* Local functions are registered under a mangled name; the name as
+         * written is what the reader can type, so recover it. */
+        for (LocalFn *f = p->local_fns; f != NULL && n < cap; f = f->next)
+            out[n++] = f->name;
+        return n;
+    }
+    if (kind == SK_VALUE) {
+        for (Scope *s = p->scope; s != NULL; s = s->parent) {
+            for (Var *v = s->vars; v != NULL && n < limit; v = v->next) {
+                /* The desugarer's own temporaries are not suggestions: nobody
+                 * meant to type `$env`. */
+                if (v->name == NULL || v->name[0] == '$' || v->name[0] == '\0')
+                    continue;
+                out[n++] = v->name;
+            }
+            if (s->is_fn_body)
+                break;
+        }
+        for (int i = 0; i < p->nconsts && n < limit; i++)
+            out[n++] = p->consts[i].name;
+    } else {
+        for (int i = 0; i < p->ty.nstructs && n < limit; i++)
+            out[n++] = p->ty.structs[i]->name;
+        for (int i = 0; i < p->ty.nunion && n < limit; i++)
+            out[n++] = p->ty.unions[i]->name;
+        for (int i = 0; i < p->ty.niface && n < limit; i++)
+            out[n++] = p->ty.ifaces[i]->name;
+    }
+    return n;
+}
+
+/* Queues the "did you mean" note for a name the compiler could not resolve.
+ * `what` is the word the note uses for the kind of thing. */
+static void suggest_in_scope(Parser *p, SuggKind kind, const char *what, const char *name) {
+    const char *cands[MAX_SUGGEST];
+    int n = collect_names(p, kind, cands, MAX_SUGGEST);
+    diag_suggest_note(what, name, cands, n);
+}
+
+/* The struct behind a type that may or may not be a pointer to one, or NULL. */
+static StructDef *sdef_of(Type *t) {
+    if (is_kind(t, TK_STRUCT))
+        return t->sdef;
+    if (is_kind(t, TK_PTR) && is_kind(t->base, TK_STRUCT))
+        return t->base->sdef;
+    return NULL;
+}
+
+/* Every name reachable with `.` on a type: fields, auto-property backing
+ * fields, and methods. A member lookup that fails is the other place a reader
+ * is one keystroke from the right answer, and the list is short enough that
+ * offering the whole set is more useful than picking one. */
+#define MAX_MEMBERS 256
+static int collect_member_names(StructDef *sd, const char **out, int cap) {
+    int n = 0;
+    if (sd == NULL)
+        return 0;
+    for (int i = 0; i < sd->nfields && n < cap; i++)
+        out[n++] = sd->fields[i].name;
+    for (int i = 0; i < sd->nprops && n < cap; i++)
+        out[n++] = sd->props[i].name;
+    for (int i = 0; i < sd->nmethods && n < cap; i++)
+        out[n++] = sd->methods[i]->name;
+    /* A subclass can reach everything its base declares, and a reader who
+     * cannot see a member usually looked for it on the base type. */
+    for (StructDef *b = sd->base; b != NULL && n < cap; b = b->base) {
+        for (int i = 0; i < b->nfields && n < cap; i++)
+            out[n++] = b->fields[i].name;
+        for (int i = 0; i < b->nprops && n < cap; i++)
+            out[n++] = b->props[i].name;
+        for (int i = 0; i < b->nmethods && n < cap; i++)
+            out[n++] = b->methods[i]->name;
+    }
+    return n;
+}
+
+static void suggest_member(StructDef *sd, const char *what, const char *name) {
+    const char *cands[MAX_MEMBERS];
+    int n = collect_member_names(sd, cands, MAX_MEMBERS);
+    diag_suggest_note(what, name, cands, n);
+}
+
 /* The symbol a call to `name` should reach. A function declared inside another
  * one was emitted under a mangled name, and its signature is filed under that
  * same mangled name, so both the lookup and the emitted call have to go through
@@ -808,6 +933,36 @@ static Sig *find_sig(Parser *p, const char *name) {
             return &p->sigs[i];
     }
     return NULL;
+}
+
+/* Renders a declared signature the way the reader wrote it, as a buffer in the
+ * arena.
+ *
+ * "argument 2 of 'read' expects 'int' but got 'string'" states the violation.
+ * It does not state the constraint, and a constraint is what tells you what to
+ * do: the reader has to go and look the declaration up to find out what `read`
+ * wanted and whether the 2 is even a parameter. Putting the declaration in the
+ * message is the difference between reporting a problem and handing over the
+ * thing needed to fix it. */
+static char *sig_text(Parser *p, const char *name, const Sig *s) {
+    size_t cap = 64;
+    for (int i = 0; i < s->nparams; i++)
+        cap += 32;
+    char *buf = arena_alloc(p->arena, cap);
+    size_t off = 0;
+    if (s->ret != NULL)
+        off += (size_t)snprintf(buf, cap, "%s ", type_name(&p->ty, s->ret));
+    off += (size_t)snprintf(buf + off, cap - off, "%s(", name);
+    for (int i = 0; i < s->nparams && off < cap; i++) {
+        if (i > 0)
+            off += (size_t)snprintf(buf + off, cap - off, ", ");
+        if (off < cap)
+            off += (size_t)snprintf(buf + off, cap - off, "%s",
+                                    s->ptypes[i] ? type_name(&p->ty, s->ptypes[i]) : "?");
+    }
+    if (off < cap)
+        snprintf(buf + off, cap - off, ")");
+    return buf;
 }
 
 /* Given a token index that begins a type, returns the index just past it. */
@@ -2157,7 +2312,13 @@ static char *instantiate(Parser *p, Generic *g, Type **concrete, Span span) {
 
     p->pos = g->tok_start;
     p->in_instantiate = 1;
+    /* A diagnostic raised while re-parsing the template points at a span in the
+     * template, which is a different place from the call that caused it. Saying
+     * which instance this is, and where it was asked for, is the difference
+     * between a message the reader can act on and one they have to guess at. */
+    diag_push_ctx(DIAG_CTX_INSTANCE, mangled, span);
     Stmt *inst = parse_func(p, 0);
+    diag_pop_ctx();
     p->in_instantiate = 0;
     inst->fname = mangled;
     inst->is_generic_template = 0;
@@ -2294,10 +2455,14 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
             return e;
         }
         Type *at0 = args[0]->type;
-        if (!is_kind(at0, TK_INT) && !is_kind(at0, TK_BOOL) && !is_kind(at0, TK_STRING) &&
-            !is_kind(at0, TK_F64)) {
-            diag_error(span, "print expects 'int', 'bool', 'float' or 'string' but got %s",
-                       type_name(&p->ty, at0));
+        /* An unknown type means the argument already failed to compile and the
+         * real error has been reported. Saying anything about it here is a
+         * second complaint about one mistake, and it buries the first. */
+        if (!is_unk(at0) && !is_kind(at0, TK_INT) && !is_kind(at0, TK_BOOL) &&
+            !is_kind(at0, TK_STRING) && !is_kind(at0, TK_F64)) {
+            diag_error_code(span, "type_mismatch",
+                            "print expects 'int', 'bool', 'float' or 'string' but got '%s'",
+                            type_name(&p->ty, at0));
         }
         e->type = type_void(&p->ty);
         return e;
@@ -2444,14 +2609,16 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
     const char *sym = resolve_fn_sym(p, name);
     Sig *s = find_sig(p, sym);
     if (s == NULL) {
-        diag_error(span, "undefined function '%s'", name);
+        suggest_in_scope(p, SK_FUNC, "function", name);
+        diag_error_code(span, "undefined_function", "undefined function '%s'", name);
         e->type = NULL;
         return e;
     }
     e->name = arena_strdup(p->arena, sym);
     if (s->nparams != n) {
-        diag_error(span, "'%s' expects %d argument%s but got %d", name, s->nparams,
-                   s->nparams == 1 ? "" : "s", n);
+        diag_note("'%s' is declared %s", name, sig_text(p, name, s));
+        diag_error_code(span, "wrong_arity", "'%s' expects %d argument%s but got %d", name,
+                        s->nparams, s->nparams == 1 ? "" : "s", n);
         e->type = NULL;
         return e;
     }
@@ -2461,6 +2628,7 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         e->type = NULL;
         return e;
     }
+    int said_sig = 0;
     for (int i = 0; i < n; i++) {
         /* A concrete value going to an interface parameter is boxed on the way
          * in, so the conversion is made before the types are compared. */
@@ -2468,8 +2636,20 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
             args[i] = to_iface(p, args[i], s->ptypes[i], args[i]->span);
         if (!is_unk(args[i]->type) && !is_unk(s->ptypes[i]) &&
             !type_equals(args[i]->type, s->ptypes[i])) {
-            diag_error(args[i]->span, "argument %d of '%s' expects '%s' but got '%s'", i + 1, name,
-                       type_name(&p->ty, s->ptypes[i]), type_name(&p->ty, args[i]->type));
+            /* Every wrong argument is reported -- fixing one and rebuilding to
+             * discover the next is a worse loop than being told all at once --
+             * but the declaration is shown once, since repeating it under each
+             * one turns a diagnosis into a wall. */
+            if (!said_sig) {
+                diag_note("'%s' is declared %s", name, sig_text(p, name, s));
+                said_sig = 1;
+            }
+            if (type_widens_to(s->ptypes[i], args[i]->type))
+                diag_note("an 'int' converts to a 'float' implicitly; the reverse "
+                          "truncates, so it needs an explicit 'float(x)'");
+            diag_error_code(args[i]->span, "type_mismatch",
+                            "argument %d of '%s' expects '%s' but got '%s'", i + 1, name,
+                            type_name(&p->ty, s->ptypes[i]), type_name(&p->ty, args[i]->type));
         }
     }
     e->type = s->ret;
@@ -2634,7 +2814,9 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 !at(p, T_LPAREN)) {
                 StructMethod *bm = struct_find_method(st->sdef, name);
                 if (bm == NULL) {
-                    diag_error(span, "type %s has no method '%s'", st->sdef->name, name);
+                    suggest_member(st->sdef, "method", name);
+                    diag_error_code(span, "no_such_method", "type %s has no method '%s'",
+                                    st->sdef->name, name);
                     e = new_expr(p, E_INT, span);
                     e->type = NULL;
                     continue;
@@ -2679,7 +2861,9 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
             if (at(p, T_LPAREN) && is_kind(st, TK_STRUCT) && !fp_field) {
                 StructMethod *m = struct_find_method(st->sdef, name);
                 if (m == NULL) {
-                    diag_error(span, "type %s has no method '%s'", type_name(&p->ty, st), name);
+                    suggest_member(st->sdef, "method", name);
+                    diag_error_code(span, "no_such_method", "type %s has no method '%s'",
+                                    type_name(&p->ty, st), name);
                     while (!at(p, T_RPAREN) && !at(p, T_EOF))
                         advance(p);
                     match(p, T_RPAREN);
@@ -2827,7 +3011,9 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 if (is_kind(st, TK_STRUCT)) {
                     Field *fld = struct_find_field(st->sdef, name);
                     if (fld == NULL) {
-                        diag_error(span, "type %s has no field '%s'", type_name(&p->ty, st), name);
+                        suggest_member(st->sdef, "field or method", name);
+                        diag_error_code(span, "no_such_field", "type %s has no field '%s'",
+                                        type_name(&p->ty, st), name);
                         e = new_expr(p, E_INT, span);
                         e->type = NULL;
                     } else {
@@ -2840,8 +3026,9 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                     }
                 } else {
                     if (!is_unk(e->type)) {
-                        diag_error(span, "type %s has no field '%s'", type_name(&p->ty, e->type),
-                                   name);
+                        suggest_member(sdef_of(e->type), "field or method", name);
+                        diag_error_code(span, "no_such_field", "type %s has no field '%s'",
+                                        type_name(&p->ty, e->type), name);
                     }
                     e = new_expr(p, E_INT, span);
                     e->type = NULL;
@@ -2969,7 +3156,8 @@ static Expr *parse_new(Parser *p) {
         advance(p); /* '(' */
         Type *st = type_find_struct(&p->ty, sname);
         if (st == NULL) {
-            diag_error(start, "unknown type '%s'", sname);
+            suggest_in_scope(p, SK_TYPE, "type", sname);
+            diag_error_code(start, "unknown_type", "unknown type '%s'", sname);
             int guard = 0;
             while (!at(p, T_RPAREN) && !at(p, T_EOF) && guard++ < 256)
                 advance(p);
@@ -3417,7 +3605,8 @@ static Expr *parse_primary(Parser *p) {
                 if (c != NULL)
                     return parse_postfix(p, const_expr(p, c, span));
             }
-            diag_error(span, "undefined variable '%s'", name);
+            suggest_in_scope(p, SK_VALUE, "variable", name);
+            diag_error_code(span, "undefined_variable", "undefined variable '%s'", name);
             Expr *e = new_expr(p, E_VAR, span);
             e->name = name;
             e->type = NULL;
@@ -4387,6 +4576,12 @@ static Expr *parse_lambda(Parser *p, Span span) {
     match(p, T_RPAREN);
     match(p, T_FATARROW);
 
+    /* A diagnostic inside the body points at a span in the lambda, which is
+     * text the reader wrote but cannot see in the shape of the expression that
+     * contains it. Naming where the lambda starts is what makes the span
+     * findable. */
+    diag_push_ctx(DIAG_CTX_LAMBDA, "lambda", span);
+
     /* The body: a single expression, or a block the user wrote themselves. */
     Stmt *body_block;
     Type *ret;
@@ -4493,6 +4688,7 @@ static Expr *parse_lambda(Parser *p, Span span) {
     for (int i = 0; i < np; i++)
         stored[i] = ptypes[i];
     cl->type = type_closure(&p->ty, stored, np, ret);
+    diag_pop_ctx();
     return cl;
 }
 
@@ -4574,6 +4770,8 @@ static Stmt *parse_func(Parser *p, int nested) {
 
     Type *ret = parse_type(p);
     if (ret == NULL) {
+        if (cur(p)->kind == T_IDENT)
+            suggest_in_scope(p, SK_TYPE, "type", cur(p)->text);
         diag_error(cur(p)->span, "unknown type '%s'",
                    cur(p)->kind == T_IDENT ? cur(p)->text : token_kind_name(cur(p)->kind));
     }
@@ -4715,6 +4913,10 @@ static Stmt *parse_func(Parser *p, int nested) {
     fn->ret_type = ret;
     fn->params = params;
     fn->nparams = pn;
+    /* Anything diagnosed from here on is inside this function, and says so. A
+     * body-less declaration raises nothing, so the frame is pushed after the
+     * declaration-only case and popped on every way out. */
+    diag_push_ctx(DIAG_CTX_FUNC, src_name, start);
     /* A struct-returning function's parameter 0 is the hidden result buffer, so
      * the first one a reader can match to the source is 1. */
     fn->vis_start = ret_is_aggregate ? 1 : 0;
@@ -4745,6 +4947,7 @@ static Stmt *parse_func(Parser *p, int nested) {
         fn->locals_bytes = 0;
         p->ntbind = saved_ntbind;
         scope_pop(p);
+        diag_pop_ctx();
         return fn;
     }
     if (match(p, T_FATARROW)) {
@@ -4852,6 +5055,7 @@ static Stmt *parse_func(Parser *p, int nested) {
         memcpy(p->captured, saved_captured, (size_t)saved_ncaptured * sizeof(Var));
     p->ncaptured = saved_ncaptured;
     p->cur_owner = saved_owner;
+    diag_pop_ctx();
 
     if (strcmp(name, "main") == 0)
         fn->is_entry = 1;
@@ -5128,6 +5332,13 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     p->next_offset = 0;
     p->cur_ret = ret;
 
+    /* Qualified with the receiver, because a bare method name in a message
+     * ("has no method 'lenght'") does not say which type's method list was
+     * searched, and there may be ten. */
+    char ctxlabel[256];
+    snprintf(ctxlabel, sizeof ctxlabel, "%s.%s", sname, mname);
+    diag_push_ctx(DIAG_CTX_METHOD, ctxlabel, start);
+
     int pcap = 4, pn = 0;
     Expr **params = arena_alloc_array(p->arena, (size_t)pcap, sizeof(Expr *));
     Expr *this_var = new_expr(p, E_VAR, start);
@@ -5271,6 +5482,7 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     p->cur_ret = saved_ret;
     p->cur_msd = saved_msd;
     p->cur_this = saved_this;
+    diag_pop_ctx();
     return fn;
 }
 
@@ -5363,6 +5575,12 @@ static Expr *parse_match(Parser *p, Span start) {
     MatchArm *arms = arena_alloc_array(p->arena, (size_t)cap, sizeof(MatchArm));
     int covered = 0;
     int wildcard = 0;
+    /* Which variants an arm named, so the exhaustiveness diagnostic can list the
+     * ones still missing. "not exhaustive: 4 variants but 2 covered" makes the
+     * reader diff two lists themselves; naming the two tells them what to add. */
+    int nslots = (ud != NULL && ud->nvariants > 0) ? ud->nvariants : 1;
+    char *hit = arena_alloc_array(p->arena, (size_t)nslots, 1);
+    memset(hit, 0, (size_t)nslots);
     Type *restype = NULL;
     while (!at(p, T_RBRACE) && !at(p, T_EOF)) {
         VariantDef *v = NULL;
@@ -5381,11 +5599,19 @@ static Expr *parse_match(Parser *p, Span start) {
                 }
             }
             if (v == NULL) {
-                diag_error(start, "'%s' is not a variant of '%s'", vname,
-                           ud ? ud->name : "this match");
+                if (ud != NULL) {
+                    const char *vc[64];
+                    int nvc = ud->nvariants < 64 ? ud->nvariants : 64;
+                    for (int i = 0; i < nvc; i++)
+                        vc[i] = ud->variants[i].name;
+                    diag_suggest_note("variant", vname, vc, nvc);
+                }
+                diag_error_code(start, "no_such_variant", "'%s' is not a variant of '%s'", vname,
+                                ud ? ud->name : "this match");
                 v = NULL;
             } else {
                 covered++;
+                hit[v - ud->variants] = 1;
             }
         } else {
             diag_error(cur(p)->span, "expected a variant name or '_' in match arm");
@@ -5474,8 +5700,18 @@ static Expr *parse_match(Parser *p, Span start) {
     }
     /* Exhaustiveness: every variant must be covered (or a `_` wildcard). */
     if (ud != NULL && !wildcard && covered < ud->nvariants) {
-        diag_error(start, "match is not exhaustive: '%s' has %d variant%s but %d covered", ud->name,
-                   ud->nvariants, ud->nvariants == 1 ? "" : "s", covered);
+        /* One note naming each missing variant, so the list is where the reader
+         * is already looking rather than in a second diagnostic they have to
+         * match up by hand. */
+        for (int i = 0; i < ud->nvariants; i++) {
+            if (!hit[i])
+                diag_note("'%s' is not handled; add '%s%s' or a '_' arm", ud->variants[i].name,
+                          ud->variants[i].name,
+                          ud->variants[i].nfields > 0 ? "(...)" : "");
+        }
+        diag_error_code(start, "non_exhaustive_match",
+                        "match does not handle every variant of '%s': %d of %d covered", ud->name,
+                        covered, ud->nvariants);
     }
 
     Expr *e = new_expr(p, E_MATCH, start);
@@ -5856,7 +6092,8 @@ static Stmt *parse_stmt(Parser *p) {
     if (t->kind == T_IDENT && at_typed_decl(p)) {
         /* The name is in declaration position but is not a type. Say which one,
          * then skip the declaration so the rest of the block still parses. */
-        diag_error(t->span, "unknown type '%s'", t->text);
+        suggest_in_scope(p, SK_TYPE, "type", t->text);
+        diag_error_code(t->span, "unknown_type", "unknown type '%s'", t->text);
         int guard = 0;
         while (!at(p, T_SEMI) && !at(p, T_EOF) && guard++ < 256)
             advance(p);

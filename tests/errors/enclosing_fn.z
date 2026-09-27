@@ -1,0 +1,8 @@
+int helper(int x) { return x; }
+
+int outer(int a) {
+    int inner(int b) {
+        return b + missing_name;
+    }
+    return inner(a);
+}

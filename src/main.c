@@ -70,7 +70,8 @@ static int run_command(const char *cmd) {
 
 static void usage(void) {
     fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]\n"
-            "       [-w] [-Werror] [-Wno-<name>] [linker args...]\n"
+            "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
+            "       [linker args...]\n"
             "  -O0 naive codegen (no register allocation, no folding)\n"
             "  -O1 default: folding, register allocation, strength reduction\n"
             "  -O2 adds loop-invariant code motion\n"
@@ -79,7 +80,9 @@ static void usage(void) {
             "  -w         silence all warnings\n"
             "  -Werror    treat warnings as errors\n"
             "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
-            "            unreachable)\n");
+            "            unreachable, unused-import)\n"
+            "  --error-format=human|gcc|json  how to render diagnostics\n"
+            "  --color=auto|always|never       colour, auto = only on a terminal\n");
 }
 
 /* ---- imports ----
@@ -306,6 +309,13 @@ static int compile(const char *src, const char *exe, const char *asm_path,
     ntoks++;
 
     Stmt *program = parse_program(&arena, toks, ntoks, &strings, opt_level);
+    /* A summary line, because "there were 3 of those somewhere above" is the
+     * one thing a reader cannot work out by scrolling. Skipped in the
+     * machine-readable formats, where a line that is not a diagnostic would be
+     * a line a parser has to know to ignore. */
+    if (diag_get_format() == DIAG_FMT_HUMAN && diag_warning_count() > 0)
+        fprintf(stderr, "%d warning%s emitted.\n", diag_warning_count(),
+                diag_warning_count() == 1 ? "" : "s");
     if (diag_error_count() > 0) {
         arena_free(&arena);
         free(text);
@@ -409,6 +419,17 @@ int main(int argc, char **argv) {
         } else if (diag_set_warn_flag(argv[i])) {
             /* A warning flag we know. Anything else beginning -W falls through
              * to the linker untouched, as it always has. */
+        } else if (strncmp(argv[i], "--error-format=", 15) == 0) {
+            if (!diag_set_format_flag(argv[i] + 15)) {
+                fprintf(stderr, "z: unknown --error-format '%s' (human, gcc, json)\n",
+                        argv[i] + 15);
+                return 2;
+            }
+        } else if (strncmp(argv[i], "--color=", 8) == 0) {
+            if (!diag_set_color_flag(argv[i] + 8)) {
+                fprintf(stderr, "z: unknown --color '%s' (auto, always, never)\n", argv[i] + 8);
+                return 2;
+            }
         } else if (strncmp(argv[i], "-O", 2) == 0 && argv[i][2] >= '0' && argv[i][2] <= '9' &&
                    argv[i][3] == 0) {
             /* -O0..-O3. Anything else starting -O is not ours, so it falls
