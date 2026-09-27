@@ -1,0 +1,4 @@
+warning: 'neverRead' is declared but never used
+warning: 'unusedParam' is declared but never used
+warning: 'x' shadows a declaration in an enclosing scope
+warning: this statement can never run

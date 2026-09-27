@@ -45,17 +45,9 @@ static const char *text_for(Span span) {
 
 int diag_error_count(void) { return g_errors; }
 
-void diag_error(Span span, const char *fmt, ...) {
-    char msg[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(msg, sizeof msg, fmt, ap);
-    va_end(ap);
-
-    g_errors++;
-    fprintf(stderr, "%s:%d:%d: error: %s\n", span.file ? span.file : g_file, span.line, span.col,
-            msg);
-
+/* The rendered body shared by errors and warnings: echo the physical line
+ * containing span.start, then a caret run under the token. */
+static void show_excerpt(Span span) {
     const char *text = text_for(span);
     if (text == NULL)
         return;
@@ -84,4 +76,124 @@ void diag_error(Span span, const char *fmt, ...) {
     for (int i = 0; i < carets; i++)
         fputc('^', stderr);
     fputc('\n', stderr);
+}
+
+void diag_error(Span span, const char *fmt, ...) {
+    char msg[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+
+    g_errors++;
+    fprintf(stderr, "%s:%d:%d: error: %s\n", span.file ? span.file : g_file, span.line, span.col,
+            msg);
+    show_excerpt(span);
+}
+
+/* ---- warnings ----
+ *
+ * Every warning is on by default: a language whose type checker is strict is
+ * only worth the strictness if it also says something about the code that
+ * compiles. -w silences all of them, -Wno-<name> silences one, and -Werror
+ * turns them into errors so a build can insist on a clean compile.
+ */
+
+static const char *const warn_names[W_COUNT] = {
+    [W_UNUSED_LOCAL] = "unused-local",
+    [W_SHADOWED_LOCAL] = "shadowed-local",
+    [W_UNREACHABLE] = "unreachable",
+};
+
+/* Warnings default on; -w clears every bit, -Werror does not touch them. */
+static unsigned warn_enabled_mask = (1u << W_COUNT) - 1u;
+/* Kinds promoted to errors by -Werror=<name>. */
+static unsigned warn_error_mask = 0;
+/* Set by -Werror with no name. */
+static int warn_all_errors = 0;
+/* Set by -w, which outranks everything and also skips the checks themselves. */
+static int warn_silenced = 0;
+
+static int g_warnings = 0;
+
+const char *warn_kind_name(WarnKind kind) {
+    if (kind < 0 || kind >= W_COUNT)
+        return "?";
+    return warn_names[kind];
+}
+
+int warn_enabled(WarnKind kind) {
+    if (warn_silenced || kind < 0 || kind >= W_COUNT)
+        return 0;
+    return (warn_enabled_mask >> kind) & 1u;
+}
+
+int diag_warning_count(void) { return g_warnings; }
+
+void diag_warn(WarnKind kind, Span span, const char *fmt, ...) {
+    if (!warn_enabled(kind))
+        return;
+
+    char msg[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+
+    g_warnings++;
+
+    /* A promoted warning is an error in everything but its name, so that
+     * -Werror=unused-local reads as the error it is while -Wno-unused-local
+     * still matches the same name. */
+    int as_error = warn_all_errors || ((warn_error_mask >> kind) & 1u);
+    if (as_error)
+        g_errors++;
+
+    fprintf(stderr, "%s:%d:%d: %s: %s\n", span.file ? span.file : g_file, span.line, span.col,
+            as_error ? "error" : "warning", msg);
+    show_excerpt(span);
+}
+
+/* Resolves a -W name to its kind, or -1 when the name is not one of ours. */
+static int warn_kind_by_name(const char *name, size_t len) {
+    for (int i = 0; i < W_COUNT; i++) {
+        if (strlen(warn_names[i]) == len && strncmp(warn_names[i], name, len) == 0)
+            return i;
+    }
+    return -1;
+}
+
+int diag_set_warn_flag(const char *flag) {
+    if (strcmp(flag, "-w") == 0) {
+        warn_silenced = 1;
+        return 1;
+    }
+    if (strcmp(flag, "-Werror") == 0) {
+        warn_all_errors = 1;
+        return 1;
+    }
+    if (strncmp(flag, "-Werror=", 8) == 0) {
+        int k = warn_kind_by_name(flag + 8, strlen(flag + 8));
+        if (k < 0)
+            return 0;
+        /* Promoting a warning also un-silences it, so -w -Werror=x still
+         * reports x: asking for it by name is a request to see it. */
+        warn_error_mask |= 1u << k;
+        return 1;
+    }
+    if (strncmp(flag, "-Wno-", 5) == 0) {
+        int k = warn_kind_by_name(flag + 5, strlen(flag + 5));
+        if (k < 0)
+            return 0;
+        warn_enabled_mask &= ~(1u << k);
+        return 1;
+    }
+    if (strncmp(flag, "-W", 2) == 0) {
+        int k = warn_kind_by_name(flag + 2, strlen(flag + 2));
+        if (k < 0)
+            return 0;
+        warn_enabled_mask |= 1u << k;
+        return 1;
+    }
+    return 0;
 }

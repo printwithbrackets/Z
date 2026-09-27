@@ -1,0 +1,38 @@
+// Nothing here should warn, so a clean file stays quiet: the compiler's own
+// desugarings and hidden result buffers must not be reported.
+struct Pair {
+    int a;
+    int b;
+    int Sum() { return a + b; }
+}
+
+int sum(Pair* p) {
+    return p.a + p.b;
+}
+
+int addToTotal(int* total, int n) {
+    *total += n;
+    return *total;
+}
+
+// A struct-returning function spends a hidden register on its result buffer.
+Pair makePair(int a, int b) {
+    return new Pair(a, b);
+}
+
+void main() {
+    var fixed = new int[3];
+    for (var i = 0; i < 3; i++) {
+        fixed[i] = i;
+    }
+    var total = 0;
+    foreach (var v in fixed) {
+        total += v;
+    }
+    var p = makePair(1, 2);
+    print(sum(&p));
+    print(p.Sum());
+    print(addToTotal(&total, 10));
+    // A for-loop phase variable and an unused-looking `i` are both read.
+    print(i);
+}

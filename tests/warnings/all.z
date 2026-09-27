@@ -1,0 +1,26 @@
+// Every kind of warning the compiler can emit, in one file.
+
+int unusedLocal(int unusedParam) {
+    var neverRead = 1;
+    return 0;
+}
+
+int shadowing() {
+    var x = 1;
+    {
+        var x = 2;
+        print(x);
+    }
+    return x;
+}
+
+int unreachable() {
+    return 1;
+    print("never");
+}
+
+void main() {
+    print(unusedLocal(0));
+    print(shadowing());
+    print(unreachable());
+}
