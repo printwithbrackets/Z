@@ -7,12 +7,14 @@ typedef enum {
     T_EOF,
     T_IDENT,
     T_INT,
+    T_F64, /* a floating-point literal; value in `dval` */
     T_STRING,
     T_INTERP, /* $"...{expr}..." : raw content in `text` */
 
     /* Type keywords */
     T_KW_INT,
     T_KW_BOOL,
+    T_KW_FLOAT,
     T_KW_STRING,
     T_KW_VOID,
 
@@ -23,6 +25,7 @@ typedef enum {
     T_KW_STRUCT,
     T_KW_ENUM,
     T_KW_CLASS,
+    T_KW_INTERFACE,
     T_KW_VIRTUAL,
     T_KW_OVERRIDE,
     T_KW_MATCH,
@@ -42,6 +45,7 @@ typedef enum {
     T_KW_EXTERN,
     T_KW_EXPORT,
     T_KW_FN,
+    T_KW_CLOSURE,
     T_KW_METHOD,
     T_KW_IMPORT,
 
@@ -100,6 +104,7 @@ typedef struct {
     TokenKind kind;
     Span span;
     long long ival; /* T_INT */
+    double dval;    /* T_F64 */
     char *text;     /* T_IDENT name, or decoded T_STRING bytes */
     int str_id;     /* T_STRING: index into the string table */
 } Token;

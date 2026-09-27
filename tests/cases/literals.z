@@ -1,0 +1,44 @@
+// Numeric literals in every radix, digit separators, and escape sequences.
+
+print(0);            // 0
+print(255);           // 255
+print(0xff);          // 255
+print(0XFF);          // 255
+print(0b1010);        // 10
+print(0B1010);        // 10
+print(0o755);         // 493
+print(0O755);         // 493
+print(1_000_000);     // 1000000
+print(0xdead_beef);   // 3735928559
+
+// 1 << 30 is the fixed-point full turn used by sin/cos.
+print(1 << 30);       // 1073741824
+print(0x40000000);    // 1073741824
+
+// Byte escapes, and the NUL escape.
+print("\x41\x42\x43");    // ABC
+print("a\tb");            // a<TAB>b
+print("q\"q");            // q"q
+print("back\\slash");     // back\slash
+
+// \uXXXX is a code point, encoded as UTF-8: e-acute is C3 A9.
+print("\u00e9");          // é
+
+// \u escapes for characters that have named escapes still work.
+print("\u0041");          // A
+print("\n");              // a bare newline, via its own escape
+
+// A hex escape can spell a brace without opening an interpolation hole.
+print($"\x7bnot a hole\x7d");    // {not a hole}
+print($"[{"a" + "b"}]");         // [ab]
+
+// An escaped brace is literal text, so this interpolates nothing.
+print($"a\{1 + 1}c");            // a{1 + 1}c
+
+// ...while an unescaped one is a hole.
+var n = 7;
+print($"a{n}c");                 // a7c
+
+// Interpolation nests, and quotes inside a hole are not the end of the string.
+print($"{ "in" + "ner" }");      // inner
+print($"{n > 3 ? "big" : "small"}");   // big

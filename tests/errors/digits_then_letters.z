@@ -1,0 +1,2 @@
+// A digit run that runs into letters is a typo, not two tokens.
+print(123abc);

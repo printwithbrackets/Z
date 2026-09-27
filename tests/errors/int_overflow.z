@@ -1,0 +1,3 @@
+// Larger than the largest int, so it is rejected rather than silently wrapping
+// into a negative number.
+print(99999999999999999999);

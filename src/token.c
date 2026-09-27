@@ -8,6 +8,8 @@ const char *token_kind_name(TokenKind kind) {
         return "identifier";
     case T_INT:
         return "integer literal";
+    case T_F64:
+        return "float literal";
     case T_STRING:
         return "string literal";
     case T_INTERP:
@@ -16,6 +18,10 @@ const char *token_kind_name(TokenKind kind) {
         return "'int'";
     case T_KW_BOOL:
         return "'bool'";
+    case T_KW_FLOAT:
+        return "'float'";
+    case T_KW_CLOSURE:
+        return "'closure'";
     case T_KW_STRING:
         return "'string'";
     case T_KW_VOID:
@@ -48,6 +54,8 @@ const char *token_kind_name(TokenKind kind) {
         return "'enum'";
     case T_KW_CLASS:
         return "'class'";
+    case T_KW_INTERFACE:
+        return "'interface'";
     case T_KW_VIRTUAL:
         return "'virtual'";
     case T_KW_OVERRIDE:
