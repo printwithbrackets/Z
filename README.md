@@ -256,6 +256,102 @@ system assembler — we do not write an ELF encoder.
   and DWARF debug info behind `-g`, so a debugger can break on a line, walk a
   backtrace, and read parameters.
 
+### Planned
+
+Five gaps, roughly in the order they start blocking real programs. Each one is
+a design question before it is an amount of work; the notes say what the
+question is, because picking the wrong answer is the expensive way to find out.
+
+- **M10 (planned): collections beyond fixed arrays.** A `T[]` is a pointer, a
+  length and a GC-traced allocation: fixed, append-only by hand, and the only
+  aggregate container in the language. What is missing is everything a program
+  actually reaches for — a growable vector, a map, a set, and slices so a
+  function can take part of an array without copying it.
+
+  The decision is value or reference. A `Vec<T>` as a `class` is one pointer,
+  copied cheaply and shared on assignment, which is what everyone expects from a
+  growable buffer and what makes a `Vec<Vec<T>>` behave. As a `struct` holding
+  a pointer it is also one pointer, but assignment aliases the same buffer in
+  two variables, which is a trap that a language with value-semantics structs
+  invites badly. The language already draws this line — structs copy, classes
+  share — so the answer is probably `class`, and the interesting work is making
+  that choice legible rather than making the container.
+
+  The second decision is the iteration protocol, and interfaces (M6d) have
+  already answered it: a `struct` satisfies `interface Iterator<T>` by having
+  `next() -> T?`, and `foreach` over a `Vec<T>` is sugar for a `foreach` over an
+  iterator. That is the reason to do this after interfaces and not before — the
+  collection needs nothing invented for it.
+
+- **M11 (planned): file and I/O beyond `print`.** The language can print to
+  stdout and nothing else. A program that cannot read a file cannot do anything
+  worth writing, so this blocks more than its line count suggests.
+
+  The design question is errors. `open` fails, `read` fails at EOF, a write
+  fails on a full disk, and each of those is a real outcome rather than an
+  exceptional one. `Result<T,E>` (M4) is the right shape, so
+  `Result<File, IoError>` and `?` in a function returning it, with the payload
+  carrying the errno and the path — the error type is where the usefulness is.
+  A line-oriented API (`readLine`) is what most programs want and is also where
+  the buffering decision lives: read whole, or read a chunk and split, and
+  whether a `File` owns a buffer such that copying one is a bug.
+
+- **M12 (planned): a string type that is not just concatenation.** `string` is
+  currently a NUL-terminated `char*` with `+` for concatenation, so it has no
+  length, cannot hold an embedded zero, and every append reallocates and copies
+  everything. That is a C string wearing a nicer name, and it is the single
+  most common thing a Z program gets wrong.
+
+  The fix is a real value: a pointer plus a length, passed as two registers,
+  comparing and hashing by content. Whether it is a `struct` (copied by value,
+  which is 16 bytes and usually what you want) or stays a pointer (one word,
+  but a `string` variable can be reassigned and every function takes it
+  indirectly) is the question. Value semantics is the one that makes
+  `s = s + "x"` correct without surprise, and Z already has the machinery for a
+  16-byte value parameter. What it costs is every ABI interaction: a `string` in
+  an exported function, one in a C caller, one crossing the GC boundary.
+
+  Slice and search come with it — `s[2..5]`, `indexOf`, `contains`, `split`,
+  `join` — and so does the question of what indexing means. Bytes or characters?
+  UTF-8 makes those different answers, and a language that has `\uXXXX` escapes
+  and no character type has already decided something it has not said out loud.
+
+- **M13 (planned): package and module distribution.** `import "path.z"` splices
+  a file's declarations into the importing one. That is fine for one directory
+  and does not survive contact with anything else: there is no namespace, so
+  two imported files cannot both define `helper`; nothing is private, so
+  everything a library declares is a name its users must not collide with; and
+  there is no version, no manifest, and no way to say where a dependency lives.
+
+  The order matters. Visibility first (`pub`, with everything unexported by
+  default) and real module scoping, because both are compiler work and both
+  change what existing programs mean. Then a manifest naming dependencies with
+  version constraints, a resolver, and a registry or a vendored path. The
+  standard library should end up as packages, written in Z, so it is tested by
+  the same machinery every other library is.
+
+  The trap is doing the registry before the scoping. A package manager over a
+  language whose imports all share one global namespace distributes name
+  collisions instead of fixing them.
+
+- **M14 (planned): error message quality.** Diagnostics carry a file, line,
+  column and a caret, and the error tests pin their text — but the messages are
+  written to be *correct* rather than to be *read*. A reader who mistypes a
+  name gets "undefined name 'foo'" and no idea that `foo` is three characters
+  away; one who passes the wrong type gets the type mismatch and nothing about
+  which argument was wrong or what was expected there.
+
+  Concretely: a "did you mean" suggestion from edit distance over the names in
+  scope, which is a few lines over a symbol table the compiler already builds;
+  the name of the function or method the error is inside, so a message in a
+  hundred-line body is locatable; the *constraint* that was violated rather
+  than only the violation ("a `struct` cannot be returned by value across the C
+  boundary" is the model — it says what to do); and a note when the failing call
+  is inside a loop, a lambda, or a macro-like expansion, where the span points
+  at generated text. Colour on a tty, none when redirected or piped, and a
+  machine-readable format so an editor can put the squiggle under the right word
+  without scraping prose.
+
 ### Known miscompiles found and fixed
 
 Recorded because each was invisible at the default optimization level, and
