@@ -204,12 +204,52 @@ long z_trig(long a, int want_cos) {
     }
 }
 
+/* Boxes one value on the heap and returns a pointer to it.
+ *
+ * A variable captured by a closure cannot live in the frame that declared it: the
+ * closure may outlive the call, and a frame slot is gone the moment that call
+ * returns. So a captured variable is moved into a heap cell and both the
+ * enclosing function and the closure reach it through that pointer. That is what
+ * makes assignment through a closure visible to the enclosing function, rather
+ * than writing to a copy nobody else can see. */
+void *z_box(long v) {
+    long *cell = (long *)gc_alloc(sizeof(long));
+    *cell = v;
+    return cell;
+}
+
+/* A one-word box for a float, which arrives in xmm0 rather than a general
+ * register. */
+void *z_box_f(double v) {
+    double *cell = (double *)gc_alloc(sizeof(double));
+    *cell = v;
+    return cell;
+}
+
+/* A box of `n` bytes, for a captured struct. The caller fills it in place. */
+void *z_box_n(long n) {
+    if (n < 8)
+        n = 8;
+    return gc_alloc((size_t)n);
+}
+
 /* Allocates the cell a bound method pointer refers to: the code address and
  * the receiver, side by side. GC-managed, so the receiver is traced and stays
  * alive for as long as the pointer does. */
 void *z_newbinding(void *code, void *recv) {
     void **cell = (void **)gc_alloc(2 * sizeof(void *));
     cell[0] = code;
+    cell[1] = recv;
+    return cell;
+}
+
+/* The same two-word cell an interface value holds, under a name that says so.
+ * Kept separate rather than reusing z_newbinding because the two words mean
+ * different things: here they are an itab and a receiver, not a code address and
+ * a receiver. The layout, and so the collector's tracing of it, is identical. */
+void *z_newiface(void *itab, void *recv) {
+    void **cell = (void **)gc_alloc(2 * sizeof(void *));
+    cell[0] = itab;
     cell[1] = recv;
     return cell;
 }
@@ -308,3 +348,306 @@ char *z_itoa(long v) {
 
 /* Explicit collection hook (the collector also runs automatically on growth). */
 void z_gc(void) { gc_collect(); }
+
+/* Prints a float, the way Z's `print` does for one.
+ *
+ * This exists so the compiler never has to make a variadic call itself. Calling
+ * printf with a floating-point argument means setting %al to the number of
+ * vector registers used and reserving 176 bytes of stack for the callee's
+ * register save area -- two rules of the System V ABI that are easy to get
+ * subtly wrong from hand-written assembly, and that a C compiler gets right for
+ * free. Passing the value in xmm0 and letting C handle the rest keeps that
+ * knowledge in one place.
+ *
+ * %g rather than %f: a float should print as the shortest thing that reads back
+ * as the same number, so 1.5 is "1.5" and not "1.500000". Six significant
+ * digits, so 0.1 + 0.2 prints as 0.3 -- a deliberate trade of exact digits for
+ * readable ones, and the same choice every language makes by default. */
+void z_print_f(double v) { printf("%g\n", v); }
+
+/* Formats a float as a string, with the same six significant digits `print`
+ * uses, so `"x = " + 1.5` and `print(1.5)` never disagree about how a number
+ * looks. */
+static char *z_strdup_gc(const char *src) {
+    size_t n = strlen(src) + 1;
+    char *out = (char *)gc_alloc(n);
+    memcpy(out, src, n);
+    return out;
+}
+
+char *z_ftoa(double v) {
+    char buf[40];
+    snprintf(buf, sizeof buf, "%g", v);
+    return z_strdup_gc(buf);
+}
+
+/* ---- string library ----
+ *
+ * Everything a Z string function needs, over the same NUL-terminated bytes the
+ * rest of the runtime uses. Three rules hold throughout:
+ *
+ *   - A NULL argument reads as the empty string, so `len(null)` is 0 rather than
+ *     a crash. This matches z_strcmp, which already substitutes "".
+ *   - Every returned string is gc_alloc'd, so the collector owns it and the
+ *     caller never frees. An intermediate stays reachable through a local while
+ *     a later allocation can trigger a collection.
+ *   - A length is measured in bytes, not characters. Z has no character type, so
+ *     a multi-byte UTF-8 sequence is three bytes and char_at returns each one.
+ *     Lengths are therefore byte offsets, which is what indexing already means.
+ *
+ * Out-of-range arguments clamp rather than trap: a substring request is a
+ * question about a string, and the answer to "past the end" is the empty string
+ * rather than a runtime error. The one exception is char_at, which returns -1 so
+ * that a caller walking to the end can tell it happened.
+ */
+static const char *nn(const char *s) { return s ? s : ""; }
+
+/* Copies `count` bytes from `src` into a fresh GC string. */
+static char *z_alloc_copy(const char *src, size_t count) {
+    char *out = (char *)gc_alloc(count + 1);
+    memcpy(out, src, count);
+    out[count] = '\0';
+    return out;
+}
+
+long z_strlen(const char *s) { return (long)strlen(nn(s)); }
+
+char *z_sub(const char *s, long start, long count) {
+    size_t n = strlen(nn(s));
+    /* A negative start counts back from the end, so sub(s, -3, 3) is the last
+     * three bytes. This is the one convenience worth having, because "the tail
+     * of this" is otherwise the most common thing to get wrong. */
+    if (start < 0)
+        start += (long)n;
+    if (start < 0)
+        start = 0;
+    if (count < 0)
+        count = 0;
+    if ((size_t)start > n)
+        start = (long)n;
+    if ((size_t)(start + count) > n)
+        count = (long)n - start;
+    return z_alloc_copy(nn(s) + start, (size_t)count);
+}
+
+long z_index_of(const char *s, const char *needle) {
+    const char *found = strstr(nn(s), nn(needle));
+    return found ? (long)(found - nn(s)) : -1;
+}
+
+long z_contains(const char *s, const char *needle) { return z_index_of(s, needle) >= 0; }
+
+long z_starts_with(const char *s, const char *prefix) {
+    const char *a = nn(s), *b = nn(prefix);
+    return strncmp(a, b, strlen(b)) == 0;
+}
+
+long z_ends_with(const char *s, const char *suffix) {
+    const char *a = nn(s), *b = nn(suffix);
+    size_t la = strlen(a), lb = strlen(b);
+    /* An empty suffix matches everything, including the empty string. */
+    return la >= lb && memcmp(a + (la - lb), b, lb) == 0;
+}
+
+/* The byte at `i`, or -1 past the end. */
+long z_char_at(const char *s, long i) {
+    const char *a = nn(s);
+    if (i < 0 || (size_t)i >= strlen(a))
+        return -1;
+    /* Zero-extended, so a byte above 127 comes back as 128..255 rather than a
+     * negative value. */
+    return (long)(unsigned char)a[i];
+}
+
+char *z_trim(const char *s) {
+    const char *a = nn(s);
+    const char *start = a;
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r' || *start == '\v' ||
+           *start == '\f')
+        start++;
+    size_t n = strlen(start);
+    while (n > 0) {
+        char c = start[n - 1];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\v' && c != '\f')
+            break;
+        n--;
+    }
+    return z_alloc_copy(start, n);
+}
+
+/* ASCII case mapping, deliberately not locale-aware: a program's output must not
+ * depend on the environment it runs in. Bytes above 127 are left alone, since in
+ * UTF-8 they are continuation bytes and case-mapping them one at a time would
+ * corrupt the sequence. */
+char *z_upper(const char *s) {
+    const char *a = nn(s);
+    size_t n = strlen(a);
+    char *out = (char *)gc_alloc(n + 1);
+    for (size_t i = 0; i < n; i++)
+        out[i] = (a[i] >= 'a' && a[i] <= 'z') ? (char)(a[i] - 32) : a[i];
+    out[n] = '\0';
+    return out;
+}
+
+char *z_lower(const char *s) {
+    const char *a = nn(s);
+    size_t n = strlen(a);
+    char *out = (char *)gc_alloc(n + 1);
+    for (size_t i = 0; i < n; i++)
+        out[i] = (a[i] >= 'A' && a[i] <= 'Z') ? (char)(a[i] + 32) : a[i];
+    out[n] = '\0';
+    return out;
+}
+
+/* Replaces every occurrence of `from` with `to`. An empty `from` would match at
+ * every position, so it returns the string unchanged instead of looping. */
+char *z_replace(const char *s, const char *from, const char *to) {
+    const char *a = nn(s), *f = nn(from), *t = nn(to);
+    size_t lf = strlen(f);
+    if (lf == 0)
+        return z_alloc_copy(a, strlen(a));
+    size_t lt = strlen(t);
+    /* Count first, then allocate exactly: the collector can run during either,
+     * and sizing the result up front keeps the second pass allocation-free. */
+    size_t count = 0;
+    for (const char *p = a; (p = strstr(p, f)) != NULL; p += lf)
+        count++;
+    size_t n = strlen(a);
+    size_t out_n = n + count * lt - count * lf;
+    char *out = (char *)gc_alloc(out_n + 1);
+    char *w = out;
+    const char *p = a;
+    for (;;) {
+        const char *hit = strstr(p, f);
+        if (hit == NULL) {
+            size_t rest = n - (size_t)(p - a);
+            memcpy(w, p, rest);
+            w += rest;
+            break;
+        }
+        size_t lead = (size_t)(hit - p);
+        memcpy(w, p, lead);
+        w += lead;
+        memcpy(w, t, lt);
+        w += lt;
+        p = hit + lf;
+    }
+    *w = '\0';
+    return out;
+}
+
+char *z_repeat(const char *s, long n) {
+    const char *a = nn(s);
+    size_t la = strlen(a);
+    if (n < 0)
+        n = 0;
+    char *out = (char *)gc_alloc(la * (size_t)n + 1);
+    char *w = out;
+    for (long i = 0; i < n; i++) {
+        memcpy(w, a, la);
+        w += la;
+    }
+    *w = '\0';
+    return out;
+}
+
+/* Splits on every occurrence of `sep` and returns a heap array of strings, so
+ * the result is used like any other array: `parts.length`, `parts[i]`.
+ *
+ * Splitting an empty string yields no pieces rather than one empty piece, and an
+ * empty separator splits into single characters -- both the readings that make
+ * `split` composable in a loop. A trailing separator does not produce a trailing
+ * empty piece, matching every other split implementation.
+ *
+ * The array is counted before it is allocated so the element writes cannot be
+ * interleaved with a collection. The array pointer is a local throughout, which
+ * is what keeps it reachable: the collector is conservative, so a pointer sitting
+ * in this frame is found and marked. */
+void *z_split(const char *s, const char *sep) {
+    const char *a = nn(s), *sp = nn(sep);
+    size_t ls = strlen(sp);
+
+    size_t count = 0;
+    if (ls == 0) {
+        count = strlen(a); /* one piece per character */
+    } else {
+        count = 1;
+        for (const char *p = a; (p = strstr(p, sp)) != NULL; p += ls) {
+            count++;
+            if (p[ls] == '\0') {
+                count--; /* no trailing empty piece */
+                break;
+            }
+        }
+    }
+
+    char **out = (char **)z_newarray((long)count, (long)sizeof(char *));
+    size_t k = 0;
+    if (ls == 0) {
+        for (const char *p = a; *p != '\0' && k < count; p++)
+            out[k++] = z_alloc_copy(p, 1);
+    } else {
+        const char *p = a;
+        for (;;) {
+            const char *hit = strstr(p, sp);
+            size_t piece = hit ? (size_t)(hit - p) : strlen(p);
+            if (k < count)
+                out[k++] = z_alloc_copy(p, piece);
+            if (hit == NULL)
+                break;
+            p = hit + ls;
+            if (*p == '\0')
+                break; /* trailing separator: stop, leaving no empty piece */
+        }
+    }
+    return out;
+}
+
+/* ---- integer library ----
+ *
+ * The operations an integer-only language still wants. exp, log and the
+ * transcendental functions beyond sin/cos are deliberately absent: with no
+ * floating-point type they would have to invent a fixed-point convention that
+ * means nothing at the call site, and sin/cos already show how that goes. They
+ * belong with a real float type. */
+
+/* Integer exponentiation by squaring. A negative exponent has no integer
+ * answer, so it yields 0; a large one wraps the way Z's other arithmetic does. */
+long z_pow(long base, long e) {
+    if (e < 0)
+        return 0;
+    long result = 1;
+    long b = base;
+    while (e > 0) {
+        if (e & 1)
+            result *= b;
+        b *= b;
+        e >>= 1;
+    }
+    return result;
+}
+
+long z_gcd(long a, long b) {
+    /* Take the absolute value first: gcd of 0 and anything is that thing, and
+     * the C99 % keeps the sign of the dividend, which would make the loop
+     * oscillate on mixed signs. */
+    if (a < 0)
+        a = -a;
+    if (b < 0)
+        b = -b;
+    while (b != 0) {
+        long t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+long z_lcm(long a, long b) {
+    long g = z_gcd(a, b);
+    if (g == 0)
+        return 0;
+    long q = a / g * b;
+    return q < 0 ? -q : q;
+}
+
