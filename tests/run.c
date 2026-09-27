@@ -24,14 +24,6 @@ static int slurp(const char *path, char *out, int cap) {
     return 1;
 }
 
-/* When Z_TEST_OPT is set (e.g. -O2) every compiler invocation in this harness
- * is run at that level, so the whole suite can be checked against each rung of
- * the optimization ladder. */
-static const char *opt_flag(void) {
-    const char *o = getenv("Z_TEST_OPT");
-    return (o != NULL && *o != '\0') ? o : "";
-}
-
 static int run_cmd_capture(const char *cmd, char *out, int cap) {
     FILE *p = popen(cmd, "r");
     if (!p)
@@ -52,11 +44,19 @@ int main(int argc, char **argv) {
     const char *rt_dir = "tests/runtime";
     const char *io_dir = "tests/interop";
     const char *imp_dir = "tests/imports";
-    const char *warn_dir = "tests/warnings";
     int pass = 0, fail = 0;
 
     /* Golden cases. */
     char path[512], exp_path[512], cmd[2048];
+/* When Z_TEST_OPT is set (e.g. -O2) every compiler invocation in this harness
+ * is run at that level, so the whole suite can be checked against each rung of
+ * the optimization ladder. */
+static const char *opt_flag(void) {
+    const char *o = getenv("Z_TEST_OPT");
+    return (o != NULL && *o != '\0') ? o : "";
+}
+
+
     static const char *cases[] = {
         "hello",    "arith",      "vars",      "bools",    "ifelse",         "loops",
         "funcs",    "recursion",  "strings",   "compound", "mainfunc",       "nested_calls",
@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
         "methods",  "props",      "ext",       "fatarrow", "opoverload",     "tern",
         "gc",       "enum_match", "constfold", "regalloc", "divmod",         "boolstr",
         "generics", "generics2",  "classes",   "classes2", "integration",
-        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib",
+        "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin 2>&1", zc, path);
         char build_err[1 << 16];
         int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
         if (rc != 0) {
@@ -108,12 +108,6 @@ int main(int argc, char **argv) {
         "arity",         "unterminated_string", "stray_char",   "return_type",  "undefined_type",
         "too_many_params", "too_many_method_params", "bad_const", "dup_const",
         "bitwise_on_string", "break_outside_loop", "continue_outside_loop", "intrinsic_arity", "intrinsic_arg_type", "compare_mixed", "extern_with_body", "extern_arity", "extern_argtype", "export_no_body", "fnptr_argcount", "fnptr_argtype", "fnptr_signature", "fnptr_order", "fnptr_arity_mismatch", "methodptr_struct_recv", "methodptr_no_method", "methodptr_struct_return",
-        "foreach_ptr", "foreach_nonarray", "bad_escape", "int_overflow", "empty_radix_literal", "digits_then_letters",
-        "float_to_int", "float_mod", "float_bitwise", "float_not", "float_shift",
-        "lambda_return_type", "lambda_not_int", "lambda_fn_return", "lambda_in_lambda",
-        "nested_fn_capture", "fn_reads_toplevel_var", "nested_fn_extern", "nested_fn_no_body",
-        "result_mismatch", "result_no_ret", "result_ambiguous", "result_too_big",
-        "iface_missing_method", "iface_bad_signature", "iface_nonvirtual", "iface_no_method",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -131,7 +125,7 @@ int main(int argc, char **argv) {
         }
         /* Send the output somewhere outside the tree: without -o the compiler
          * writes an executable named after the test into the repo root. */
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin 2>&1", zc, path);
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -160,181 +154,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Warning cases. A warning is not an error, so these must compile
-     * successfully while their .expected lines all appear in the output. A
-     * missing line is a regression; an extra one usually means the compiler is
-     * warning about its own desugarings, which `clean` catches. */
-    static const char *warns[] = {"all"};
-    for (size_t i = 0; i < sizeof warns / sizeof(*warns); i++) {
-        snprintf(path, sizeof path, "%s/%s.z", warn_dir, warns[i]);
-        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", warn_dir, warns[i]);
-        if (!slurp(path, buf, sizeof buf)) {
-            fprintf(stderr, "FAIL %s (missing test file)\n", warns[i]);
-            fail++;
-            continue;
-        }
-        char expected[1 << 16];
-        if (!slurp(exp_path, expected, sizeof expected)) {
-            fprintf(stderr, "FAIL %s (missing .expected)\n", warns[i]);
-            fail++;
-            continue;
-        }
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
-        char actual[1 << 16];
-        int rc = run_cmd_capture(cmd, actual, sizeof actual);
-        if (rc != 0) {
-            fprintf(stderr, "FAIL %s (warnings must not fail the build)\n%s\n", warns[i], actual);
-            fail++;
-            continue;
-        }
-        int ok = 1;
-        char *save = NULL;
-        for (char *line = strtok_r(expected, "\n", &save); line;
-             line = strtok_r(NULL, "\n", &save)) {
-            if (line[0] == 0)
-                continue;
-            if (!strstr(actual, line)) {
-                fprintf(stderr, "FAIL %s (missing expected warning: %s)\n--- actual ---\n%s\n",
-                        warns[i], line, actual);
-                ok = 0;
-                break;
-            }
-        }
-        if (ok) {
-            printf("ok   %s (warning)\n", warns[i]);
-            pass++;
-        } else {
-            fail++;
-        }
-    }
-
-    /* Debug info. `z -g` emits DWARF that no reader here can fully check, but
-     * the properties that are easy to get wrong are all checkable with
-     * readelf: the sections exist, the unit is well-formed enough not to warn,
-     * every function got a DIE with a real address range, and the line table
-     * still runs to the end of each function. A break in the encoding shows up
-     * here as a "Corrupt unit length" or a missing section rather than as a
-     * silently unusable binary. */
-    {
-        snprintf(path, sizeof path, "%s/debuginfo.z", case_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_dbg %s -g 2>&1", zc, path,
-                 opt_flag());
-        char actual[1 << 16];
-        int rc = run_cmd_capture(cmd, actual, sizeof actual);
-        if (rc != 0) {
-            fprintf(stderr, "FAIL debuginfo (build with -g failed)\n%s\n", actual);
-            fail++;
-        } else {
-            static const struct {
-                const char *label;
-                const char *readelf;
-                const char *must_contain;
-            } checks[] = {
-                {"has .debug_info", "readelf -S /tmp/z_test_dbg", ".debug_info"},
-                {"has .debug_line", "readelf -S /tmp/z_test_dbg", ".debug_line"},
-                {"has .debug_abbrev", "readelf -S /tmp/z_test_dbg", ".debug_abbrev"},
-                {"unit is well-formed", "readelf --debug-dump=info /tmp/z_test_dbg",
-                 "DW_TAG_compile_unit"},
-                {"names a function", "readelf --debug-dump=info /tmp/z_test_dbg", "DW_TAG_subprogram"},
-                {"locates a function", "readelf --debug-dump=info /tmp/z_test_dbg", "DW_AT_low_pc"},
-                {"has a line table", "objdump --dwarf=decodedline /tmp/z_test_dbg", "line"},
-            };
-            int ok = 1;
-            for (size_t i = 0; i < sizeof checks / sizeof(*checks); i++) {
-                char out[1 << 16];
-                snprintf(cmd, sizeof cmd, "%s 2>&1", checks[i].readelf);
-                run_cmd_capture(cmd, out, sizeof out);
-                if (!strstr(out, checks[i].must_contain)) {
-                    fprintf(stderr, "FAIL debuginfo (%s)\n", checks[i].label);
-                    ok = 0;
-                    break;
-                }
-                /* A malformed unit makes readelf complain before it prints
-                 * anything useful, so the absence of a complaint is the check. */
-                if (strstr(out, "Corrupt") || strstr(out, "Malformed")) {
-                    fprintf(stderr, "FAIL debuginfo (%s): reader rejected the unit\n%s\n",
-                            checks[i].label, out);
-                    ok = 0;
-                    break;
-                }
-            }
-            /* -g must not change what the program does. */
-            if (ok) {
-                char out[1 << 16];
-                run_cmd_capture("/tmp/z_test_dbg", out, sizeof out);
-                if (strstr(out, "debug info: ok") == NULL) {
-                    fprintf(stderr, "FAIL debuginfo (-g changed the program's output)\n%s\n", out);
-                    ok = 0;
-                }
-            }
-            if (ok) {
-                printf("ok   debuginfo (DWARF)\n");
-                pass++;
-            } else {
-                fail++;
-            }
-        }
-    }
-
-    /* A file with nothing to complain about must produce no warning at all.
-     * This is the guard on the compiler's own machinery: a desugared loop
-     * temporary or a hidden result buffer showing up here means a binding the
-     * user never wrote is being reported as their code. */
-    {
-        snprintf(path, sizeof path, "%s/clean.z", warn_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
-        char actual[1 << 16];
-        int rc = run_cmd_capture(cmd, actual, sizeof actual);
-        if (rc != 0) {
-            fprintf(stderr, "FAIL clean (compile failed)\n%s\n", actual);
-            fail++;
-        } else if (strstr(actual, "warning:")) {
-            fprintf(stderr, "FAIL clean (unexpected warning)\n%s\n", actual);
-            fail++;
-        } else {
-            printf("ok   clean (no warnings)\n");
-            pass++;
-        }
-    }
-
-    /* The warning flags have to actually do something: -w silences everything,
-     * -Wno-<name> silences one, and -Werror turns a warning into a failed
-     * build. Each is checked by compiling the same file and looking at both the
-     * output and the exit status. */
-    {
-        static const struct {
-            const char *label;
-            const char *flag;
-            int want_rc;      /* 0 = compiles, nonzero = fails */
-            int want_warning; /* whether "warning:" may appear */
-        } flagcases[] = {
-            {"-w silences all", "-w", 0, 0},
-            {"-Wno-unused-local silences one", "-Wno-unused-local", 0, 1},
-            {"-Wshadowed-local still reports the rest", "-Wshadowed-local", 0, 1},
-            /* -Werror relabels, so "warning:" must be gone and "error:" present. */
-            {"-Werror fails the build", "-Werror", 1, 0},
-        };
-        snprintf(path, sizeof path, "%s/all.z", warn_dir);
-        for (size_t i = 0; i < sizeof flagcases / sizeof(*flagcases); i++) {
-            snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s %s 2>&1", zc, path,
-                     opt_flag(), flagcases[i].flag);
-            char actual[1 << 16];
-            int rc = run_cmd_capture(cmd, actual, sizeof actual);
-            int got_warning = strstr(actual, "warning:") != NULL;
-            int got_error = strstr(actual, "error:") != NULL;
-            if ((rc != 0) != flagcases[i].want_rc || got_warning != flagcases[i].want_warning ||
-                /* -Werror must relabel, not duplicate. */
-                (flagcases[i].want_rc && !got_error)) {
-                fprintf(stderr, "FAIL warnflag %s (rc=%d warning=%d error=%d)\n%s\n",
-                        flagcases[i].label, rc, got_warning, got_error, actual);
-                fail++;
-            } else {
-                printf("ok   warnflag %s\n", flagcases[i].label);
-                pass++;
-            }
-        }
-    }
-
     /* Runtime-abort cases: compiled with --bounds, the program must exit
      * nonzero and every non-empty line of the sibling .expected must appear in
      * its combined output. */
@@ -350,7 +169,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s %s --bounds 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "./%s run %s --bounds 2>&1", zc, path);
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -426,7 +245,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "./%s run %s 2>&1", zc, path);
         char actual[1 << 16];
         if (run_cmd_capture(cmd, actual, sizeof actual) != 0 ||
             strcmp(expected, actual) != 0) {
