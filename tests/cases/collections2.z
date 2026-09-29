@@ -77,5 +77,28 @@ int main() {
     var sf = new Set<float>();
     sf.add(1.5);
     print(sf.has(1.5));                  // true
+
+    /* ---- the C++ spellings, which are aliases for the ones above and must
+     * therefore answer identically rather than being a second implementation
+     * that can drift ---- */
+    var cv = new Vec<int>();
+    print(cv.empty());                   // true
+    cv.push_back(1);
+    cv.push(2);
+    cv.push_back(3);
+    print(cv.size());                    // 3
+    print(cv.empty());                   // false
+    print(cv.pop_back());                // 3
+    print(cv.pop());                     // 2 -- and the same value push_back put there
+    print(cv.size());                    // 1
+    var cm = new Map<string, int>();
+    print(cm.empty());                   // true
+    cm.set("a", 1);
+    print(cm.empty());                   // false
+    var cs = new Set<int>();
+    print(cs.empty());                   // true
+    cs.add(1);
+    print(cs.empty());                   // false
+    print(cs.has(1));                    // true
     return 0;
 }

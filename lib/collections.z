@@ -114,6 +114,12 @@ class Vec<T> {
         len++;
     }
 
+    /* The C++ name for `push`. Both spellings are one call to the same body
+     * rather than two bodies, so they cannot drift apart -- a name is an alias
+     * here, not a second implementation. `push` stays because it is shorter and
+     * a reader who knows either name can use the other. */
+    void push_back(T v) { this.push(v); }
+
     /* Appends everything in `other`. Amortized against the receiving vector's own
      * growth, so appending another vector to this one is linear.
      *
@@ -138,6 +144,12 @@ class Vec<T> {
         len--;
         return data[len];
     }
+
+    /* The C++ name for `pop`. See `push_back`: an alias, not a second body. */
+    T pop_back() { return this.pop(); }
+
+    /* The C++ name for `isEmpty`. */
+    bool empty() { return len == 0; }
 
     /* Removes the element at `i`, shifts the rest down, and returns it. The
      * shift is O(n) and always will be: removing from the middle of a sequence
@@ -312,6 +324,9 @@ class Map<K,V> {
 
     int size() { return len; }
     bool isEmpty() { return len == 0; }
+    
+    /* The C++ name for `isEmpty`. An alias, not a second body. */
+    bool empty() { return len == 0; }
 
     /* The slot count, so a caller deciding whether a Map is the right shape can
      * see how full it is. */
@@ -547,6 +562,8 @@ class Set<T> {
 
     int size() { return inner.size(); }
     bool isEmpty() { return inner.isEmpty(); }
+    /* The C++ name for `isEmpty`. An alias, not a second body. */
+    bool empty() { return inner.isEmpty(); }
     bool has(T v) { return inner.has(v); }
 
     void add(T v) { inner.set(v, true); }

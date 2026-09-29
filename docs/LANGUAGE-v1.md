@@ -532,12 +532,12 @@ class Set<T> {
 
 ### `Vec<T>`
 
-| | |
-|---|---|
-| `push(v)` / `pushAll(other)` | Append one, or append every element of another. |
-| `pop()` | Remove and return the last. |
+| `push(v)` / `push_back(v)` | Append one. Amortized O(1); the buffer doubles. |
+| `pushAll(other)` | Append every element of another. |
+| `pop()` / `pop_back()` | Remove and return the last. |
+| `empty()` / `isEmpty()` | `size() == 0`. |
 | `at(i)` | Bounds-checked element; a message and a non-zero exit out of range, not a clamp. |
-| `size()` / `capacity()` / `isEmpty()` | Element count / allocated elements / `size() == 0`. |
+| `size()` / `capacity()` | Element count / allocated elements. |
 | `insertAt(i, v)` / `removeAt(i)` | Middle insert and removal; removal shifts, which is O(n) and always will be. |
 | `insert`/`reserve(n)` | Grow to hold `n` without changing the length. |
 | `clear()` / `release()` | Length to zero, buffer kept / buffer freed. |
@@ -545,6 +545,11 @@ class Set<T> {
 | `reversed()` | A new vector, back to front. |
 | `slice(from, to)` / `sliceFrom` / `sliceTo` / `take(n)` | A new vector over a half-open range, each end clamped. This is the "take part of an array without copying it" the M10 notes asked for. |
 | `join(sep)` / `toString()` | The elements as text, separated by `sep` / by `", "`. |
+
+`push_back`, `pop_back` and `empty` are the C++ names. Each is a one-line alias
+for the method beside it rather than a second body, so the two spellings cannot
+drift apart — and both are kept, because `push` is shorter and a reader who
+knows either name should be able to use the other.
 
 `foreach` over a `Vec<T>` visits the elements. There is no `Iterator<T>`: an
 iterator is an interface cell and an indirect call per element, on every loop in
@@ -608,7 +613,7 @@ removal is not simply emptying. Rehashing doubles the slot count.
 | `getOr(k, make)` | The value, inserting `make` first if absent. The shape of a cache or a memo table; `make` is an expression, so it is only evaluated when there is something to store. |
 | `remove(k)` | Remove, returning whether it was there. |
 | `keysOf()` / `values()` | The keys, or the values, in slot order. Named `keysOf` because `keys` is the field holding the parallel key array. |
-| `size()` / `isEmpty()` / `clear()` / `reserve(n)` | As for `Vec`. |
+| `size()` / `isEmpty()` / `empty()` / `clear()` / `reserve(n)` | As for `Vec`. |
 | `slots()` / `load()` | Slot count, and a summary of the table's load. |
 | `join(sep)` / `toString()` | `k=v` pairs, separated by `sep` / by `", "`. |
 
@@ -618,8 +623,8 @@ A `Map<T,bool>`, and it says so rather than hiding it. It reaches `has` and
 `set` on the table underneath, so the set needs no method of its own for either.
 A set that can be asked for a value is a set that will be, so the pair of
 questions a set answers is `has` and nothing else: `has`, `add`, `addIfNew`,
-`remove`, `clear`, `reserve`, `size`, `isEmpty`, `values`, `containsAll`,
-`isEqualTo`, `toString`.
+`remove`, `clear`, `reserve`, `size`, `isEmpty`, `empty`, `values`,
+`containsAll`, `isEqualTo`, `toString`.
 
 ### `any`
 
