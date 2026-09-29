@@ -1,0 +1,97 @@
+// `for (auto x : v)` and `for (auto& x : v)` -- the C++ range-for.
+//
+// `&` makes the loop variable a *pointer* to the element, so the body writes
+// through it with `*`. That is one dereference away from C++'s reference, and
+// the difference is honest rather than a limitation: Z has no reference type
+// yet, so a borrow is spelled as a pointer to the element and `*` is how you
+// reach it. The behavior is what matters here and it is the same: the write
+// lands in the container.
+int main() {
+    var v = new Vec<int>();
+    for (var i = 0; i < 5; i++) {
+        v.push(i);
+    }
+
+    // Reading: a copy per iteration.
+    var sum = 0;
+    for (auto x : v) {
+        sum = sum + x;
+    }
+    print(sum);                     // 10
+
+    // Writing through `&`. This is the case a copy cannot do.
+    for (auto& x : v) {
+        *x = *x * 10;
+    }
+    print(v.toString());            // 0, 10, 20, 30, 40
+
+    // Reading after the in-place write, so the write is proven to have stuck.
+    sum = 0;
+    for (auto x : v) {
+        sum = sum + x;
+    }
+    print(sum);                     // 100
+
+    // Reading through `&` reads the same values, so `&` is not a different
+    // iteration order or a different bound.
+    sum = 0;
+    for (auto& x : v) {
+        sum = sum + *x;
+    }
+    print(sum);                     // 100
+
+    // A string iterates as its bytes, the same way a fixed array does.
+    var s = "abc";
+    var n = 0;
+    for (auto b : s) {
+        n = n + b;
+    }
+    print(n);                       // 97 + 98 + 99
+    for (auto& b : s) {
+        print(*b);
+    }
+
+    // A fixed array, which is the other thing that knows its own length.
+    var a = new int[3];
+    a[0] = 7;
+    a[1] = 8;
+    a[2] = 9;
+    sum = 0;
+    for (auto x : a) {
+        sum = sum + x;
+    }
+    print(sum);                     // 24
+    for (auto& x : a) {
+        *x = *x + 1;
+    }
+    print(a[0]);                    // 8
+
+    // `continue` still runs the step, as it does in an index loop.
+    var count = 0;
+    for (auto x : v) {
+        if (x < 20) { continue; }
+        count = count + 1;
+    }
+    print(count);                   // 3 -- 20, 30 and 40
+
+    // `break` leaves the loop, as it does anywhere else.
+    count = 0;
+    for (auto x : v) {
+        if (x == 20) { break; }
+        count = count + 1;
+    }
+    print(count);                   // 2
+
+    // A Set, which is a class like a Vec. It has no `at`, because a set is
+    // unordered and one element address is not a thing; it hands out its
+    // elements as a vector through `values`, which is iterable in turn.
+    var st = new Set<int>();
+    st.add(4);
+    st.add(5);
+    sum = 0;
+    for (auto x : st.values()) {
+        sum = sum + x;
+    }
+    print(sum);                     // 9
+    return 0;
+}

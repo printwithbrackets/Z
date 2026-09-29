@@ -1,0 +1,55 @@
+// Taking the address of a *field* through a class pointer.
+//
+// `&obj.M` is a method pointer, so `&` on a member name once went looking for a
+// method and reported "type has no method 'data'" for a field the type plainly
+// had. The branch now declines any name that is a field, and this is the test
+// that says so: a class holding an array, addressed through the field.
+class Holder {
+    int[] data;
+    int scalar;
+    Holder() {
+        this.data = new int[2];
+        this.scalar = 7;
+    }
+}
+
+int main() {
+    var h = new Holder();
+    h.data[0] = 1;
+    h.data[1] = 2;
+
+    // `&h.data[0]` is the address of the first element.
+    var p = &h.data[0];
+    *p = 99;
+    print(h.data[0]);               // 99
+    print(h.data[1]);               // 2
+
+    // Through a second pointer, so the address is taken and then followed.
+    var q = p;
+    *q = 55;
+    print(h.data[0]);               // 55
+
+    // The address of a scalar field.
+    var s = &h.scalar;
+    *s = 42;
+    print(h.scalar);                // 42
+
+    // `->` reads the same field as `.`, so the two spellings agree.
+    var hp = &h;
+    print(hp->scalar);              // 42
+    var sp = &hp->scalar;
+    *sp = 13;
+    print(h.scalar);                // 13
+
+    // A method pointer is still a method pointer, not a field address: this is
+    // the case the field check must not have broken.
+    class Counter {
+        int n;
+        Counter() { n = 0; }
+        int Get() { return n; }
+    }
+    var c = new Counter();
+    var f = &c.Get;
+    print(f());                     // 0
+    return 0;
+}

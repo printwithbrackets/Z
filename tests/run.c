@@ -138,6 +138,8 @@ int main(int argc, char **argv) {
         "result",
         "interfaces",
         "cxxsyntax",
+        "rangefor",
+        "addrof_field",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -220,6 +222,8 @@ int main(int argc, char **argv) {
         "float_not",
         "float_shift",
         "arrow_on_nonptr",
+        "rangefor_wrongtype",
+        "rangefor_mismatch",
         "lambda_return_type",
         "lambda_not_int",
         "lambda_fn_return",

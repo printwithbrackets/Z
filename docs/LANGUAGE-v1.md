@@ -552,6 +552,48 @@ every program, to buy a generality no container here needs. Each container is
 iterable through a `foreach` that knows its own representation, which is a plain
 index loop in the container and nothing at the call site.
 
+### `for (auto x : v)` and `for (auto& x : v)`
+
+```
+rangeFor := "for" "(" ("var"|"auto"|type) "&"? IDENT ":" expr ")" statement
+```
+
+The range-based `for` is C++'s spelling and desugars to the same index loop
+`foreach` produces, so `break` and `continue` behave identically and every
+optimizer that understands a `for` already understands this.
+
+It works over a fixed array, a `string` (as its bytes, like an array), and a
+class with an `at(i)` method — which is what a `Vec<T>` is. The element type
+comes from the container: a written type is checked against it, so
+`for (int x : v)` over a `Vec<string>` is a diagnostic rather than a silent
+misreading.
+
+**`&` makes the loop variable a pointer to the element**, and the body reaches
+the element through `*`:
+
+```
+var v = new Vec<int>();
+v.push(1);
+for (auto& x : v) { *x = 99; }    // v holds 99 afterwards
+print(*(v.data[0]));
+```
+
+That is one dereference away from C++, where `auto&` is a reference and the
+`*` is not written. The difference is honest rather than a missing feature: Z
+has no reference type, so a borrow is spelled as a pointer to the element. What
+the two have in common is the part that matters — the write lands in the
+container, and without the `&` each element is copied into a fresh local
+instead.
+
+A class that has no `at` cannot be ranged over, and the message says so. A
+`Set<T>` is one: it is unordered, and "the element at i" is not a thing it can
+answer. `values()` hands out its elements as a `Vec`, which is iterable in turn.
+
+`&obj.field` is the address of the field, and `&obj.M` is a method pointer. The
+two share a token, so the parser decides by looking the name up as a field
+first; anything that is a field is addressed, and only a name that is not a
+field goes looking for a method.
+
 ### `Map<K,V>`
 
 An open-addressed table with linear probing: one entry per occupied slot, and

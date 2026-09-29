@@ -1,0 +1,8 @@
+int main() {
+    var v = new Vec<string>();
+    v.push("a");
+    for (int x : v) {
+        print(x);
+    }
+    return 0;
+}

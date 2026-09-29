@@ -3597,8 +3597,15 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 fp_field =
                     fld0 != NULL && (is_kind(fld0->type, TK_FNPTR) || is_kind(fld0->type, TK_MPTR));
             }
-            /* `&obj.M`: bind the receiver now and yield a callable. */
-            if (p->take_method_addr && is_kind(st, TK_STRUCT) && !fp_field && !at(p, T_LPAREN)) {
+            /* `&obj.M`: bind the receiver now and yield a callable. A *field* is
+             * not a method however the name is spelled, so `&obj.f` has to fall
+             * through to the field access below: it is the address of the field,
+             * which is what the user wrote, and the alternative was a
+             * `&container.data[i]` reading as "type has no method 'data'".
+             * Function- and method-typed fields are excluded too, because those
+             * really are called through the value that is the field. */
+            if (p->take_method_addr && is_kind(st, TK_STRUCT) && !fp_field && !at(p, T_LPAREN) &&
+                struct_find_field(st->sdef, name) == NULL) {
                 StructMethod *bm = struct_find_method(st->sdef, name);
                 if (bm == NULL) {
                     suggest_member(st->sdef, "method", name);
@@ -6042,6 +6049,354 @@ static Stmt *parse_interface_decl(Parser *p) {
 }
 
 /* foreach (T x in coll) body  ->  a hidden index-based while loop. */
+/* True when a `for (` is the head of a range-for, i.e. a colon turns up before
+ * the closing paren. A C-style `for` has semicolons where the colon would be,
+ * so this cannot mistake one for the other, and it never parses: it only looks,
+ * so the caller can rewind and take the ordinary path. */
+static int at_range_for(Parser *p) {
+    int i = p->pos;
+    /* `for` '(' has been consumed. Step over the loop variable, which is
+     * `var`/`auto` optionally followed by a type and '&', then a name. */
+    while (i < p->ntoks && i - p->pos < 8) {
+        TokenKind k = p->toks[i].kind;
+        if (k == T_COLON)
+            return 1;
+        if (k == T_SEMI || k == T_RPAREN || k == T_LBRACE || k == T_EOF)
+            return 0;
+        i++;
+    }
+    return 0;
+}
+
+/* Builds a call to a no-argument or one-argument method on a class receiver,
+ * by the mangled symbol the method is emitted under. This is how a container is
+ * reached from a desugaring, where there is no source expression to resolve a
+ * name against. */
+static Expr *make_method_call(Parser *p, Expr *recv, const char *sdef, const char *mname, Type *ret,
+                              Expr *arg, Span span) {
+    char *mang = arena_alloc(p->arena, strlen(sdef) + strlen(mname) + 3);
+    snprintf(mang, strlen(sdef) + strlen(mname) + 3, "%s__%s", sdef, mname);
+    Expr *c = new_expr(p, E_CALL, span);
+    c->name = mang;
+    if (arg == NULL) {
+        Expr **args = arena_alloc_array(p->arena, 1, sizeof(Expr *));
+        args[0] = recv;
+        c->args = args;
+        c->nargs = 1;
+    } else {
+        Expr **args = arena_alloc_array(p->arena, 2, sizeof(Expr *));
+        args[0] = recv;
+        args[1] = arg;
+        c->args = args;
+        c->nargs = 2;
+    }
+    c->type = ret;
+    return c;
+}
+
+/* `for (auto x : coll)` and `for (auto& x : coll)`.
+ *
+ * A desugaring rather than a new statement kind, for the same reason `foreach`
+ * is: the loop that comes out is an ordinary index loop, so every optimizer
+ * that understands a `for` already understands this, and `break`/`continue`
+ * need no special case. What changes with the receiver is only *how* the
+ * element is read.
+ *
+ * A `Vec<T>` is a class holding a pointer, so it is indexed with `at(i)` and
+ * counted with `size()` rather than with `[i]` and `.length` -- the container
+ * knows its own representation and a desugaring that indexed it directly would
+ * have to know the field offsets too.
+ *
+ * `&` is the difference between a copy and a reference: without it each
+ * element is read into a fresh local, and with it the loop writes back into the
+ * container. There is no C++ overload of `operator[]` to lean on here, so this
+ * is spelled by binding the element by reference, which the index expression
+ * already produces. */
+static Stmt *parse_range_for(Parser *p, Span start) {
+    match(p, T_LPAREN);
+    int by_ref = 0;
+    Type *written = NULL;
+    if (at(p, T_KW_VAR)) {
+        advance(p);
+        /* `auto&` is a reference binding, and it is the spelling C++ uses, so
+         * it has to mean something the same way `var` plus a separate `&`
+         * does. */
+        by_ref = match(p, T_AMP);
+    } else if (at(p, T_AMP)) {
+        /* `for (&x : v)` is a bare-reference binding, and the element type is
+         * taken from the container either way. */
+        advance(p);
+        by_ref = 1;
+    } else if (is_type_token(cur(p)->kind) || at_typed_decl(p)) {
+        written = parse_type(p);
+        by_ref = match(p, T_AMP);
+    }
+    if (!at(p, T_IDENT)) {
+        diag_error(cur(p)->span, "expected loop variable name");
+        return new_stmt(p, S_BLOCK, start);
+    }
+    char *name = cur(p)->text;
+    advance(p);
+    if (!match(p, T_COLON)) {
+        diag_error(cur(p)->span, "expected ':' in a range-based for");
+        match(p, T_SEMI);
+        skip_braced_block(p);
+        return new_stmt(p, S_BLOCK, start);
+    }
+    Expr *coll = parse_expr(p);
+    match(p, T_RPAREN);
+
+    /* A string is iterable as its bytes, like the fixed array it replaces. */
+    int is_str = is_kind(coll->type, TK_STRING);
+    int is_arr = is_kind(coll->type, TK_ARRAY);
+    Type *cbase = NULL;
+    char *cstruct = NULL;
+    int cdata_off = -1;
+    if (is_str) {
+        cbase = type_int(p->ty);
+    } else if (is_arr) {
+        cbase = coll->type->base;
+    } else if (!is_unk(coll->type) && is_kind(coll->type, TK_PTR) &&
+               is_kind(coll->type->base, TK_STRUCT) && coll->type->base->sdef->is_class) {
+        cstruct = coll->type->base->sdef->name;
+        /* The element type comes from the container's own `at`, which is the
+         * only place it is written down: a `Vec<T>` stores its type parameter
+         * nowhere a generic instantiation can be read back out of a field. */
+        StructDef *sd = coll->type->base->sdef;
+        StructMethod *m = struct_find_method(sd, "at");
+        cbase = m ? m->ret : NULL;
+        /* The offset of the element buffer, which a by-reference element binds
+         * to. A container without one cannot be iterated by reference, because
+         * `at` hands back a value and there is then no place to write. */
+        Field *df = struct_find_field(sd, "data");
+        cdata_off = df ? df->offset : -1;
+        if (cbase == NULL) {
+            diag_error(start, "cannot range over '%s': it has no 'at(i)' to read elements with",
+                       coll->type->base->sdef->name);
+            match(p, T_SEMI);
+            skip_braced_block(p);
+            return new_stmt(p, S_BLOCK, start);
+        }
+    }
+    if (cbase == NULL) {
+        if (!is_unk(coll->type)) {
+            if (is_kind(coll->type, TK_PTR))
+                diag_error(start,
+                           "cannot range over '%s': a pointer has no length, so there is no "
+                           "bound to iterate to; use an index loop over the array instead",
+                           type_name(p->ty, coll->type));
+            else
+                diag_error(start, "a range-based for needs an array, a string or a class, got %s",
+                           type_name(p->ty, coll->type));
+        }
+        match(p, T_SEMI);
+        skip_braced_block(p);
+        return new_stmt(p, S_BLOCK, start);
+    }
+
+    scope_push(p);
+    /* A written element type is checked against the container's, because a
+     * loop variable declared `int` and bound to a `string` would otherwise be a
+     * silent wrong answer rather than a mistake at the point of writing it. */
+    if (written != NULL && !type_equals(written, cbase)) {
+        diag_error(start, "cannot bind '%s' to an element of type '%s'", type_name(p->ty, written),
+                   type_name(p->ty, cbase));
+    }
+    char hname[32];
+    int loop_id = p->foreach_counter++;
+    snprintf(hname, sizeof hname, "__rng%d", loop_id);
+    int coll_slot = declare_var(p, hname, coll->type);
+    mark_synth(p, hname);
+    snprintf(hname, sizeof hname, "__ri%d", loop_id);
+    int idx_slot = declare_var(p, hname, type_int(p->ty));
+    mark_synth(p, hname);
+    /* The element is a local whether or not it is a reference: `auto& x` is a
+     * local bound to the container's storage, so a write through it lands in the
+     * container. Which is why `by_ref` changes the initializer and not the
+     * variable's shape. */
+    /* A by-reference element is a *pointer* to the element, so the variable is
+     * declared as one. Declaring it as the element type and storing an address
+     * in it type-checks and then reads the address as if it were the value --
+     * `print(x)` printed the element's location rather than the element, and
+     * `x = 5` overwrote the location. The body then works through `*`, exactly
+     * as a hand-written `var p = &v.data[i]` does. */
+    int elem_slot = declare_var(p, name, by_ref ? type_ptr(p->ty, cbase) : cbase);
+
+    Type *int_ty = type_int(p->ty);
+
+    /* One node per position, never shared. The allocator walks the condition
+     * and the body as separate liveness positions, and a node reached from
+     * both is walked twice: the second walk re-decides where it lives and the
+     * two positions then disagree about the same variable. `parse_foreach`
+     * builds a fresh reference at each use for the same reason. */
+    Expr *idx_ref = new_expr(p, E_VAR, start);
+    idx_ref->name = "idx";
+    idx_ref->slot = idx_slot;
+    idx_ref->type = int_ty;
+
+    Stmt *coll_init = new_stmt(p, S_VAR, start);
+    coll_init->name = "coll";
+    coll_init->type = coll->type;
+    coll_init->slot = coll_slot;
+    coll_init->init = coll;
+
+    Expr *zero = new_expr(p, E_INT, start);
+    zero->ival = 0;
+    zero->type = int_ty;
+    Stmt *idx_init = new_stmt(p, S_VAR, start);
+    idx_init->name = "idx";
+    idx_init->type = int_ty;
+    idx_init->slot = idx_slot;
+    idx_init->init = zero;
+
+    /* cond: idx < <length of coll> */
+    Expr *len;
+    {
+        Expr *cr = new_expr(p, E_VAR, start);
+        cr->name = "coll";
+        cr->slot = coll_slot;
+        cr->type = coll->type;
+        if (cstruct != NULL) {
+            len = make_method_call(p, cr, cstruct, "size", int_ty, NULL, start);
+        } else if (is_str) {
+            len = new_expr(p, E_STRLEN, start);
+            len->lhs = cr;
+            len->type = int_ty;
+        } else {
+            len = new_expr(p, E_FIELD, start);
+            len->lhs = cr;
+            len->name = "length";
+            len->type = int_ty;
+        }
+    }
+    Expr *cond = make_binary(p, T_LT, idx_ref, len, start);
+
+    /* element = <coll[idx]> */
+    Expr *elem;
+    {
+        Expr *cr = new_expr(p, E_VAR, start);
+        cr->name = "coll";
+        cr->slot = coll_slot;
+        cr->type = coll->type;
+        Expr *ir = new_expr(p, E_VAR, start);
+        ir->slot = idx_slot;
+        ir->type = int_ty;
+        if (cstruct != NULL) {
+            elem = make_method_call(p, cr, cstruct, "at", cbase, ir, start);
+        } else if (is_str) {
+            elem = new_expr(p, E_INDEX, start);
+            elem->lhs = cr;
+            elem->rhs = ir;
+            elem->type = int_ty;
+        } else {
+            elem = new_expr(p, E_INDEX, start);
+            elem->lhs = cr;
+            elem->rhs = ir;
+            elem->type = cbase;
+        }
+    }
+    Stmt *elem_init = new_stmt(p, S_VAR, start);
+    elem_init->name = name;
+    elem_init->type = cbase;
+    elem_init->slot = elem_slot;
+    if (by_ref && cstruct != NULL) {
+        /* A by-reference element has to keep writing to the container, so the
+         * variable is a *pointer* at `data[i]` rather than a copy of `at(i)`.
+         * `at` returns by value, so there is no lvalue behind it to read and a
+         * copy in the initializer would make `&` a lie: the loop would read the
+         * element and discard the write. The field is what makes the element
+         * addressable, which is the same reason `p->` and `p.` are the same
+         * thing -- a container that could not hand out a place to its own
+         * elements could not be iterated by reference at all. */
+        Expr *dataf = new_expr(p, E_FIELD, start);
+        Expr *cr1 = new_expr(p, E_VAR, start);
+        cr1->name = "coll";
+        cr1->slot = coll_slot;
+        cr1->type = coll->type;
+        dataf->lhs = cr1;
+        dataf->name = "data";
+        dataf->field_off = cdata_off;
+        dataf->type = type_array(p->ty, cbase, -1);
+        Expr *place = new_expr(p, E_INDEX, start);
+        Expr *ir1 = new_expr(p, E_VAR, start);
+        ir1->slot = idx_slot;
+        ir1->type = int_ty;
+        place->lhs = dataf;
+        place->rhs = ir1;
+        place->type = cbase;
+        Expr *addr = new_expr(p, E_ADDR, start);
+        addr->lhs = place;
+        addr->type = type_ptr(p->ty, cbase);
+        elem_init->type = type_ptr(p->ty, cbase);
+        elem_init->init = addr;
+    } else if (by_ref) {
+        /* A string's or an array's element is already an lvalue, so the
+         * initializer is the index expression itself and the variable is a
+         * pointer to it. A `char *`-shaped loop over a string, which is what
+         * C++'s `for (char& c : s)` means. */
+        Expr *place = new_expr(p, E_INDEX, start);
+        Expr *cr2 = new_expr(p, E_VAR, start);
+        cr2->name = "coll";
+        cr2->slot = coll_slot;
+        cr2->type = coll->type;
+        Expr *ir2 = new_expr(p, E_VAR, start);
+        ir2->slot = idx_slot;
+        ir2->type = int_ty;
+        place->lhs = cr2;
+        place->rhs = ir2;
+        place->type = is_str ? int_ty : cbase;
+        Expr *addr = new_expr(p, E_ADDR, start);
+        addr->lhs = place;
+        addr->type = type_ptr(p->ty, is_str ? int_ty : cbase);
+        elem_init->type = type_ptr(p->ty, is_str ? int_ty : cbase);
+        elem_init->init = addr;
+    } else {
+        elem_init->init = elem;
+    }
+
+    /* idx = idx + 1 */
+    Expr *one = new_expr(p, E_INT, start);
+    one->ival = 1;
+    one->type = int_ty;
+    Expr *idx_ref3 = new_expr(p, E_VAR, start);
+    idx_ref3->slot = idx_slot;
+    idx_ref3->type = int_ty;
+    Expr *asg = new_expr(p, E_ASSIGN, start);
+    asg->op = T_PLUS;
+    asg->compound = 1;
+    asg->lhs = idx_ref3;
+    asg->rhs = one;
+    asg->type = int_ty;
+    Stmt *step = new_stmt(p, S_EXPR, start);
+    step->expr = asg;
+
+    p->loop_depth++;
+    Stmt *body = parse_stmt(p);
+    p->loop_depth--;
+    scope_pop(p);
+
+    Stmt **inner = arena_alloc_array(p->arena, 3, sizeof(Stmt *));
+    inner[0] = elem_init;
+    inner[1] = step;
+    inner[2] = body;
+    Stmt *inner_block = new_stmt(p, S_BLOCK, start);
+    inner_block->items = inner;
+    inner_block->nitems = 3;
+
+    Stmt *loop = new_stmt(p, S_WHILE, start);
+    loop->cond = cond;
+    loop->body = inner_block;
+
+    Stmt **outer = arena_alloc_array(p->arena, 3, sizeof(Stmt *));
+    outer[0] = coll_init;
+    outer[1] = idx_init;
+    outer[2] = loop;
+    Stmt *wrap = new_stmt(p, S_BLOCK, start);
+    wrap->items = outer;
+    wrap->nitems = 3;
+    return wrap;
+}
+
 static Stmt *parse_foreach(Parser *p, Span start) {
     advance(p); /* foreach */
     match(p, T_LPAREN);
@@ -6926,6 +7281,17 @@ static Stmt *parse_stmt(Parser *p) {
         Span start = t->span;
         advance(p);
         match(p, T_LPAREN);
+        /* `for (auto x : v)` is a range-for, not a three-part for, so it is
+         * recognized before the `;` is expected. A C-style `for` cannot begin
+         * with a colon, so looking for one here costs nothing. */
+        {
+            int save = p->pos;
+            if (at_range_for(p)) {
+                p->pos = save;
+                return parse_range_for(p, start);
+            }
+            p->pos = save;
+        }
         Stmt *init = NULL;
         if (!at(p, T_SEMI)) {
             if (at(p, T_KW_CONST)) {

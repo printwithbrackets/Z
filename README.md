@@ -525,6 +525,13 @@ Recorded because each was invisible at the default optimization level, and
   a build that had succeeded. The harness now drains the pipe after the buffer
   fills. The real failure was always the warnings, and there were 300 of them
   because `licm_bigframe` is a 300-local function on purpose.
+- **`&obj.field` compiled as a method pointer, and failed.** `&` on a member
+  name went looking for a method, so `&h.data[0]` reported "type Holder has no
+  method 'data'" for a field the type plainly had. The parser now looks the name
+  up as a field first and only goes looking for a method when it is not one, so
+  the two spellings that share the token decide by lookup rather than by hope.
+  `addrof_field` is the test, and it ends with a method pointer to show the
+  other half of the branch still works.
 
 ## Performance
 

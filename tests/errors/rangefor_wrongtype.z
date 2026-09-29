@@ -1,0 +1,8 @@
+int main() {
+    var a = new int[2];
+    var p = &a;
+    for (auto x : p) {
+        print(x);
+    }
+    return 0;
+}
