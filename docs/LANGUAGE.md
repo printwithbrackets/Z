@@ -38,12 +38,12 @@ recorded because the reason is the design.
 
 | Cut | Why |
 |---|---|
-| **Inheritance** (`class B : A`, `override`, `base()`, upcast) | It is the single largest source of C++ complexity for the least amount of used code. Every hierarchy is a set of types that respond to some messages, which is what `interface` already is and does without a vtable per class or an upcast that can be wrong. |
-| **The garbage collector** | A conservative mark-sweep collector cannot see a pointer held in a register the caller spilled, so it leaks; it cannot move an object, so it gives up compaction; and its pause time is a property of the program. RAII frees at a point the programmer wrote down, has no pause, and moves nothing. The cost is that a cycle leaks, and that is stated rather than hidden. |
-| **`this` extension methods** (`int Twice(this int n)`) | They make a bare call site's meaning depend on an invisible second program, and they are how a global namespace gets polluted. Free functions with an explicit first parameter say the same thing and can be found. |
-| **Properties** (`int X { get; set; }`) | A property is a method pair with a name that does not say which it is. v2 uses fields and methods, and `size()` rather than `length()` follows the same rule: a name says whether it is a field or a call. |
+| **Inheritance** (`class B : A`, `override`, `base()`, upcast) — **cut in slice 2** | It is the single largest source of C++ complexity for the least amount of used code. Every hierarchy is a set of types that respond to some messages, which is what `interface` already is and does without a vtable per class or an upcast that can be wrong. |
+| **The garbage collector** — slice 3 | A conservative mark-sweep collector cannot see a pointer held in a register the caller spilled, so it leaks; it cannot move an object, so it gives up compaction; and its pause time is a property of the program. RAII frees at a point the programmer wrote down, has no pause, and moves nothing. The cost is that a cycle leaks, and that is stated rather than hidden. |
+| **`this` extension methods** (`int Twice(this int n)`) — slice 3 | They make a bare call site's meaning depend on an invisible second program, and they are how a global namespace gets polluted. Free functions with an explicit first parameter say the same thing and can be found. |
+| **Properties** (`int X { get; set; }`) — slice 3 | A property is a method pair with a name that does not say which it is. v2 uses fields and methods, and `size()` rather than `length()` follows the same rule: a name says whether it is a field or a call. |
 | **Implicit conversions** except `int`→`float` | A conversion that happens without being written is one the reader has to know about to be sure of the program. The single widening is kept because it is lossless; nothing else is. |
-| **`T[]` as the only aggregate** | A fixed-length heap array with a length header, grown by hand, is one container out of many, and it is the one nobody wants. `Vec<T>` is the aggregate, and it is a value. |
+| **`T[]` as the only aggregate** — slice 3 | A fixed-length heap array with a length header, grown by hand, is one container out of many, and it is the one nobody wants. `Vec<T>` is the aggregate, and it is a value. |
 
 **What v2 keeps from v1, unchanged in spirit:** top-level statements, `var` and
 `auto`, structs, enums with exhaustive `match`, `Result<T,E>` with `?`,
@@ -51,10 +51,12 @@ interfaces, closures, function pointers, templates by monomorphization, C
 interoperability in both directions, modules, the whole diagnostics story, the
 collections, and the whole optimizer.
 
-**What v2 has that v1 did not,** as of slice 1: `auto`, `->`, the range-based
-`for`, and the C++ container names. Each is additive, so a v1 program still
-compiles, and each is covered by a golden test rather than only by a mention
-here.
+**What v2 has that v1 did not,** as of slice 2: `auto`, `->`, the range-based
+`for`, the C++ container names, and no inheritance. The first four are additive
+and a v1 program still compiles. **The fifth is not, and is meant not to be** —
+a program that used `class B : A` now gets a diagnostic saying inheritance is
+gone and to use an interface instead. That is the one change so far that
+requires editing a caller.
 
 ## The three decisions everything else depends on
 
@@ -198,24 +200,38 @@ method for a field the type had), and the test harness reported a successful
 build as a compile failure when the compiler emitted more output than its
 capture buffer held. See the miscompiles section of the README.
 
-### Slice 2 — cut inheritance, keep classes (1–2 weeks)
+### Slice 2 — cut inheritance, keep classes (1–2 weeks) — **done**
 
-`class B : A`, `base()`, and `override` go. `class` stays, and `virtual` stays
-with it, so a single hierarchy of your own still dispatches dynamically.
-
-What is deleted: the base-type walk in the type checker, `base()` call
-emission, and the override check. What survives untouched: vtable emission
-(`src/codegen.c:4414`), the dispatch load (`:1706`), constructors, `this`, and
-`new C(args)`. The cut is smaller than it looks because a vtable with no
+`class B : A`, `base(...)` and `override` are gone. `class` stays, `virtual`
+stays, and so do constructors, `this` and `new C(args)`. The vtable stays too:
+it is how a class stored in an interface is dispatched, so a vtable with no
 subclass is still a working vtable.
 
-`interface` becomes the only way to collect unrelated types, which it already
-was — the `subclass stored in an interface calls the override` line in
-[LANGUAGE-v1.md](LANGUAGE-v1.md) just stops having a case to describe.
+`interface` is now the only way to collect related types, and it already was
+the way to collect *unrelated* ones. What a hierarchy bought — a base type to
+upcast to, a base constructor that can be forgotten, an override slot to reuse —
+is what is gone, along with the derived-to-base assignment in
+`type_assignable` that could silently hand back a pointer to a prefix of an
+object.
 
-`lib/*.z` is unaffected: none of `StringBuilder`, `Vec<T>`, `Map<K,V>` or
-`Set<T>` inherits anything. `tests/cases/classes.z` and `classes2.z` are
-rewritten.
+Each removed form is a **diagnostic that says what to do instead**, not a
+silent unknown: a program carried over from v1 needs to be told that
+inheritance is gone rather than left with an undefined method name. Three
+diagnostics, three error tests.
+
+The four tests that used inheritance (`integration`, `methodptr`,
+`local_types`, `interfaces`) were rewritten against interfaces and produce
+**byte-identical output**, which is the check that the cut cost nothing.
+`classes.z` and `classes2.z` are new and cover the same shapes without a base
+class. `lib/*.z` is untouched: none of `StringBuilder`, `Vec<T>`, `Map<K,V>` or
+`Set<T>` inherited anything.
+
+One thing worth recording: rewriting the vtable layout dropped
+`m->vtable_index = slot`, so every virtual method kept index 0 and two virtual
+methods on one class both dispatched through the first slot. `floats` stopped
+printing and exited 1 **with no diagnostic at all**. Silence was the failure
+mode — a compile emitting a call through an empty vtable slot has no way to
+complain — and it was the golden tests that caught it rather than a crash.
 
 ### Slice 3 — GC to RAII, and ownership (3–4 weeks)
 

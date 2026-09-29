@@ -4,19 +4,25 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Status: the compiler implements v1. v2 is specified and being built.** A
-working end-to-end compiler: source → lexer → parser → type checker → x86-64
-assembly → native binary. It has a real type system, pointers, heap arrays,
-structs with methods and properties, `for`/`foreach`, enums with exhaustive
-pattern matching, monomorphized generics, classes with vtables and inheritance,
-a tracing garbage collector for the heap, IEEE-754 `float`, closures, nested
-functions, interfaces, a standard library, warnings, DWARF debug info, and a
-register-allocating, constant-folding, strength-reducing backend.
+**Status: v2 slices 1 and 2 are built.** A working end-to-end compiler:
+source → lexer → parser → type checker → x86-64 assembly → native binary. It
+has a real type system, pointers, heap arrays, structs with methods and
+properties, `for`/`foreach` and the range-based `for`, enums with exhaustive
+pattern matching, monomorphized generics, `Vec`/`Map`/`Set`, classes with
+vtables, interfaces, a tracing garbage collector for the heap, IEEE-754
+`float`, closures, nested functions, a standard library, warnings, DWARF debug
+info, and a register-allocating, constant-folding, strength-reducing backend.
+
+**Z has no inheritance.** `class B : A`, `override` and `base(...)` were cut in
+slice 2, each replaced by a diagnostic that says to use an `interface` instead.
+`class`, `virtual` and the vtable stay, because a class stored in an interface
+is still dispatched through one.
 
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no
 inheritance, and threads that cannot data-race because ownership makes sharing
-unrepresentable. See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2
+unrepresentable. Slice 3 (ownership and RAII, which retires the collector) and
+slice 4 (threads and channels) are what remain. See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2
 specification and the five slices it is built in; v1 is preserved verbatim in
 **[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md)**. To learn the language that
 compiles *today*, read [docs/TUTORIAL.md](docs/TUTORIAL.md) and
@@ -207,7 +213,7 @@ system assembler — we do not write an ELF encoder.
   The itab is a static array of code pointers in the interface's declaration
   order; a struct's entries point straight at its methods, a class's are
   trampolines through the vtable so a subclass still calls the override.
-- **M6c (done):** opt-in `class` with vtables — inheritance, `virtual`/`override`, constructors + `base()`, `new C()` heap objects, polymorphic dynamic dispatch.
+- **M6c (done, then cut in v2 slice 2):** opt-in `class` with vtables — inheritance, `virtual`/`override`, constructors + `base()`, `new C()` heap objects, polymorphic dynamic dispatch. The vtable, `virtual` and the constructor stay; the inheritance does not. `class B : A`, `override` and `base(...)` are now diagnostics pointing at `interface`, and the tests that used them were rewritten against interfaces with byte-identical output.
 - **M7 (done):** optimizations + register allocation. Done: compile-time
   constant folding & propagation; **function inlining**; a liveness-based
   **local register allocator**;
