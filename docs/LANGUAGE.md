@@ -48,8 +48,13 @@ recorded because the reason is the design.
 **What v2 keeps from v1, unchanged in spirit:** top-level statements, `var` and
 `auto`, structs, enums with exhaustive `match`, `Result<T,E>` with `?`,
 interfaces, closures, function pointers, templates by monomorphization, C
-interoperability in both directions, modules, the whole diagnostics story, and
-the whole optimizer.
+interoperability in both directions, modules, the whole diagnostics story, the
+collections, and the whole optimizer.
+
+**What v2 has that v1 did not,** as of slice 1: `auto`, `->`, the range-based
+`for`, and the C++ container names. Each is additive, so a v1 program still
+compiles, and each is covered by a golden test rather than only by a mention
+here.
 
 ## The three decisions everything else depends on
 
@@ -175,18 +180,23 @@ comes before the thing that depends on it.
 ### Slice 1 — surface, no semantic change (days)
 
 Purely additive, so the test suite keeps passing throughout and this can be
-reviewed as a diff.
+reviewed as a diff. **Done except for the last two rows**, which need the
+module system rather than the parser.
 
-| Change | Notes |
-|---|---|
-| `auto x = ...` | A synonym for `var`, not a replacement. Both stay. |
-| `T&` references | A borrow of a value someone else owns. `&x` yields `T&` where v1 yields `T*` for a struct. |
-| `p->f` | Alongside `p.f`. Both work. |
-| `for (auto& x : v)` | Range-for over `Vec<T>`, `Set<T>` and `string`. `foreach` stays as sugar for it. |
-| `p->i()` and `p->len` on `Vec<T>` | A `Vec` is a struct, so it needs `->` for the pointer case. |
-| `size()`, `empty()`, `push_back`, `pop_back` | C++ names. v1's `size()`, `isEmpty()`, `push()`, `pop()` are removed — same names where they agree, so `size()` is already right. |
-| `namespace` | Module scope. Also the fix for v1's M13 problem, where two imported files could not both define `helper`. |
-| `pub` | Visibility, unexported by default. Also M13. |
+| Change | Notes | |
+|---|---|---|
+| `auto x = ...` | A synonym for `var`, not a replacement. Both stay. | done |
+| `p->f` | Alongside `p.f`. `->` desugars to an explicit deref and reuses the same member-access path, so the two cannot disagree. | done |
+| `for (auto x : v)` / `for (auto& x : v)` | Range-for over a fixed array, a `string` (as bytes), and any class with an `at(i)` — which is `Vec<T>`. Desugars to the same index loop `foreach` produces, so `break`/`continue` and every optimizer pass behave identically. | done |
+| `push_back`, `pop_back`, `empty` | C++ names, on all three containers, as one-line aliases rather than second bodies. Both spellings are kept. | done |
+| `T&` references | **Not a pointer with a different name.** In slice 1 `&` in a range-for makes the loop variable a *pointer* to the element, so the body writes through `*x`. A real `T&` type is part of slice 3, because it is a borrow with a lifetime and that is the same work as the ownership rules. | partial |
+| `namespace`, `pub` | Module scope and visibility, unexported by default. Also the fix for v1's M13 problem, where two imported files could not both define `helper`. Needs the module system, not the parser, so it is not slice-1 work in practice. | not started |
+
+Two bugs the range-for surfaced on the way, both of which were live before it:
+`&obj.field` was parsed as a method pointer (so `&h.data[0]` reported a missing
+method for a field the type had), and the test harness reported a successful
+build as a compile failure when the compiler emitted more output than its
+capture buffer held. See the miscompiles section of the README.
 
 ### Slice 2 — cut inheritance, keep classes (1–2 weeks)
 
