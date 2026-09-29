@@ -951,16 +951,6 @@ static int collect_member_names(StructDef *sd, const char **out, int cap) {
         out[n++] = sd->props[i].name;
     for (int i = 0; i < sd->nmethods && n < cap; i++)
         out[n++] = sd->methods[i]->name;
-    /* A subclass can reach everything its base declares, and a reader who
-     * cannot see a member usually looked for it on the base type. */
-    for (StructDef *b = sd->base; b != NULL && n < cap; b = b->base) {
-        for (int i = 0; i < b->nfields && n < cap; i++)
-            out[n++] = b->fields[i].name;
-        for (int i = 0; i < b->nprops && n < cap; i++)
-            out[n++] = b->props[i].name;
-        for (int i = 0; i < b->nmethods && n < cap; i++)
-            out[n++] = b->methods[i]->name;
-    }
     return n;
 }
 
@@ -1510,13 +1500,15 @@ static void prescan_struct_names(Parser *p) {
  * property `type name {`, which is a zero-argument method of the field's type. */
 static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ctor_name) {
     int j = i;
-    int is_virtual = 0, is_override = 0;
+    int is_virtual = 0;
     if (j < p->ntoks && p->toks[j].kind == T_KW_VIRTUAL) {
         is_virtual = 1;
         j++;
     } else if (j < p->ntoks && p->toks[j].kind == T_KW_OVERRIDE) {
+        /* `override` went with inheritance. The pre-scan steps over it so both
+         * passes agree on where the signature starts; the diagnostic belongs to
+         * the real parse, which is the one with a span to point at. */
         is_virtual = 1;
-        is_override = 1;
         j++;
     }
     int tstart = j;
@@ -1564,7 +1556,6 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
         m->nparams = 0;
         m->body = NULL; /* the real parser fills this in */
         m->is_virtual = 0;
-        m->is_override = 0;
         m->vtable_index = -1;
         struct_add_method(p->ty, sd, m);
         return j; /* the '{' and everything in it is the real parser's */
@@ -1656,7 +1647,6 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
     m->nparams = np;
     m->body = NULL; /* the real parser fills this in */
     m->is_virtual = is_virtual;
-    m->is_override = is_override;
     m->vtable_index = -1;
     struct_add_method(p->ty, sd, m);
     return j;
@@ -1781,22 +1771,16 @@ static void prescan_struct_fields(Parser *p) {
         if (sd == NULL)
             continue;
         sd->is_class = is_class;
-        int base_size = 0;
         if (is_class) {
             sd->align = 8;
             sd->size = 8; /* vptr */
-            base_size = 8;
+            /* A `: Base` is skipped here so the pre-scan and the real parse
+             * agree on where the body starts. The diagnostic for it belongs to
+             * the real parse, which is the one that has a span to point at. */
             if (j < p->ntoks && p->toks[j].kind == T_COLON) {
                 j++;
-                if (j < p->ntoks && p->toks[j].kind == T_IDENT) {
-                    Type *bt = type_find_struct(p->ty, p->toks[j].text);
-                    if (bt != NULL && bt->sdef->is_class) {
-                        sd->base = bt->sdef;
-                        base_size = bt->sdef->size;
-                        sd->size = base_size;
-                    }
+                if (j < p->ntoks && p->toks[j].kind == T_IDENT)
                     j++;
-                }
             }
         }
         if (j >= p->ntoks || p->toks[j].kind != T_LBRACE)
@@ -2233,7 +2217,7 @@ static Expr *to_iface(Parser *p, Expr *e, Type *want, Span span) {
     if (impl->is_class) {
         for (int i = 0; i < id->nmethods; i++) {
             StructMethod *m = struct_find_method(impl, id->methods[i].name);
-            if (m == NULL || (!m->is_virtual && !m->is_override)) {
+            if (m == NULL || !m->is_virtual) {
                 diag_error(span,
                            "'%s' cannot implement '%s' through a class: '%s' must be "
                            "declared 'virtual' to be dispatched dynamically",
@@ -3036,47 +3020,21 @@ static StructDef *resolve_gtype(Parser *p, GenericType *g, Type **args, int narg
 }
 
 static Expr *parse_call(Parser *p, char *name, Span span) {
-    /* `base(args)` inside a class constructor calls the base constructor. */
-    if (strcmp(name, "base") == 0 && at(p, T_LPAREN) && p->cur_msd != NULL &&
-        p->cur_msd->base != NULL) {
-        advance(p); /* '(' */
-        Expr **bargs = arena_alloc_array(p->arena, 4, sizeof(Expr *));
-        int bn = 0;
-        if (!at(p, T_RPAREN)) {
-            for (;;) {
-                if (bn == 4) {
-                    Expr **nb = arena_alloc_array(p->arena, (size_t)(bn * 2), sizeof(Expr *));
-                    memcpy(nb, bargs, (size_t)bn * sizeof(Expr *));
-                    bargs = nb;
-                }
-                bargs[bn++] = parse_expr(p);
-                if (!match(p, T_COMMA))
-                    break;
-            }
-        }
+    /* `base(args)` called a base class constructor, and went with inheritance.
+     * It is a diagnostic rather than a silent undefined function, because a
+     * program carried over from v1 will have one and the reader needs to know
+     * it is not a name that failed to resolve. A constructor initialises its own
+     * fields, so what `base(l)` did is now an assignment in the constructor. */
+    if (strcmp(name, "base") == 0 && at(p, T_LPAREN) && p->cur_msd != NULL) {
+        diag_error_code(span, "no_inheritance",
+                        "'base(...)' has no meaning without inheritance: there is no base "
+                        "constructor to call. Assign the field in this constructor instead");
+        while (!at(p, T_RPAREN) && !at(p, T_EOF))
+            advance(p);
         match(p, T_RPAREN);
-        StructDef *bs = p->cur_msd->base;
-        StructMethod *bctor = struct_find_method(bs, bs->name);
-        if (bctor == NULL) {
-            diag_error(span, "base class '%s' has no constructor", bs->name);
-            Expr *err = new_expr(p, E_INT, span);
-            err->type = NULL;
-            return err;
-        }
-        /* Base ctor: this (as the base pointer) + args. */
-        int capb = bn + 1;
-        Expr **full = arena_alloc_array(p->arena, (size_t)capb, sizeof(Expr *));
-        full[0] = p->cur_this;
-        for (int i = 0; i < bn; i++)
-            full[i + 1] = bargs[i];
-        char *bm = arena_alloc(p->arena, strlen(bs->name) * 2 + 4);
-        snprintf(bm, strlen(bs->name) * 2 + 4, "%s__%s", bs->name, bs->name);
-        Expr *call = new_expr(p, E_CALL, span);
-        call->name = bm;
-        call->args = full;
-        call->nargs = capb;
-        call->type = type_void(p->ty);
-        return call;
+        Expr *err = new_expr(p, E_INT, span);
+        err->type = NULL;
+        return err;
     }
     advance(p); /* '(' */
     Expr *e = new_expr(p, E_CALL, span);
@@ -6563,7 +6521,7 @@ static Stmt *parse_foreach(Parser *p, Span start) {
  * mangled as `Struct__method` and registered on the struct. Returns the S_FUNC
  * AST node for later code generation. */
 static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret, const char *mname,
-                          Span start, int is_virtual, int is_override) {
+                          Span start, int is_virtual) {
     advance(p); /* '(' */
     Type *stype = type_find_struct(p->ty, sname);
     Type *this_ty = stype ? type_ptr(p->ty, stype) : NULL;
@@ -6736,7 +6694,6 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     m->nparams = nexplicit;
     m->body = fn;
     m->is_virtual = is_virtual;
-    m->is_override = is_override;
     m->vtable_index = -1;
 
     scope_pop(p);
@@ -7039,27 +6996,23 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
     }
     if (sd != NULL && is_class) {
         sd->is_class = 1;
-        /* `class C : B` — resolve the base and reserve the vptr + inherited
-         * fields so this class's fields append after them. */
-        StructDef *base = NULL;
-        if (match(p, T_COLON)) {
-            if (!at(p, T_IDENT)) {
-                diag_error(cur(p)->span, "expected base class name after ':'");
-            } else {
-                Type *bt = type_find_struct(p->ty, cur(p)->text);
-                base = bt ? bt->sdef : NULL;
-                if (base == NULL || !base->is_class) {
-                    diag_error(cur(p)->span, "unknown or non-class base '%s'", cur(p)->text);
-                } else if (base == sd) {
-                    diag_error(cur(p)->span, "class '%s' cannot inherit from itself", name);
-                    base = NULL;
-                }
+        /* Z has no inheritance. A class used to be written `class C : B`, and
+         * what that bought -- a collection of related types -- is what an
+         * `interface` is for, without a base type to upcast to, a base
+         * constructor to remember, or a vtable per class in the hierarchy. A
+         * `:` here is now a diagnostic rather than a silently ignored base. */
+        if (at(p, T_COLON)) {
+            diag_error_code(cur(p)->span, "no_inheritance",
+                            "Z has no inheritance: '%s' cannot have a base class. Use an "
+                            "interface to collect related types, and give each type the "
+                            "methods it needs",
+                            name);
+            advance(p);
+            if (at(p, T_IDENT))
                 advance(p);
-            }
         }
-        sd->base = base;
         sd->align = 8;
-        sd->size = base ? base->size : 8; /* vptr (8 bytes) [+ base fields] */
+        sd->size = 8; /* vptr */
     }
     if (!match(p, T_LBRACE)) {
         diag_error(cur(p)->span, "expected '{' to open %s body", is_class ? "class" : "struct");
@@ -7075,12 +7028,19 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         prescan_struct_members(p, sd, p->pos, written);
     }
     while (!at(p, T_RBRACE) && !at(p, T_EOF)) {
-        int mvirtual = 0, moverride = 0;
+        int mvirtual = 0;
         if (at(p, T_KW_VIRTUAL)) {
             mvirtual = 1;
             advance(p);
         } else if (at(p, T_KW_OVERRIDE)) {
-            moverride = 1;
+            /* `override` went with inheritance, because with no base class there
+             * is nothing to override. It is a diagnostic rather than a silent
+             * unknown method, so a program carried over from v1 says what
+             * happened and what to do instead. */
+            diag_error_code(cur(p)->span, "no_override",
+                            "'override' has no meaning without inheritance: there is no base "
+                            "method to override. Declare the method 'virtual' if it goes in an "
+                            "interface");
             mvirtual = 1;
             advance(p);
         }
@@ -7105,7 +7065,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
                                 "overloading, so give the second one a different name",
                                 is_class ? "class" : "struct", name);
             }
-            parse_method(p, sd, name, type_void(p->ty), name, cur(p)->span, 0, 0);
+            parse_method(p, sd, name, type_void(p->ty), name, cur(p)->span, 0);
             continue;
         }
         if (!at(p, T_IDENT)) {
@@ -7117,7 +7077,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         advance(p);
         if (at(p, T_LPAREN)) {
             /* method */
-            parse_method(p, sd, name, mt, mname, mspan, mvirtual, moverride);
+            parse_method(p, sd, name, mt, mname, mspan, mvirtual);
         } else if (at(p, T_SEMI)) {
             /* plain field */
             advance(p);

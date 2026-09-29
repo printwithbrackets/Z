@@ -12,9 +12,14 @@ class Counter {
     virtual int v() { return 1; }
 }
 
-class Sub : Counter {
-    Sub(int a) { base(a); }
-    override int v() { return 2; }
+// A second class rather than a subclass. There is no base type to store it in,
+// so the two are related only by each having a `v`, and `Sub`'s is its own.
+class Sub {
+    int n;
+    Sub(int a) { n = a; }
+    int get() { return n; }
+    int add(int x) { return n + x; }
+    virtual int v() { return 2; }
 }
 
 void take(method(int) -> int g) { print(g(10)); return; }
@@ -49,7 +54,7 @@ int main() {
     var sv = &s.v;
     print(sv());                       // 2
     var cv = &c.v;
-    print(cv());                       // 1
+    print(cv());                       // 1 -- Counter's own v, not Sub's
 
     /* the receiver is reachable only from the binding, so the collector has to
      * trace the cell rather than free the object out from under it */

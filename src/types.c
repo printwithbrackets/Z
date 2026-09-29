@@ -284,7 +284,6 @@ StructDef *type_define_struct(TypeCtx *ctx, const char *name) {
     sd->complete = 0;
     sd->prescanned = 0;
     sd->is_class = 0;
-    sd->base = NULL;
     sd->nvtable = 0;
     sd->vtable_impl = NULL;
     if (ctx->nstructs == ctx->cap) {
@@ -341,41 +340,32 @@ void struct_finish(StructDef *sd) {
 }
 
 Field *struct_find_field(StructDef *sd, const char *name) {
-    /* Search the class itself, then base classes (inherited fields live at
-     * lower offsets). */
-    for (; sd != NULL; sd = sd->base)
-        for (int i = 0; i < sd->nfields; i++)
-            if (strcmp(sd->fields[i].name, name) == 0)
-                return &sd->fields[i];
+    /* Only the type's own fields. A field used to be inherited from a base
+     * class, which is why this walked the chain. */
+    for (int i = 0; i < sd->nfields; i++)
+        if (strcmp(sd->fields[i].name, name) == 0)
+            return &sd->fields[i];
     return NULL;
 }
 
 /* Computes the vtable layout for a class after its methods are registered.
- * Inherits the base's virtual slots (same indices), then appends new virtuals.
- * Each slot stores the most-derived implementation name for this class.
- * Returns 0 on success, -1 if a method is declared `override` but no matching
- * base virtual exists. */
+ * One slot per `virtual` method, in declaration order.
+ *
+ * This used to inherit the base's slots and let an `override` reuse its index,
+ * so a subclass's vtable was the base's with entries replaced. With inheritance
+ * gone there is no base to inherit from and no override to reuse a slot, and the
+ * layout is simply the class's own virtuals in order. A vtable with no subclass
+ * is still a working vtable: it is what a class stored in an interface calls
+ * through. */
 int class_finish_vtable(TypeCtx *ctx, StructDef *sd) {
-    int base_n = sd->base ? sd->base->nvtable : 0;
-    int cap = base_n + sd->nmethods + 1;
+    int cap = sd->nmethods + 1;
     sd->vtable_impl = arena_alloc_array(ctx->arena, (size_t)cap, sizeof(char *));
-    for (int i = 0; i < base_n; i++)
-        sd->vtable_impl[i] = sd->base->vtable_impl[i];
-    sd->nvtable = base_n;
+    sd->nvtable = 0;
     for (int i = 0; i < sd->nmethods; i++) {
         StructMethod *m = sd->methods[i];
         if (!m->is_virtual)
             continue;
-        int slot = -1;
-        if (m->is_override) {
-            /* Occupy the base's slot for the overridden method. */
-            StructMethod *bm = sd->base ? struct_find_method(sd->base, m->name) : NULL;
-            if (bm == NULL || !bm->is_virtual)
-                return -1;
-            slot = bm->vtable_index;
-        } else {
-            slot = sd->nvtable++;
-        }
+        int slot = sd->nvtable++;
         m->vtable_index = slot;
         char *mang = arena_alloc(ctx->arena, strlen(sd->name) + strlen(m->name) + 3);
         snprintf(mang, strlen(sd->name) + strlen(m->name) + 3, "%s__%s", sd->name, m->name);
@@ -405,22 +395,21 @@ void struct_add_method(TypeCtx *ctx, StructDef *sd, StructMethod *m) {
 }
 
 StructMethod *struct_find_method(StructDef *sd, const char *name) {
-    /* Search the class itself, then base classes (inheritance). */
-    for (; sd != NULL; sd = sd->base)
-        for (int i = 0; i < sd->nmethods; i++)
-            if (strcmp(sd->methods[i]->name, name) == 0)
-                return sd->methods[i];
+    for (int i = 0; i < sd->nmethods; i++)
+        if (strcmp(sd->methods[i]->name, name) == 0)
+            return sd->methods[i];
     return NULL;
 }
 
-/* Returns the class that actually declares method `name` (searching sd then its
- * bases), so calls to inherited methods mangle against the declaring class. */
+/* Returns the class that declares method `name`.
+ *
+ * With inheritance this searched the base chain, so a call to an inherited
+ * method mangled against the class that declared it rather than the one it was
+ * called through. A class has no base now, so the answer is always `sd` -- and
+ * the function stays because a call site asking this question should not have
+ * to know the answer is itself. */
 StructDef *struct_method_owner(StructDef *sd, const char *name) {
-    for (; sd != NULL; sd = sd->base)
-        for (int i = 0; i < sd->nmethods; i++)
-            if (strcmp(sd->methods[i]->name, name) == 0)
-                return sd;
-    return NULL;
+    return struct_find_method(sd, name) != NULL ? sd : NULL;
 }
 
 void struct_add_prop(TypeCtx *ctx, StructDef *sd, const char *name, Type *type, int offset) {
@@ -497,14 +486,10 @@ int type_assignable(Type *dst, Type *src) {
      * out of every assignability test in the language. */
     if (dst != NULL && dst->kind == TK_IFACE)
         return 1;
-    if (dst != NULL && src != NULL && dst->kind == TK_PTR && src->kind == TK_PTR &&
-        dst->base != NULL && src->base != NULL && dst->base->kind == TK_STRUCT &&
-        src->base->kind == TK_STRUCT && dst->base->sdef && src->base->sdef) {
-        StructDef *b = dst->base->sdef;
-        for (StructDef *d = src->base->sdef; d != NULL; d = d->base)
-            if (d == b)
-                return 1;
-    }
+    /* No upcast: a derived class used to be assignable to its base here, which
+     * was the assignment that could silently slice or hand back a pointer to a
+     * prefix of the object. Related types go in an interface instead, and that
+     * is checked where the method signatures are. */
     return 0;
 }
 

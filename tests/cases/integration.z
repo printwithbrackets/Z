@@ -1,20 +1,24 @@
 // Cross-feature integration: classes (vtables/ctors) + generics + structs +
 // enums + operator overloading + control flow + GC together. Exercises the
 // register allocator with many live values (incl. class objects) at once.
-class Animal {
+// An interface, not a base class: Dog and Cat are not subtypes of anything, and
+// what collects them into one array is that both answer Speak and Id.
+interface Animal {
+    string Speak();
+    int Id();
+}
+class Dog {
     int id;
-    Animal(int i) { this.id = i; }
-    virtual string Speak() { return "..."; }
-    int Id() { return this.id; }
-}
-class Dog : Animal {
     string name;
-    Dog(int i, string n) { base(i); this.name = n; }
-    override string Speak() { return this.name + " woof"; }
+    Dog(int i, string n) { this.id = i; this.name = n; }
+    virtual string Speak() { return this.name + " woof"; }
+    virtual int Id() { return this.id; }
 }
-class Cat : Animal {
-    Cat(int i) { base(i); }
-    override string Speak() { return "meow"; }
+class Cat {
+    int id;
+    Cat(int i) { this.id = i; }
+    virtual string Speak() { return "meow"; }
+    virtual int Id() { return this.id; }
 }
 struct Vec { int x; int y; Vec op_Add(Vec* o) => new Vec(x + o.x, y + o.y); }
 enum Op { Add(int a, int b), Mul(int a, int b), Neg(int a) }
@@ -25,7 +29,7 @@ int main() {
     var v1 = 10; var v2 = 20; var v3 = 30; var v4 = 40; var v5 = 50;
     var d = new Dog(1, "Rex");
     var c = new Cat(2);
-    var animals = new Animal*[2];
+    var animals = new Animal[2];
     animals[0] = d; animals[1] = c;
     var p = new Vec(1, 2); var q = new Vec(3, 4);
     var r = p + q;

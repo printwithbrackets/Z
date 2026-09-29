@@ -72,7 +72,6 @@ typedef struct StructMethod {
     int nparams;
     struct Stmt *body; /* S_FUNC AST, first param is the receiver (this) */
     int is_virtual;    /* declared `virtual` or `override` (dynamic dispatch) */
-    int is_override;   /* declared `override` (must override a base virtual) */
     int vtable_index;  /* slot in the class vtable when is_virtual */
 } StructMethod;
 
@@ -99,8 +98,7 @@ struct StructDef {
      * stored first, fields follow, and virtual methods dispatch through the
      * object's vtable. */
     int is_class;
-    StructDef *base;    /* base class, or NULL */
-    int nvtable;        /* number of virtual slots (inherited + own) */
+    int nvtable;        /* number of virtual slots */
     char **vtable_impl; /* per-slot mangled implementation name for this class */
 };
 
@@ -219,7 +217,7 @@ void struct_finish(StructDef *sd);
 /* Finds a field by name; NULL if absent. */
 Field *struct_find_field(StructDef *sd, const char *name);
 /* Computes a class's vtable layout after methods are registered. Returns 0 on
- * success, -1 if an `override` doesn't match a base virtual. */
+ * success. */
 int class_finish_vtable(TypeCtx *ctx, StructDef *sd);
 
 /* One variant of a union: a name, a discriminant, and payload fields. */
@@ -290,7 +288,7 @@ Type *type_result_err(Type *t);
 int type_size(Type *t);
 int type_align(Type *t);
 int type_equals(Type *a, Type *b);
-int type_assignable(Type *dst, Type *src); /* allows derived-class* -> base-class* upcast */
+int type_assignable(Type *dst, Type *src); /* equality, or anything to an interface */
 int type_is_scalar(Type *t);               /* 8-byte value that fits in rax */
 
 /* 1 for the IEEE-754 types, which travel in XMM registers and answer to

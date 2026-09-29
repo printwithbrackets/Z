@@ -19,7 +19,7 @@ grammar below is the source of truth for what the compiler accepts today.
 - String literals: `"..."` with the escapes listed under Lexical below.
 - Keywords: `int bool string void var const new struct enum class match this if
   else while for foreach in return break continue true false null extern export
-  virtual override fn method import`.
+  virtual fn method import`.
 - Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ ~ << >>`,
   `= += -= *= /= %= &= |= ^= <<= >>=`, `++ --`, `( ) { } [ ] ; , .`.
 - Integer literals are decimal by default, or hexadecimal (`0xff`), octal
@@ -771,11 +771,13 @@ to an index in that array once, at compile time.
 A **struct** is copied to the heap when it becomes an interface value, because
 the cell outlives the frame the value was in. A **class** is already a pointer,
 so it goes in as it stands; its itab entries are small trampolines that go
-through the receiver's vtable, which is what keeps a subclass stored in an
-interface calling the override.
+through the receiver's vtable. The trampolines used to be what kept a subclass
+calling the override rather than the implementation the conversion site named;
+with no inheritance there is no override to miss, and they remain because the
+vtable is still how a class stored in an interface is dispatched.
 
 A class must therefore declare every method it offers to an interface `virtual`
-(or `override`) — a non-virtual method has no vtable slot to dispatch through. A
+— a non-virtual method has no vtable slot to dispatch through. A
 struct has no such requirement, since its methods are reached directly.
 
 The method has to match the signature, not just the name, and a diagnostic says
@@ -825,14 +827,11 @@ A `class` is a heap-allocated reference type with a vtable, enabling dynamic
 (dispatch) polymorphism. Structs are value types; classes are reference types.
 
 ```csharp
-class Shape {
-    virtual int Area() { return 0; }          // virtual -> dispatched dynamically
-    virtual string Name() { return "shape"; }
-}
-class Square : Shape {
+class Square {
     int side;
-    override int Area() { return this.side * this.side; }  // override a base virtual
-    override string Name() { return "square"; }
+    Square(int s) { this.side = s; }
+    virtual int Area() { return this.side * this.side; }
+    virtual string Name() { return "square"; }
 }
 ```
 
@@ -840,15 +839,23 @@ class Square : Shape {
   stores a vtable pointer as its first word; `this.field` accesses instance
   fields.
 - A **constructor** is a method named like the class, `C(params) { ... }`. It
-  runs on `new C(args)`; `base(args)` calls the base-class constructor.
-- `virtual` introduces a dispatch slot; `override` replaces a base virtual's
-  implementation in the same slot.
-- Calling a virtual method dispatches through the receiver's vtable, so the
-  *actual* runtime class decides the implementation — even through a base-typed
-  reference. A derived class pointer may be assigned to a base class pointer
-  (upcast); an array of base pointers (`new Shape*[n]`) gives a classic
-  polymorphic collection.
-- Non-virtual methods (including inherited ones) are called directly.
+  runs on `new C(args)`.
+- `virtual` introduces a dispatch slot, one per virtual method in declaration
+  order. Calling one dispatches through the receiver's vtable; a non-virtual
+  method is called directly.
+- A class satisfies an `interface` by having its methods declared `virtual`,
+  and an interface value dispatches through the itab. A class with no interface
+  and no base has nothing to dispatch *for*, so `virtual` on a lone class only
+  costs a slot.
+
+**There is no inheritance.** `class B : A`, `override` and `base(args)` are
+diagnostics, each saying what to do instead. What a hierarchy was for — putting
+related types in one collection — is what `interface` is for, and it does it
+without a base type to upcast to, a base constructor that can be forgotten, or a
+vtable whose layout has to be inherited. See [Interfaces](#interfaces).
+
+The vtable is still here for a reason: it is what a class stored in an
+interface dispatches through. A vtable with no subclass is a working vtable.
 
 ## Diagnostics
 

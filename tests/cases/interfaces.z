@@ -21,13 +21,18 @@ class Circle {
     virtual string Name() => "circle";
 }
 
-// A subclass stored as the interface must still call the override, which is why
-// a class's itab entries are trampolines through the vtable rather than the
-// symbols of the implementations the conversion site happened to name.
-class BigCircle : Circle {
-    BigCircle(int rr) { base(rr); }
-    override int Area() { return 100 * 3 * r * r; }
-    override string Name() => "bigcircle";
+// A second class rather than a subclass of Circle. It used to be here to prove
+// that a subclass stored as an interface calls the override rather than the
+// implementation the conversion site named -- which is what a class's itab
+// entries are trampolines through the vtable for. With no inheritance there is
+// no override to miss, so each class's itab names its own methods and the
+// distinction this test existed to make does not arise. It is kept as a second
+// class in the same array, which is the same collection of unrelated types.
+class BigCircle {
+    int r;
+    BigCircle(int rr) { r = rr; }
+    virtual int Area() { return 100 * 3 * r * r; }
+    virtual string Name() => "bigcircle";
 }
 
 int total(Shape a, Shape b) { return a.Area() + b.Area(); }

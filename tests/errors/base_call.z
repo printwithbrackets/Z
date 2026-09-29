@@ -1,0 +1,9 @@
+class A {
+    int n;
+    A(int v) { this.n = v; }
+}
+class B {
+    int m;
+    B() { base(3); this.m = 1; }
+}
+int main() { return 0; }

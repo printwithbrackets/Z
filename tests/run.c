@@ -224,6 +224,8 @@ int main(int argc, char **argv) {
         "arrow_on_nonptr",
         "rangefor_wrongtype",
         "rangefor_mismatch",
+        "inheritance",
+        "base_call",
         "lambda_return_type",
         "lambda_not_int",
         "lambda_fn_return",

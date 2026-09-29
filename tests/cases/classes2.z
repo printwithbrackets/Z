@@ -1,29 +1,75 @@
-// Class constructors, base-constructor calls, and field initialization.
-class Animal {
-    int legs;
-    Animal(int l) { this.legs = l; }
-    virtual string Speak() { return "..."; }
-    int Legs() { return this.legs; }
+// Class constructors, and what replaces `base(...)`.
+//
+// A constructor is a method named after the class and runs on `new C(args)`.
+// With no base class there is no `base(args)` to call, so a constructor that
+// used to initialise a base's fields spells the same assignments itself. That is
+// the honest trade: the initialization is one line more per class, and in
+// exchange there is no base constructor that can be forgotten.
+class Counter {
+    int n;
+    int step;
+    Counter(int start) { this.n = start; this.step = 1; }
+    void Bump() { n = n + step; }
+    int Get() { return n; }
+    int Step() { return step; }
 }
-class Dog : Animal {
+
+class Named {
     string name;
-    Dog(int l, string n) { base(l); this.name = n; }
-    override string Speak() { return "Woof from " + this.name; }
+    int hits;
+    Named(string s) {
+        this.name = s;
+        this.hits = 0;
+    }
+    virtual string Describe() { return "name=" + this.name; }
+    int Hits() { return this.hits; }
 }
-class Cat : Animal {
-    Cat(int l) { base(l); }
-    override string Speak() { return "Meow"; }
+
+class Loud {
+    string name;
+    int hits;
+    Loud(string s) {
+        this.name = s;
+        this.hits = 0;
+    }
+    virtual string Describe() { return "NAME=" + this.name; }
+    int Hits() { return this.hits; }
 }
+
 int main() {
-    var d = new Dog(4, "Rex");
-    var c = new Cat(4);
-    print(d.Speak());   // Woof from Rex
-    print(c.Speak());   // Meow
-    print(d.Legs());    // 4 (inherited non-virtual method, field set via ctor)
-    print(c.Legs());    // 4
-    // a freshly allocated object has zeroed fields
-    var e = new Cat(0);
-    e.legs = 9;
-    print(e.Legs());    // 9
+    var c = new Counter(10);
+    print(c.Get());                      // 10
+    c.Bump();
+    c.Bump();
+    print(c.Get());                      // 12
+    print(c.Step());                     // 1
+
+    // A freshly allocated object has zeroed fields, so a constructor that
+    // does not assign one leaves it at zero rather than undefined.
+    var d = new Counter(0);
+    d.Bump();
+    print(d.Get());                      // 1
+
+    // `virtual` still exists, and a class that declares it dispatches through
+    // the interface rather than the class type.
+    var n = new Named("rex");
+    var l = new Loud("rex");
+    var speakers = new Speakable[2];
+    speakers[0] = n;
+    speakers[1] = l;
+    print(speakers[0].Describe());       // name=rex
+    print(speakers[1].Describe());       // NAME=rex
+
+    // The concrete type is unaffected by the interface.
+    print(n.Describe());                 // name=rex
+    print(l.Describe());                 // NAME=rex
+
+    // A field a constructor did not assign reads as zero.
+    var e = new Loud("x");
+    print(e.Hits());                     // 0
     return 0;
+}
+
+interface Speakable {
+    string Describe();
 }

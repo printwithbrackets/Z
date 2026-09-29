@@ -1,41 +1,65 @@
-// Classes with virtual methods and vtable dispatch.
-// Covers: inheritance, virtual/override, heap allocation, field init via
-// post-construction assignment, polymorphic arrays, dynamic dispatch through a
-// base-class reference, and non-virtual inherited methods.
-class Shape {
-    int tag;
-    virtual int Area() { return 0; }
-    virtual string Name() { return "shape"; }
-    int Tag() { return this.tag; }          // non-virtual, inherited
+// Classes with virtual methods, and interface dispatch in place of inheritance.
+//
+// Z has no `class B : A`, no `override` and no `base()`. A hierarchy is a set
+// of types that answer some messages, which is what an `interface` is, and it
+// does the same job without a base type to upcast to or a vtable per class.
+// This is the same shape the old classes.z tested, expressed without
+// inheritance: a `Shape` interface, two classes that satisfy it by having the
+// methods, and a collection of both.
+interface Shape {
+    int Area();
+    string Name();
 }
-class Square : Shape {
+
+class Square {
     int side;
-    override int Area() { return this.side * this.side; }
-    override string Name() { return "square"; }
+    Square(int s) { this.side = s; }
+    virtual int Area() { return this.side * this.side; }
+    virtual string Name() { return "square"; }
 }
-class Circle : Shape {
+
+class Circle {
     int r;
-    override int Area() { return 3 * this.r * this.r; }
-    override string Name() { return "circle"; }
+    Circle(int rad) { this.r = rad; }
+    virtual int Area() { return 3 * this.r * this.r; }
+    virtual string Name() { return "circle"; }
 }
+
 int main() {
-    var s = new Square();
-    s.side = 5;
-    s.tag = 1;
-    var c = new Circle();
-    c.r = 2;
-    c.tag = 2;
+    var s = new Square(5);
+    var c = new Circle(2);
     print(s.Name() + " " + s.Area());   // square 25
     print(c.Name() + " " + c.Area());   // circle 12
-    print(s.Tag());                      // 1 (inherited non-virtual method)
-    // polymorphic: base-typed array of pointers -> dynamic dispatch
-    var shapes = new Shape*[2];
+
+    // A single collection of unrelated types, which is what a base-typed array
+    // used to be. Nothing here is a subtype of anything else.
+    var shapes = new Shape[3];
     shapes[0] = s;
     shapes[1] = c;
-    print(shapes[0].Name() + " " + shapes[0].Area());  // square 25
-    print(shapes[1].Name() + " " + shapes[1].Area());  // circle 12
-    // base-typed local -> dynamic dispatch
-    var any = s;
-    print(any.Name());                   // square
+    shapes[2] = new Square(3);
+    for (auto sh : shapes) {
+        print(sh.Name() + " " + sh.Area());
+    }
+
+    // Dispatch is through the interface, not through a declared base type.
+    var one = shapes[0];
+    print(one.Name());                   // square
+    print(one.Area());                   // 25
+
+    // A class method reached directly still works, and is not an interface call.
+    print(s.Area());                     // 25
+
+    // A struct satisfies the same interface, so a collection need not be
+    // homogeneous in the class/struct sense either.
+    struct Rect {
+        int w;
+        int h;
+        int Area() { return this.w * this.h; }
+        string Name() { return "rect"; }
+    }
+    var mixed = new Shape[1];
+    mixed[0] = new Rect(3, 4);
+    print(mixed[0].Name());              // rect
+    print(mixed[0].Area());              // 12
     return 0;
 }

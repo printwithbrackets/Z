@@ -1104,48 +1104,109 @@ print(describe(Rect(3, 4)));   // 3x4 rect
 
 ## 13. Classes (reference types + vtables)
 
-A `class` is heap-allocated and supports **inheritance** and **dynamic
-dispatch** through a vtable.
+A `class` is heap-allocated and supports **dynamic dispatch** through a vtable.
+Z has **no inheritance** — an `interface` (below) is what plays that role.
 
 ```csharp
-class Animal {
+class Dog {
     int legs;
-    Animal(int l) { this.legs = l; }              // constructor
-    virtual string Speak() { return "..."; }     // virtual
-    int Legs() { return this.legs; }              // non-virtual
-}
-
-class Dog : Animal {                              // inherits Animal
     string name;
-    Dog(int l, string n) { base(l); this.name = n; }   // call base ctor
-    override string Speak() { return this.name + " woof"; }
+    Dog(int l, string n) { this.legs = l; this.name = n; }   // constructor
+    virtual string Speak() { return this.name + " woof"; }   // virtual
+    virtual int Legs() { return this.legs; }                  // virtual
 }
 
 var d = new Dog(4, "Rex");
-print(d.Speak());   // Rex woof   (dynamic dispatch)
-print(d.Legs());    // 4          (inherited non-virtual method)
+print(d.Speak());   // Rex woof
+print(d.Legs());    // 4
 ```
 
-- `virtual` introduces a dispatch slot; `override` replaces a base virtual in
-  the same slot.
-- Calling a virtual method picks the implementation from the object's *actual*
-  runtime class, so it works through a base-typed reference too:
+- `virtual` gives the method a dispatch slot, one per virtual in declaration
+  order. Calling one reads the implementation out of the object's vtable; a
+  non-virtual method is called directly.
+- A class becomes useful for dispatch when it satisfies an **interface**: every
+  method the interface names must be `virtual`, and an interface value calls
+  through the itab. That is how unrelated types end up in one collection:
 
 ```csharp
-var animals = new Animal*[2];      // array of base-class pointers
+interface Animal { string Speak(); int Legs(); }
+
+class Cat {
+    int legs;
+    Cat(int l) { this.legs = l; }
+    virtual string Speak() { return "meow"; }
+    virtual int Legs() { return this.legs; }
+}
+
+var animals = new Animal[2];
 animals[0] = new Dog(4, "Rex");
 animals[1] = new Cat(4);
 print(animals[0].Speak());   // Rex woof
 print(animals[1].Speak());   // meow
 ```
 
-- A derived-class pointer may be assigned to a base-class pointer (upcast).
 - `new C(args)` allocates a garbage-collected object and runs the constructor
   (a method named like the class). Fields start zeroed.
+- There is no `: Base`, no `override` and no `base(args)`. Each is a diagnostic
+  that says what to do instead, because a program carried over from a version
+  that had them needs to be told rather than left with an undefined name.
 
 ---
 
-## 14. Generics
+## 14. Interfaces
+
+An `interface` is a named set of method signatures. A type satisfies it simply by
+having those methods — nothing is declared, and neither `class` nor `struct` is
+required to be a subclass of anything.
+
+```csharp
+interface Shape {
+    int Area();
+    string Name();
+}
+
+class Square {
+    int side;
+    Square(int s) { this.side = s; }
+    virtual int Area() { return this.side * this.side; }   // virtual: a class
+    virtual string Name() { return "square"; }             // must be virtual
+}
+
+struct Rect {                                              // a struct satisfies
+    int w; int h;                                          // it too, without
+    int Area() { return w * h; }                           // declaring virtual
+    string Name() { return "rect"; }
+}
+```
+
+Assigning a value to an interface-typed place converts it, and a call resolves
+to the interface's method rather than to whatever the value happens to be:
+
+```csharp
+var a = new Square(5);
+print(a.Area());   // 25
+
+Shape one = new Square(5);
+print(one.Area());  // 25   -- dispatched through the interface
+```
+
+- A **`class`** must declare every method it offers to an interface `virtual`,
+  because a non-virtual method has no vtable slot to dispatch through.
+- A **`struct`** has no such requirement: its methods are reached directly.
+- A struct is copied to the heap when it becomes an interface value, because the
+  cell outlives the frame. A class is already a pointer, so it goes in as it is.
+- `null` is a valid interface value, and calling one is a mistake worth
+  diagnosing.
+
+This is what a class hierarchy was for, and it is why Z has no inheritance: an
+interface collects related types without a base type to upcast to, a base
+constructor that can be forgotten, or a vtable layout that has to be inherited.
+A `struct` and a `class` can sit in the same array as long as both satisfy the
+interface.
+
+---
+
+## 15. Generics
 
 Generic *functions* are compiled by monomorphization: each concrete set of type
 arguments produces a specialized, natively compiled copy. Type arguments are
@@ -1169,7 +1230,7 @@ machinery, boxing, or type erasure — every instantiation is real native code.
 
 ---
 
-## 15. Memory & the garbage collector
+## 16. Memory & the garbage collector
 
 The heap (arrays, `new` objects, and strings) is managed by a conservative
 mark-sweep collector. You never free anything:
@@ -1207,21 +1268,21 @@ leave it off for anything you care about throughput.
 
 ---
 
-## 16. A complete program
+## 17. A complete program
 
 Putting many features together — classes, generics, enums, operator
 overloading, and control flow:
 
 ```csharp
-class Shape {
-    virtual int Area() { return 0; }
-    virtual string Name() { return "shape"; }
+interface Shape {
+    int Area();
+    string Name();
 }
-class Square : Shape {
+class Square {
     int side;
     Square(int s) { this.side = s; }
-    override int Area() { return this.side * this.side; }
-    override string Name() { return "square"; }
+    virtual int Area() { return this.side * this.side; }
+    virtual string Name() { return "square"; }
 }
 
 enum Op { Add(int a, int b), Mul(int a, int b) }
@@ -1230,7 +1291,7 @@ int apply(Op o) => match o { Add(x, y) => x + y, Mul(m, n) => m * n };
 T maxOf<T>(T a, T b) { if (a > b) { return a; } return b; }
 
 int main() {
-    var shapes = new Shape*[2];
+    var shapes = new Shape[2];
     shapes[0] = new Square(5);
     shapes[1] = new Square(3);
 
@@ -1248,7 +1309,7 @@ int main() {
 
 ---
 
-## 17. Debugging
+## 18. Debugging
 
 `z build prog.z -o prog -g` emits DWARF, and a debugger can use it directly:
 
@@ -1275,7 +1336,7 @@ anything else shows up untyped rather than mistyped.
 
 ---
 
-## 18. Calling C from Z
+## 19. Calling C from Z
 
 Z can call C, and C can call Z. Both directions are declared in the Z source,
 and no assembly rewriting is needed.
@@ -1350,7 +1411,7 @@ deliberately.
 
 ---
 
-## 19. Things to know
+## 20. Things to know
 
 - **`float` is binary64**, the format C calls `double`. Division by zero gives an
   infinity rather than trapping, and a NaN compares false against everything
@@ -1417,7 +1478,7 @@ deliberately.
 
 ---
 
-## 20. Where to go next
+## 21. Where to go next
 
 - `docs/LANGUAGE.md` — the full language specification / grammar.
 - `README.md` — project overview, architecture, performance, and roadmap.

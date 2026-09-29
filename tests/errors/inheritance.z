@@ -1,0 +1,7 @@
+class A {
+    virtual int F() { return 1; }
+}
+class B : A {
+    override int F() { return 2; }
+}
+int main() { return new B().F(); }

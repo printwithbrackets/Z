@@ -21,23 +21,26 @@ int main() {
     print(w.Twice());
 
     // ---- a class, with virtual dispatch ----
-    class Shape {
-        int id;
-        Shape(int i) { id = i; }
-        virtual int Area() { return 0; }
-        int Id() { return id; }
+    // A local interface and a local class. There is no base class to inherit
+    // from, so the two are related by satisfying the interface.
+    interface Shape {
+        int Area();
+        int Id();
     }
-    class Square : Shape {
+    class Square {
+        int id;
         int side;
-        Square(int s) { base(1); side = s; }
-        override int Area() { return side * side; }
+        Square(int s) { id = 1; side = s; }
+        virtual int Area() { return side * side; }
+        virtual int Id() { return id; }
     }
     var sh = new Square(5);
     print(sh.Area());
     print(sh.Id());
-    // through a base-class pointer, so the vtable is what decides
-    Shape* asShape = sh;
+    // through an interface value, so the itab is what decides
+    Shape asShape = sh;
     print(asShape.Area());
+    print(asShape.Id());
 
     // ---- an enum, with an exhaustive match ----
     enum Colour { Red, Green, Blue }
