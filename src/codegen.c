@@ -140,6 +140,12 @@ typedef struct {
     int is_float;
     int reassigned; /* written by an assignment somewhere in the function */
     int is_const;   /* const_cand && !reassigned => value is a compile-time constant */
+    /* The loop this local was last read or written in, used to extend its live
+     * range across the whole loop. See the S_FOR case in walk_alloc_stmt: an
+     * interval is a line, and a value read in a loop's condition is live again on
+     * every iteration, not just up to where the condition happens to appear in
+     * the emitted order. */
+    int loop_marker;
 } LocalInfo;
 
 /* How deep inlined bodies may nest. Shared with the parser, which enforces the
@@ -172,8 +178,8 @@ typedef struct {
      * S_LEAVE jumps to the top of this. */
     int inl_label[INLINE_MAX_DEPTH + 2];
     int inl_depth;
-    int emitting_hoist;/* 1 while emitting a hoisted node's own value */
-    Arena *arena;      /* for interned assembly symbol names */
+    int emitting_hoist;   /* 1 while emitting a hoisted node's own value */
+    Arena *arena;         /* for interned assembly symbol names */
     int temp_top;         /* current temporary high-water during emit */
     int temp_high;        /* max temp slots used in this function */
     int cur_locals_bytes; /* total frame bytes used by locals in current fn */
@@ -183,8 +189,15 @@ typedef struct {
     LocalInfo *locals; /* per-function register-allocation candidates */
     int nlocals, loc_cap;
     int pool_mask;    /* bitmask of POOL_REGS indices actually used */
+    int loop_marker;  /* incremented once per loop walked; see LocalInfo.loop_marker */
     uint64_t *rodata; /* 64-bit constants (magic multipliers etc.) */
     int nrodata, ro_cap;
+    /* Type names `to_text` needs to print an aggregate, collected as the calls
+     * are generated. Exactly the types that are printed and no more -- a table of
+     * every type in the unit would need the type context here, and would emit a
+     * label for types nothing ever mentions. */
+    const char **tname;
+    int ntname, tname_cap;
 
     /* ---- DWARF ----
      *
@@ -385,8 +398,8 @@ static int next_label(CG *cg) { return ++cg->label_counter; }
  * whichever name that slot happened to end up holding, so a call with two floats
  * passed both in xmm1. */
 static const char *const XMM_ARG_REGS[Z_MAX_REG_FLT] = {
-    "xmm0",  "xmm1",  "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
-    "xmm8",  "xmm9",  "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+    "xmm0", "xmm1", "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
+    "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
 };
 
 typedef struct {
@@ -479,8 +492,8 @@ static void load_temp_x(CG *cg, int t, const char *reg) {
  * otherwise move rsp between computing an offset and using it. `hidden` counts
  * leading arguments the caller supplies but the source does not name. */
 static void args_prologue(CG *cg, Expr *e, int base, int hidden, ArgAssign *aa) {
-    Type **atypes = arena_alloc_array(cg->arena, (size_t)(e->nargs > 0 ? e->nargs : 1),
-                                      sizeof(Type *));
+    Type **atypes =
+        arena_alloc_array(cg->arena, (size_t)(e->nargs > 0 ? e->nargs : 1), sizeof(Type *));
     for (int i = 0; i < e->nargs; i++)
         atypes[i] = e->args[i]->type;
     assign_args(atypes, e->nargs, hidden, aa);
@@ -514,7 +527,6 @@ static void args_epilogue(CG *cg, const ArgAssign *aa) {
     if (aa->nstack > 0)
         buf_printf(cg->out, "  add rsp, %d\n", aa->pad);
 }
-
 
 /* The bits of `v` as a 64-bit pattern. A double's representation *is* its bit
  * pattern, so this is the whole conversion. Written out rather than punned
@@ -796,6 +808,7 @@ static void li_use(CG *cg, int slot, int idx) {
     LocalInfo *li = li_for(cg, slot);
     if (li->u < idx)
         li->u = idx;
+    li->loop_marker = cg->loop_marker;
 }
 
 /* Records a definition of a local at statement index idx. */
@@ -805,6 +818,7 @@ static void li_def(CG *cg, int slot, int idx) {
         li->d = idx;
     if (li->u < idx)
         li->u = idx;
+    li->loop_marker = cg->loop_marker;
 }
 
 /* Walks an expression to record defs/uses and disqualify address-taken
@@ -826,6 +840,13 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
     case E_INDEX:
         mark_addr_taken(cg, e->lhs); /* base is addressed */
         walk_alloc_expr(cg, e->rhs, idx);
+        break;
+    case E_POSTINC:
+        /* The variable is written, so an element or field operand is addressed
+         * and its base is marked. Without this a `d[n++]++` would allocate no
+         * slot for the base it has to compute an address from. */
+        mark_addr_taken(cg, e->lhs);
+        walk_alloc_expr(cg, e->lhs, idx);
         break;
     case E_STRLEN:
         /* The length is in the header the value points into, which is a load
@@ -892,6 +913,35 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
 
 static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx);
 
+/* Stretches the live range of every local that one loop touched out to the end
+ * of that loop.
+ *
+ * The allocator colours [def, use] intervals, and a loop is not a line: a value
+ * read in the condition is read again on the next iteration, and one assigned in
+ * the step is live all the way round. Left as plain intervals, a local read only
+ * in the condition has its last use *before* the body, so the body looks like a
+ * place where its register is free -- and the first body local the allocator
+ * sees is handed the very register the condition is read back from. The loop
+ * then runs one iteration and exits with the wrong value, which is what a
+ * growable vector's rehash looked like: correct at -O0, and one entry left after
+ * the first growth at -O1.
+ *
+ * Only locals this loop actually touched are extended, so one the loop never
+ * mentions is not penalised and the allocator stays as aggressive outside loops
+ * as it was before. `marker` is the counter value this loop's walk stamped on
+ * them, and `start`/`end` bracket it. */
+static void extend_live_across_loop(CG *cg, int marker, int start, int end) {
+    for (int i = 0; i < cg->nlocals; i++) {
+        LocalInfo *li = &cg->locals[i];
+        if (li->loop_marker != marker)
+            continue; /* this loop never mentioned it */
+        if (li->d < 0 || li->d >= start)
+            continue; /* defined inside the loop, so already contained */
+        if (li->u < end)
+            li->u = end;
+    }
+}
+
 static void walk_alloc_block(CG *cg, Stmt *blk, int *idx) {
     if (blk == NULL)
         return;
@@ -947,20 +997,28 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
         walk_alloc_block(cg, s->body, idx);
         walk_alloc_block(cg, s->orelse, idx);
         break;
-    case S_WHILE:
+    case S_WHILE: {
+        int marker = ++cg->loop_marker;
+        int loop_start = *idx;
         walk_alloc_expr(cg, s->cond, cur);
         walk_alloc_block(cg, s->body, idx);
+        extend_live_across_loop(cg, marker, loop_start, *idx);
         break;
-    case S_FOR:
+    }
+    case S_FOR: {
         /* Each phase needs its own statement index. A for-loop variable is
          * defined in the init, read in the condition, and live all the way
          * through the body to the step; giving the whole loop one index would
          * make its interval [i,i] and let a body local share the register. */
+        int marker = ++cg->loop_marker;
+        int loop_start = *idx;
         walk_alloc_stmt(cg, s->for_init, idx);
         walk_alloc_expr(cg, s->cond, (*idx)++);
         walk_alloc_block(cg, s->body, idx);
         walk_alloc_expr(cg, s->for_step, (*idx)++);
+        extend_live_across_loop(cg, marker, loop_start, *idx);
         break;
+    }
     case S_BLOCK:
         walk_alloc_block(cg, s, idx);
         break;
@@ -1241,8 +1299,8 @@ static void gen_addr(CG *cg, Expr *e) {
             int ti = temp_alloc(cg);
             int lbad = next_label(cg);
             int lok = next_label(cg);
-            store_temp(cg, ti);              /* rax = index */
-            load_temp(cg, t, "r11");         /* r11 = base */
+            store_temp(cg, ti);      /* rax = index */
+            load_temp(cg, t, "r11"); /* r11 = base */
             buf_printf(cg->out, "  cmp rax, 0\n  jl .L%d\n", lbad);
             buf_printf(cg->out, "  mov rcx, QWORD PTR [r11 - %d]\n", is_str ? 16 : 8);
             buf_printf(cg->out, "  cmp rax, rcx\n  jge .L%d\n", lbad);
@@ -1468,7 +1526,119 @@ static void gen_args_stage(CG *cg, Expr *e, int base) {
     }
 }
 
+/* The two type-directed built-ins. Both take a parameter declared `any`, which
+ * means the parser recorded no type for it, and both are lowered here where the
+ * argument's static type is still known. A generic function cannot do this
+ * itself: it may ask `typeof(x)`, but every branch after the test still has to
+ * type-check, so the branch that would have run is the branch that would not
+ * compile.
+ *
+ * Both are recognised by their declared parameter being TK_ANY rather than by
+ * name, so a user function named `to_text` is not mistaken for one of these --
+ * a user function's parameters are real types, and a user function whose
+ * parameter is literally `any` is not writable. */
+static int is_to_text_call(Expr *e) {
+    return e->nargs == 1 && e->args[0] != NULL && e->args[0]->type != NULL &&
+           e->args[0]->type->kind != TK_ANY && strcmp(e->name, "z_to_text") == 0;
+}
+
+static int is_hash_of_call(Expr *e) {
+    return e->nargs == 2 && e->args[0] != NULL && e->args[0]->type != NULL &&
+           e->args[0]->type->kind != TK_ANY && strcmp(e->name, "z_hash_of") == 0;
+}
+
+/* The runtime entry `to_text(x)` lowers to for a value of type `t`. */
+static const char *to_text_symbol(Type *t) {
+    switch (t->kind) {
+    case TK_STRING:
+        return "z_str_to_text";
+    case TK_BOOL:
+        return "z_bool_to_text";
+    case TK_F64:
+        return "z_float_to_text";
+    case TK_VOID:
+        return "z_void_to_text";
+    case TK_STRUCT:
+    case TK_UNION:
+    case TK_ARRAY:
+        /* An aggregate has no canonical text here, so its type's name is what
+         * gets printed -- stable between runs, and more use than an address. */
+        return "z_agg_to_text";
+    default:
+        /* int, a pointer, a function pointer, a closure, an interface: all one
+         * machine word, and all read best as a number except the pointers, which
+         * read better in hex. */
+        return t->kind == TK_INT ? "z_int_to_text" : "z_ptr_to_text";
+    }
+}
+
+/* Records a type name so the data section can carry the string the call
+ * refers to, and returns it. `arena` keeps the name alive: the type's own name
+ * is arena-owned already, so this stores the pointer rather than a copy. */
+static const char *note_type_name(CG *cg, const char *name) {
+    for (int i = 0; i < cg->ntname; i++)
+        if (strcmp(cg->tname[i], name) == 0)
+            return name;
+    if (cg->ntname == cg->tname_cap) {
+        int ncap = cg->tname_cap == 0 ? 8 : cg->tname_cap * 2;
+        const char **bigger = realloc(cg->tname, (size_t)ncap * sizeof(char *));
+        if (bigger == NULL)
+            die_oom();
+        cg->tname = bigger;
+        cg->tname_cap = ncap;
+    }
+    cg->tname[cg->ntname++] = name;
+    return name;
+}
+
+static void gen_to_text(CG *cg, Expr *e) {
+    Type *at = e->args[0]->type;
+    if (is_kind(at, TK_STRUCT) || is_kind(at, TK_UNION) || is_kind(at, TK_ARRAY)) {
+        /* The runtime wants a pointer to the name, not the value. */
+        const char *tn = is_kind(at, TK_STRUCT)  ? at->sdef->name
+                         : is_kind(at, TK_UNION) ? at->udef->name
+                                                 : "array";
+        if (!is_kind(at, TK_ARRAY))
+            note_type_name(cg, tn);
+        buf_printf(cg->out, "  lea rdi, [rip + .Ltype_%s]\n", tn);
+        buf_printf(cg->out, "  call z_agg_to_text\n");
+        return;
+    }
+    if (is_kind(at, TK_F64)) {
+        gen_float(cg, e->args[0]);
+        buf_printf(cg->out, "  call %s\n", to_text_symbol(at));
+        return;
+    }
+    gen_expr(cg, e->args[0]);
+    buf_printf(cg->out, "  mov rdi, rax\n  call %s\n", to_text_symbol(at));
+}
+
+static void gen_hash_of(CG *cg, Expr *e) {
+    Type *at = e->args[0]->type;
+    gen_expr(cg, e->args[1]); /* the table size */
+    buf_printf(cg->out, "  mov rdi, rax\n");
+    store_temp(cg, temp_alloc(cg));
+    int t = cg->temp_top - 1;
+    if (is_kind(at, TK_STRING)) {
+        gen_expr(cg, e->args[0]);
+    } else {
+        gen_expr(cg, e->args[0]);
+    }
+    load_temp(cg, t, "rsi");
+    buf_printf(cg->out, "  mov rdi, rax\n  call %s\n",
+               is_kind(at, TK_STRING) ? "z_hash_str" : "z_hash_num");
+    cg->temp_top = t;
+}
+
 static void gen_call(CG *cg, Expr *e) {
+    if (is_to_text_call(e)) {
+        gen_to_text(cg, e);
+        return;
+    }
+    if (is_hash_of_call(e)) {
+        gen_hash_of(cg, e);
+        return;
+    }
     int sret = is_aggregate(e->type);
     int rt_nt = sret ? (type_size(e->type) + 7) / 8 : 0;
     if (rt_nt < 1)
@@ -1621,9 +1791,7 @@ static void gen_icall(CG *cg, Expr *e) {
  * accept with a 64-bit register operand. Anything wider has to go through a
  * register: `sub rax, 1152921504606846976` is not an encodable instruction, and
  * the assembler rejects it outright rather than picking a wider form. */
-static int fits_imm32(long long v) {
-    return v >= -2147483648LL && v <= 2147483647LL;
-}
+static int fits_imm32(long long v) { return v >= -2147483648LL && v <= 2147483647LL; }
 
 static void emit_binop_imm(CG *cg, TokenKind op, long long imm) {
     /* Out-of-range constants take the register path. mov r11, imm64 is always
@@ -1923,6 +2091,26 @@ static void gen_expr(CG *cg, Expr *e) {
             if (!is_aggregate(e->type))
                 load_indirect(cg);
         }
+        break;
+    }
+    case E_POSTINC: {
+        /* The two orders, which is the entire point of the node: read the old
+         * value, write the new one, and yield the old. A register-resident local
+         * is two instructions. */
+        const char *lreg =
+            (e->lhs->kind == E_VAR && !e->lhs->agg_param) ? local_reg(cg, e->lhs->slot) : NULL;
+        if (lreg != NULL) {
+            buf_printf(cg->out, "  mov rax, %s\n", lreg);
+            buf_printf(cg->out, "  %s %s, 1\n", e->op == T_PLUS ? "add" : "sub", lreg);
+            break;
+        }
+        int t = temp_alloc(cg);
+        gen_addr(cg, e->lhs);
+        store_temp(cg, t);
+        load_temp(cg, t, "r11");                             /* r11 = the address of the variable */
+        buf_printf(cg->out, "  mov rax, QWORD PTR [r11]\n"); /* the old value */
+        buf_printf(cg->out, "  %s QWORD PTR [r11], 1\n", e->op == T_PLUS ? "add" : "sub");
+        cg->temp_top = t;
         break;
     }
     case E_STRLEN:
@@ -2240,8 +2428,7 @@ static void gen_expr(CG *cg, Expr *e) {
     case E_FNPTR:
         /* The address of a function is its label; lea rax, [rip + sym] is the
          * position-independent way to take it. */
-        buf_printf(cg->out, "  lea rax, [rip + %s]\n",
-                   e->is_extern ? e->name : z_sym(cg, e->name));
+        buf_printf(cg->out, "  lea rax, [rip + %s]\n", e->is_extern ? e->name : z_sym(cg, e->name));
         break;
     case E_ICALL:
         gen_icall(cg, e);
@@ -2293,9 +2480,8 @@ static void gen_expr(CG *cg, Expr *e) {
             if (is_kind(e->lhs->type, TK_INT)) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->lhs->type, TK_BOOL)) {
-                buf_printf(cg->out,
-                           "  lea rdi, [rip + .Lfalse_str + 16]\n"
-                           "  lea r11, [rip + .Ltrue_str + 16]\n");
+                buf_printf(cg->out, "  lea rdi, [rip + .Lfalse_str + 16]\n"
+                                    "  lea r11, [rip + .Ltrue_str + 16]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
             } else if (lflt) {
                 buf_printf(cg->out, "  call z_ftoa\n");
@@ -2308,9 +2494,8 @@ static void gen_expr(CG *cg, Expr *e) {
             if (is_kind(e->rhs->type, TK_INT)) {
                 buf_printf(cg->out, "  mov rdi, rax\n  call z_itoa\n");
             } else if (is_kind(e->rhs->type, TK_BOOL)) {
-                buf_printf(cg->out,
-                           "  lea rdi, [rip + .Lfalse_str + 16]\n"
-                           "  lea r11, [rip + .Ltrue_str + 16]\n");
+                buf_printf(cg->out, "  lea rdi, [rip + .Lfalse_str + 16]\n"
+                                    "  lea r11, [rip + .Ltrue_str + 16]\n");
                 buf_printf(cg->out, "  cmp rax, 0\n  cmovne rdi, r11\n  mov rax, rdi\n");
             } else if (rflt) {
                 buf_printf(cg->out, "  call z_ftoa\n");
@@ -2442,7 +2627,7 @@ static void gen_expr(CG *cg, Expr *e) {
                 int tb = temp_alloc(cg);
                 gen_float(cg, e->rhs);
                 store_temp_x(cg, tb);
-                load_temp(cg, ta, "r11");        /* r11 = destination address */
+                load_temp(cg, ta, "r11");            /* r11 = destination address */
                 load_temp_x(cg, tb, XMM_SCRATCH[1]); /* xmm1 = the right operand */
                 buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", XMM_ACC);
                 if (ins != NULL)
@@ -2952,8 +3137,14 @@ static void gen_loop(CG *cg, Stmt *body, Expr *cond, Expr *step, int unroll) {
 /* Operators that are pure integer arithmetic and cannot trap. */
 static int licm_op_is_safe(TokenKind op) {
     switch (op) {
-    case T_PLUS: case T_MINUS: case T_STAR:
-    case T_AMP: case T_PIPE: case T_CARET: case T_SHL: case T_SHR:
+    case T_PLUS:
+    case T_MINUS:
+    case T_STAR:
+    case T_AMP:
+    case T_PIPE:
+    case T_CARET:
+    case T_SHL:
+    case T_SHR:
         return 1;
     default:
         return 0;
@@ -2970,6 +3161,7 @@ static int licm_may_write(Expr *e) {
         return 0;
     switch (e->kind) {
     case E_ASSIGN:
+    case E_POSTINC:
     case E_CALL:
     case E_VCALL:
     case E_ICALL:
@@ -2989,11 +3181,13 @@ static int licm_may_write(Expr *e) {
 static void licm_note_expr(Expr *e, unsigned char *written) {
     if (e == NULL)
         return;
-    if (e->kind == E_ASSIGN) {
+    if (e->kind == E_ASSIGN || e->kind == E_POSTINC) {
         /* An assignment to a plain local writes exactly that local, so the
          * rest of the body stays analysable. Anything else -- an array
          * element, a field, a dereference -- can write through a pointer, and
-         * then nothing can be assumed. */
+         * then nothing can be assumed. `x++` is the same shape: its target is
+         * in `lhs`, and missing it here would let a loop counter look
+         * loop-invariant. */
         if (e->lhs != NULL && e->lhs->kind == E_VAR) {
             int s = e->lhs->slot;
             if (s > 0 && s < LICM_MAX_SLOT)
@@ -3073,7 +3267,11 @@ static int licm_invariant(Expr *e, const unsigned char *written) {
     case E_BOOL:
         return 1;
     case E_VAR:
-        return e->slot <= 0 || e->slot >= LICM_MAX_SLOT || !written[e->slot];
+        /* A slot past the end of the table is one the pass cannot track, so it
+         * is not *provably* invariant and is treated as not invariant. Reading
+         * it as invariant silently hoisted every expression over it out of its
+         * loop, in any function with more than LICM_MAX_SLOT locals. */
+        return e->slot <= 0 || (e->slot < LICM_MAX_SLOT && !written[e->slot]);
     case E_UNARY:
         return (e->op == T_MINUS || e->op == T_TILDE) && licm_invariant(e->lhs, written);
     case E_BINARY:
@@ -3453,7 +3651,6 @@ static int align16(int n) { return (n + 15) & ~15; }
 #define DW_ABBREV_BASE 7
 #define DW_ABBREV_POINTER 8
 
-
 /* Emits one byte as a `.byte` directive. Abbreviation codes, tags and attribute
  * pairs are all ULEB128, and every value used here fits in a single byte, so
  * the encoding and the directive coincide. */
@@ -3496,17 +3693,17 @@ static void sleb128_put(Buf *b, long v) {
 static void dbg_write_abbrev(Buf *b) {
     /* One abbreviation: code, tag, has-children, then (attribute, form) pairs
      * closed by a zero pair. */
-#define ABBREV(code_, tag_, kids_)                                                            \
-    dbg8(b, code_);                                                                           \
-    dbg8(b, tag_);                                                                            \
+#define ABBREV(code_, tag_, kids_)                                                                 \
+    dbg8(b, code_);                                                                                \
+    dbg8(b, tag_);                                                                                 \
     dbg8(b, kids_)
 
-#define ATTR(a_, f_)                                                                          \
-    dbg8(b, a_);                                                                              \
+#define ATTR(a_, f_)                                                                               \
+    dbg8(b, a_);                                                                                   \
     dbg8(b, f_)
 
-#define ATTR_END()                                                                            \
-    dbg8(b, 0);                                                                               \
+#define ATTR_END()                                                                                 \
+    dbg8(b, 0);                                                                                    \
     dbg8(b, 0)
 
     /* The line program the assembler generated, named so DW_AT_stmt_list can
@@ -3674,8 +3871,7 @@ static int dbg_type_of(Type *t) {
 
 /* Records a described variable for a function, ignoring the ones that cannot be
  * described honestly or do not fit. */
-static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot,
-                        int type_code) {
+static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot, int type_code) {
     if (f->nvars >= DBUG_MAX_VARS)
         return;
     if (name == NULL || name[0] == '\0')
@@ -3800,7 +3996,7 @@ static void dbg_write_info(CG *cg) {
     /* The compile unit. */
     dbg8(b, DW_ABBREV_CU);
     dbg_asciz(b, "z");
-    dbg16(b, 0x1d); /* DW_LANG_C99: the closest thing DWARF has to "Z" */
+    dbg16(b, 0x1d);                    /* DW_LANG_C99: the closest thing DWARF has to "Z" */
     buf_puts(b, "  .long .Lz_line\n"); /* the assembler's own line program */
     dbg_asciz(b, primary);
 
@@ -3842,8 +4038,8 @@ static void dbg_write_info(CG *cg) {
         DbgFunc *f = &cg->dbg_funcs[i];
         dbg8(b, DW_ABBREV_SUBPROGRAM);
         dbg_asciz(b, f->name);
-        dbg32(b, (unsigned long)dbg_type_ref(f->ret_type, off_long, off_bool, off_str,
-                                             off_ptr, off_double, off_void));
+        dbg32(b, (unsigned long)dbg_type_ref(f->ret_type, off_long, off_bool, off_str, off_ptr,
+                                             off_double, off_void));
         dbg8(b, (unsigned)f->file);
         dbg8(b, (unsigned)f->line);
         /* The two addresses. Each is a reference to a label placed around the
@@ -3860,8 +4056,8 @@ static void dbg_write_info(CG *cg) {
 
         for (int j = 0; j < f->nvars; j++) {
             DbgVar *v = &f->vars[j];
-            int toff = dbg_type_ref(v->type_code, off_long, off_bool, off_str, off_ptr,
-                                    off_double, off_void);
+            int toff = dbg_type_ref(v->type_code, off_long, off_bool, off_str, off_ptr, off_double,
+                                    off_void);
             int typed = toff != 0;
             /* A formal_parameter and a variable have separate abbreviations for
              * both the typed and untyped shapes; which pair applies is fixed by
@@ -3934,15 +4130,13 @@ static const char *z_sym(CG *cg, const char *name) {
     return out;
 }
 
-
 /* Emits one function. The body is generated twice: once to measure peak
  * temporary-slot usage (to size the stack frame), then for real. */
 static void emit_function(CG *cg, Stmt *fn) {
     /* The synthesized entry keeps its runtime-style name; an `export`ed
      * function keeps the name as written so C can find it; everything else the
      * user writes is mangled into the Z namespace. */
-    const char *sym = fn->is_entry ? "z_main"
-                                   : (fn->is_export ? fn->fname : z_sym(cg, fn->fname));
+    const char *sym = fn->is_entry ? "z_main" : (fn->is_export ? fn->fname : z_sym(cg, fn->fname));
     cg->cur_locals_bytes = fn->locals_bytes;
     /* Struct-returning functions store the caller's buffer pointer in the
      * hidden first parameter (name "$ret"). */
@@ -4011,9 +4205,7 @@ static void emit_function(CG *cg, Stmt *fn) {
         /* The name the reader wrote, not the emitted symbol: a nested function's
          * symbol is `$fn<owner>_<name>` and a hoisted lambda's is `$lam<n>`,
          * neither of which appears anywhere in the source. */
-        df->name = fn->src_fname != NULL ? fn->src_fname
-                  : fn->fname != NULL       ? fn->fname
-                                             : sym;
+        df->name = fn->src_fname != NULL ? fn->src_fname : fn->fname != NULL ? fn->fname : sym;
         df->ret_type = dbg_type_of(fn->ret_type);
         df->file = dbg_file(cg, fn->span.file);
         df->line = fn->span.line > 0 ? fn->span.line : 0;
@@ -4069,8 +4261,8 @@ static void emit_function(CG *cg, Stmt *fn) {
         assign_args(ptypes, fn->nparams, 0, &aa);
         for (int i = 0; i < fn->nparams; i++) {
             if (is_kind(fn->params[i]->type, TK_F64) && aa.reg[i] != NULL) {
-                buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n",
-                           fn->params[i]->slot, aa.reg[i]);
+                buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot,
+                           aa.reg[i]);
             } else if (aa.reg[i] == NULL) {
                 buf_printf(cg->out, "  mov r11, QWORD PTR [rbp + %d]\n", 16 + aa.soff[i]);
                 buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], r11\n", fn->params[i]->slot);
@@ -4169,14 +4361,29 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
         /* fbody == NULL is a declaration with no definition: a forward
          * declaration, or an `extern` whose body lives in C. */
         if (program->items[i]->kind == S_FUNC && program->items[i]->fbody != NULL &&
-            !program->items[i]->is_generic_template)
+            !program->items[i]->is_generic_template) {
             emit_function(&cg, program->items[i]);
+        }
     }
 
     /* Emit struct methods (mangled `Struct__method`) and property accessors. */
     for (int i = 0; i < program->nitems; i++) {
         if (program->items[i]->kind == S_STRUCT && program->items[i]->sdef != NULL) {
             StructDef *sd = program->items[i]->sdef;
+            /* A struct reached through two declarations -- which a generic
+             * instance is, while it is being built, since a method inside its own
+             * body can name the type again -- is emitted once. Emitting it twice
+             * gave the assembler two definitions of the same symbol, and the
+             * error named the constructor rather than anything that would have
+             * pointed here. */
+            for (int prev = 0; prev < i; prev++) {
+                if (program->items[prev]->kind == S_STRUCT && program->items[prev]->sdef == sd) {
+                    sd = NULL;
+                    break;
+                }
+            }
+            if (sd == NULL)
+                continue;
             for (int mi = 0; mi < sd->nmethods; mi++) {
                 if (sd->methods[mi]->body != NULL)
                     emit_function(&cg, sd->methods[mi]->body);
@@ -4287,6 +4494,15 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
      * two bool strings are Z strings -- a bool concatenates into one, and that
      * is not a special case worth branching on -- so they are laid out with
      * headers like every other literal and referenced sixteen past the label. */
+    /* The names `to_text` prints for an aggregate, one per type that a call
+     * actually reached. The calls were recorded while the code was generated, so
+     * this is exactly the set of labels the body refers to. */
+    buf_puts(&out, ".Ltype_array:\n  .asciz \"array\"\n");
+    for (int i = 0; i < cg.ntname; i++) {
+        buf_printf(&out, ".Ltype_%s:\n  .asciz \"", cg.tname[i]);
+        emit_escaped_n(&cg, cg.tname[i], (int)strlen(cg.tname[i]));
+        buf_puts(&out, "\"\n");
+    }
     buf_puts(&out, ".Lfmt_int:\n  .asciz \"%ld\\n\"\n");
     buf_puts(&out, ".align 8\n.Ltrue_str:\n  .quad 4\n  .quad 4\n  .asciz \"true\"\n");
     buf_puts(&out, ".align 8\n.Lfalse_str:\n  .quad 5\n  .quad 5\n  .asciz \"false\"\n");
@@ -4310,6 +4526,7 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
     free(cg.locals);
     free(cg.rodata);
     free(cg.dbg_funcs);
+    free(cg.tname);
     return out.data;
 }
 

@@ -299,8 +299,7 @@ const char *diag_suggest(const char *name, const char *const *candidates, int n)
     return best;
 }
 
-void diag_suggest_note(const char *what, const char *name, const char *const *candidates,
-                       int n) {
+void diag_suggest_note(const char *what, const char *name, const char *const *candidates, int n) {
     const char *s = diag_suggest(name, candidates, n);
     if (s != NULL)
         diag_note("did you mean the %s '%s'?", what, s);
@@ -443,8 +442,9 @@ static void show_context(void) {
             if (c->reported)
                 break;
             c->reported = 1;
-            diag_note_at(c->origin, "this is the '%s' instance; the error is in the "
-                                    "template it was generated from",
+            diag_note_at(c->origin,
+                         "this is the '%s' instance; the error is in the "
+                         "template it was generated from",
                          c->label);
             break;
         }

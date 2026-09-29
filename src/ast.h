@@ -8,10 +8,10 @@
 
 typedef enum {
     E_INT,
-    E_F64,   /* a float literal; value in `dval` */
-    E_CVT,   /* an explicit or widening conversion of `lhs` to `type` */
+    E_F64, /* a float literal; value in `dval` */
+    E_CVT, /* an explicit or widening conversion of `lhs` to `type` */
     E_BOOL,
-    E_NULL,   /* the null pointer literal; type is left unknown */
+    E_NULL,      /* the null pointer literal; type is left unknown */
     E_INTRINSIC, /* a built-in: abs/min/max/clamp/sqrt, resolved at parse time */
     E_FNPTR,     /* &f: the address of a function, typed by its signature */
     E_ICALL,     /* f(args) where f is a function pointer */
@@ -32,6 +32,16 @@ typedef enum {
     E_UNARY,
     E_BINARY,
     E_ASSIGN,
+    /* Postfix `x++` / `x--`: the old value, and the variable incremented.
+     *
+     * Its own node rather than a rewrite to `x = x + 1`, because that rewrite
+     * yields the *new* value and postfix increment is defined as yielding the old
+     * one. It is not a corner case: `data[n++] = v` is how every growable
+     * collection in the language is written, and with the rewrite it stored at
+     * `data[n + 1]` and skipped `data[n]`. Desugaring an expression into
+     * statements needs a temporary and a scope, so the node stays an expression
+     * and the code generator emits the two orders. */
+    E_POSTINC,
     E_CALL,
     E_INDEX,     /* a[i] */
     E_DEREF,     /* *p */
@@ -89,7 +99,7 @@ struct Expr {
     int hoisted_slot;
     Expr *lhs;
     Expr *rhs;
-    Expr *env;      /* E_CLOSURE: the captured environment */
+    Expr *env; /* E_CLOSURE: the captured environment */
     /* E_IFACE: the type satisfying the interface, and the interface required. */
     StructDef *impl;
     IfaceDef *idef;

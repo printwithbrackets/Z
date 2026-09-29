@@ -80,20 +80,20 @@ static int run_command(const char *cmd) {
 
 static void usage(void) {
     fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]\n"
-            "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
-            "       [--no-std] [linker args...]\n"
-            "  -O0 naive codegen (no register allocation, no folding)\n"
-            "  -O1 default: folding, register allocation, strength reduction\n"
-            "  -O2 adds loop-invariant code motion\n"
-            "  -O3 adds loop unrolling\n"
-            "  -g        emit DWARF debug info (line table, functions, locals)\n"
-            "  -w         silence all warnings\n"
-            "  -Werror    treat warnings as errors\n"
-            "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
-            "            unreachable, unused-import)\n"
-            "  --error-format=human|gcc|json  how to render diagnostics\n"
-            "  --color=auto|always|never       colour, auto = only on a terminal\n"
-            "  --no-std   compile without the embedded standard library\n");
+                    "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
+                    "       [--no-std] [linker args...]\n"
+                    "  -O0 naive codegen (no register allocation, no folding)\n"
+                    "  -O1 default: folding, register allocation, strength reduction\n"
+                    "  -O2 adds loop-invariant code motion\n"
+                    "  -O3 adds loop unrolling\n"
+                    "  -g        emit DWARF debug info (line table, functions, locals)\n"
+                    "  -w         silence all warnings\n"
+                    "  -Werror    treat warnings as errors\n"
+                    "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
+                    "            unreachable, unused-import)\n"
+                    "  --error-format=human|gcc|json  how to render diagnostics\n"
+                    "  --color=auto|always|never       colour, auto = only on a terminal\n"
+                    "  --no-std   compile without the embedded standard library\n");
 }
 
 /* ---- imports ----
@@ -283,37 +283,41 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
 /* Lexes the embedded standard library and appends its tokens to `out`.
  *
  * Ahead of the program's own tokens, so its declarations are in scope
- * everywhere: at the top level, inside a function, inside a class. It is
- * lexed as an ordinary file rather than spliced as text, so every token carries a
- * Span and a diagnostic inside the library points at `z:std` and the right line
- * -- and, unlike an import, the library cannot be shadowed, cycled, or read
- * from disk.
+ * everywhere: at the top level, inside a function, inside a class. Each file is
+ * lexed on its own and its tokens stamped with its own name, so a diagnostic
+ * inside the library names the file a reader can go and read -- and a line
+ * number that counts within that file rather than across all of them.
+ *
+ * The name is the path the file had when it was embedded, which is not a path
+ * anyone can open. That is honest: the source is inside the compiler, and saying
+ * so beats naming a file that does not exist.
  *
  * Returns 0 on success. */
-static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout,
-                         StringTable *strings) {
-    const char *path = arena_strdup(arena, STD_SRC_NAME);
-    diag_set_source(path, std_src);
-    int ntoks = 0;
-    Token *toks = lex_all_file(arena, std_src, (int)strlen(std_src), strings, &ntoks, path);
-    if (diag_error_count() > 0) {
-        fprintf(stderr, "z: the embedded standard library does not compile\n");
-        return 1;
-    }
-    for (int i = 0; i < ntoks; i++) {
-        /* The per-file terminator is dropped; one is appended after the whole
-         * unit is assembled, and the parser stops at the first one it sees. */
-        if (toks[i].kind != T_EOF)
-            push_token(arena, out, nout, capout, toks[i]);
+static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout, StringTable *strings) {
+    for (int f = 0; f < std_src_COUNT; f++) {
+        const char *src = std_src_srcs[f];
+        const char *path = arena_strdup(arena, std_src_names[f]);
+        diag_set_source(path, src);
+        int ntoks = 0;
+        Token *toks = lex_all_file(arena, src, (int)strlen(src), strings, &ntoks, path);
+        if (diag_error_count() > 0) {
+            fprintf(stderr, "z: the embedded standard library does not compile\n");
+            return 1;
+        }
+        for (int i = 0; i < ntoks; i++) {
+            /* The per-file terminator is dropped; one is appended after the whole
+             * unit is assembled, and the parser stops at the first one it sees. */
+            if (toks[i].kind != T_EOF)
+                push_token(arena, out, nout, capout, toks[i]);
+        }
     }
     return 0;
 }
 
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
  * links an executable. Returns the process exit status. */
-static int compile(const char *src, const char *exe, const char *asm_path,
-                   int bounds_checks, int opt_level, int debug_info, int use_stdlib,
-                   const char *link_args) {
+static int compile(const char *src, const char *exe, const char *asm_path, int bounds_checks,
+                   int opt_level, int debug_info, int use_stdlib, const char *link_args) {
     long len = 0;
     char *text = read_file(src, &len);
     if (text == NULL)
@@ -336,8 +340,7 @@ static int compile(const char *src, const char *exe, const char *asm_path,
         free(text);
         return 1;
     }
-    if (expand_file(&arena, src, &toks, &ntoks, &tcap, &strings) != 0 ||
-        diag_error_count() > 0) {
+    if (expand_file(&arena, src, &toks, &ntoks, &tcap, &strings) != 0 || diag_error_count() > 0) {
         arena_free(&arena);
         free(text);
         return 1;
@@ -408,7 +411,7 @@ static int compile(const char *src, const char *exe, const char *asm_path,
             free(text);
             return 1;
         }
-        fwrite(runtime_src, 1, strlen(runtime_src), rtf);
+        fwrite(runtime_src_0, 1, strlen(runtime_src_0), rtf);
         fclose(rtf);
         char cmd[4096];
         /* Anything the caller passed after the source file is handed straight
@@ -535,8 +538,8 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
-                    link_args) != 0)
+        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, link_args) !=
+            0)
             return 1;
         char run_cmd[512];
         snprintf(run_cmd, sizeof run_cmd, "'%s'", exe);
@@ -547,8 +550,8 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
-        return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info,
-                       use_stdlib, link_args) == 0
+        return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info, use_stdlib,
+                       link_args) == 0
                    ? 0
                    : 1;
     }

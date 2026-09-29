@@ -26,7 +26,7 @@ const char *token_kind_name(TokenKind kind) {
         return "'string'";
     case T_KW_VOID:
         return "'void'";
-    case T_KW_VAR:
+    case T_KW_VAR: /* `var` or `auto`; the lexer maps both to this one kind. */
         return "'var'";
     case T_KW_CONST:
         return "'const'";

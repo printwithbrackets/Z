@@ -17,8 +17,8 @@ typedef enum {
     TK_PTR,   /* *base */
     TK_ARRAY, /* base[len] */
     TK_STRUCT,
-    TK_UNION,     /* tagged sum: a leading int tag + variant payloads */
-    TK_FNPTR,     /* fn(params) -> ret: a function pointer, carries its signature */
+    TK_UNION, /* tagged sum: a leading int tag + variant payloads */
+    TK_FNPTR, /* fn(params) -> ret: a function pointer, carries its signature */
     /* A bound method pointer, `&obj.M`. Eight bytes: a pointer to a
      * garbage-collected cell holding { code, receiver }. Keeping it a scalar
      * rather than a two-word aggregate means it lives in a register and is
@@ -40,6 +40,16 @@ typedef enum {
      * struct. */
     TK_IFACE,
     TK_TYPEPARAM, /* a generic type parameter (substituted during monomorphization) */
+    /* The `a` of a built-in signature: "whatever this is". A generic function
+     * cannot ask what type it was instantiated with -- `typeof` answers, but
+     * every branch after the test still has to type-check, and a branch that
+     * calls int_to_string on a string does not -- so the two questions that
+     * genuinely depend on the type, a value's text form and its hash, are asked
+     * of the code generator instead, which does know.
+     *
+     * It only ever appears as a parameter type, and only for a built-in. There
+     * is no way to write it, name it or declare a variable of it. */
+    TK_ANY,
 } TypeKind;
 
 typedef struct Type Type;
@@ -117,6 +127,7 @@ typedef struct {
     Type *t_bool;
     Type *t_f64;
     Type *t_string;
+    Type *t_any;
     StructDef **structs;
     int nstructs;
     int cap;
@@ -140,6 +151,8 @@ Type *type_int(TypeCtx *ctx);
 Type *type_bool(TypeCtx *ctx);
 Type *type_f64(TypeCtx *ctx);
 Type *type_string(TypeCtx *ctx);
+/* The `a` of a built-in signature. See TK_ANY. */
+Type *type_any(TypeCtx *ctx);
 Type *type_ptr(TypeCtx *ctx, Type *base);
 Type *type_array(TypeCtx *ctx, Type *elem, int len);
 

@@ -1,21 +1,27 @@
 # Z
 
-A small, statically-typed, C#-flavored language that compiles to native x86-64
+A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Status: M0–M6c done (generics, classes/vtables), M7 optimizations in progress.** A working end-to-end compiler: source → lexer →
-parser → type checker → x86-64 assembly → native binary. It has a real type system,
-pointers, heap arrays, structs with methods and properties, `for`/`foreach`,
-the C#-style sugar layer (string interpolation, expression-bodied members,
-struct methods/properties, extension methods, operator overloading, ternary),
-enums with exhaustive pattern matching, monomorphized generics, classes with
-vtables and inheritance, a tracing garbage collector for the heap, IEEE-754
-`float`, closures, nested functions, interfaces, a standard library, warnings, DWARF
-debug info, and a register-allocating, constant-folding, strength-reducing
-backend. See
-[TUTORIAL.md](docs/TUTORIAL.md) to learn the language and [Roadmap](#roadmap) for
-what's next.
+**Status: the compiler implements v1. v2 is specified and being built.** A
+working end-to-end compiler: source → lexer → parser → type checker → x86-64
+assembly → native binary. It has a real type system, pointers, heap arrays,
+structs with methods and properties, `for`/`foreach`, enums with exhaustive
+pattern matching, monomorphized generics, classes with vtables and inheritance,
+a tracing garbage collector for the heap, IEEE-754 `float`, closures, nested
+functions, interfaces, a standard library, warnings, DWARF debug info, and a
+register-allocating, constant-folding, strength-reducing backend.
+
+The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
+value semantics, references, RAII instead of a garbage collector, no
+inheritance, and threads that cannot data-race because ownership makes sharing
+unrepresentable. See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2
+specification and the five slices it is built in; v1 is preserved verbatim in
+**[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md)**. To learn the language that
+compiles *today*, read [docs/TUTORIAL.md](docs/TUTORIAL.md) and
+[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md); the [Roadmap](#roadmap) below is the
+v1 history and what came of it.
 
 ## Build & test
 
@@ -273,26 +279,49 @@ Five gaps, roughly in the order they start blocking real programs. Each one is
 a design question before it is an amount of work; the notes say what the
 question is, because picking the wrong answer is the expensive way to find out.
 
-- **M10 (planned): collections beyond fixed arrays.** A `T[]` is a pointer, a
-  length and a GC-traced allocation: fixed, append-only by hand, and the only
-  aggregate container in the language. What is missing is everything a program
-  actually reaches for — a growable vector, a map, a set, and slices so a
-  function can take part of an array without copying it.
+- **M10 (done): collections beyond fixed arrays.** `Vec<T>`, `Map<K,V>` and
+  `Set<T>` live in `lib/collections.z`, written in Z and checked by the same
+  front end as user code. The roadmap's open question was value or reference, and
+  the answer is **reference**: each is a `class`, so a `Vec` is one pointer,
+  assignment shares it, and `Vec<Vec<T>>` behaves. The alternative — a `struct`
+  holding a pointer — is also one pointer, but assignment then aliases the same
+  buffer in two variables, which is the trap a language with value-semantics
+  structs invites badly. The language already draws the line (structs copy,
+  classes share), so the interesting work was making that choice legible rather
+  than making the container, and it is legible in one place: a field of class type
+  is written `Map<T,bool>* inner` because the class type and its pointer are
+  different types, and copying a handle by accident is a diagnostic.
 
-  The decision is value or reference. A `Vec<T>` as a `class` is one pointer,
-  copied cheaply and shared on assignment, which is what everyone expects from a
-  growable buffer and what makes a `Vec<Vec<T>>` behave. As a `struct` holding
-  a pointer it is also one pointer, but assignment aliases the same buffer in
-  two variables, which is a trap that a language with value-semantics structs
-  invites badly. The language already draws this line — structs copy, classes
-  share — so the answer is probably `class`, and the interesting work is making
-  that choice legible rather than making the container.
+  The roadmap also predicted `foreach` would be sugar for an `Iterator<T>`.
+  That turned out to be wrong about the cost: an iterator is one interface cell
+  and one indirect call *per element*, on every loop in every program, to buy
+  generality no collection here needs. Each container is therefore iterable
+  through a `foreach` that knows its own representation, which is a plain
+  index loop in the container and zero overhead over the direct form. The
+  interface is still there for user types that want it.
 
-  The second decision is the iteration protocol, and interfaces (M6d) have
-  already answered it: a `struct` satisfies `interface Iterator<T>` by having
-  `next() -> T?`, and `foreach` over a `Vec<T>` is sugar for a `foreach` over an
-  iterator. That is the reason to do this after interfaces and not before — the
-  collection needs nothing invented for it.
+  `Map` is an open-addressed table with linear probing, one entry per occupied
+  slot, rehashing to double the slot count at a load factor of 0.7. Growth
+  happens *before* an insert rather than after, since a table past its load
+  factor has probe sequences long enough to dominate the cost of the insert. A
+  *removed* slot does not end a probe run, which is the only reason removal is
+  not simply emptying. `Set<T>` is a `Map<T,bool>` and says so, and a set that can
+  be asked for a value is a set that will be, so the pair of questions a set
+  answers is `has` and nothing else.
+
+  **The `any` parameter type.** A generic function cannot ask what it was
+  instantiated with in a way its branches can use: `typeof` answers, but every
+  branch after the test still has to type-check, and a branch calling
+  `int_to_string` on a `string` does not. So the two questions that genuinely
+  depend on the element type — a value's text form and a value's hash — are asked
+  of the code generator through a parameter declared `any`. The generator knows
+  the static type at the call site and lowers the call per type, so
+  `to_text(x)` and `hash_of(x, cap)` are right for every key and element type a
+  `Map` or `Set` can be instantiated with, and neither the standard library nor a
+  user has to declare an interface that `int` and `string` would both have to
+  satisfy. The cost is that `any` is opaque to the type checker: it checks
+  nothing about its argument, which is why it is a parameter kind rather than a
+  type a program can declare.
 
 - **M11 (planned): file and I/O beyond `print`.** The language can print to
   stdout and nothing else. A program that cannot read a file cannot do anything
@@ -415,6 +444,16 @@ Recorded because each was invisible at the default optimization level, and
   iteration. `nested_loops` *hung* at `-O2` and was correct at `-O1`. The pass
   now takes the step, and `make test-all` runs the whole suite at every level so
   a pass that only runs at a higher level cannot hide again.
+- **LICM hoisted an expression out of a loop in any function with more than 256
+  locals.** The pass keeps a fixed 256-entry table of the locals a loop body
+  writes, and a slot past the end of the table could not be recorded. A read of
+  an unrecorded slot tested as "not written", so an expression over one looked
+  invariant and was hoisted, and every iteration reused the first value — the
+  same class of bug as the one above, reached a second way. A slot the pass
+  cannot track is not *provably* invariant, so it is now treated as not
+  invariant. `licm_bigframe` is the regression test: a function with 300 locals
+  whose arithmetic gives values that fail loudly rather than quietly agreeing with
+  a miscompile.
 - **`foreach` over a `T*` compiled and read unrelated memory.** The parser
   accepted a pointer, the desugaring always read `.length`, and a pointer has no
   length header — so the pointer's own address became the iteration count. It is
@@ -470,6 +509,22 @@ Recorded because each was invisible at the default optimization level, and
   old contents, so a program with eight lambdas worked and one with nine crashed
   the compiler rather than failing at the point of the bug. The generic
   instantiation path shared it.
+- **`Vec.pushAll` could not be called at all.** Its parameter was written
+  `Vec<T>`, which names the class rather than a handle to one, so every
+  argument mismatched and no vector could be passed. It was the only
+  class-typed parameter in the standard library, and the only one missing the
+  `*` that `Set.inner` and `Set.containsAll` both carry, and nothing in the
+  library or the tests called it — so it compiled, type-checked, and was
+  unreachable. The fix is the pointer. The test that finds it is
+  `collections2`, which calls every declared method once, because a method
+  nothing calls is a method nothing has checked.
+- **A test with 300 warnings was reported as a compile failure.** The harness
+  read the compiler's output into a 64KB buffer and then stopped, leaving the
+  child writing into a pipe nobody was reading, so the compiler died of
+  SIGPIPE and the harness read the resulting nonzero exit as "compile failed" on
+  a build that had succeeded. The harness now drains the pipe after the buffer
+  fills. The real failure was always the warnings, and there were 300 of them
+  because `licm_bigframe` is a 300-local function on purpose.
 
 ## Performance
 
@@ -505,8 +560,17 @@ execute all ten million iterations.
 
 ## Design
 
-See `docs/LANGUAGE.md` for the grammar and type rules, and the design
-rationale (focus, constraints, memory model) in the project docs.
+See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2 specification: the
+grammar and type rules, and the design rationale for the three decisions
+everything else depends on — ownership with explicit `move`, destruction on
+every exit path, and the concurrency model that ownership makes sufficient.
+[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md) is the v1 specification, which is what
+the compiler in this repository implements.
+
+The two documents are kept side by side on purpose. v2 changes the language, not
+the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
+diagnostics system, the 71 golden tests — are still the spec for the parts that
+do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License
 

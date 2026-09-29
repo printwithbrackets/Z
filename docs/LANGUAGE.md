@@ -1,40 +1,339 @@
-# Z — language specification
+# Z — language specification (v2)
 
-This is the subset that is implemented and tested. It grows each milestone; the
-grammar below is the source of truth for what the compiler accepts today.
+Z is a small, statically-typed systems language. It compiles to native x86-64
+machine code. It has the shape of C++ — value types, references, templates,
+RAII, zero-cost abstractions — with the sharp parts taken off.
+
+**Status: this document specifies v2. v2 is not implemented.** The compiler in
+this repository implements v1, specified in [LANGUAGE-v1.md](LANGUAGE-v1.md) and
+in the "What exists today" appendix below. v2 is built in the five slices listed
+in [Roadmap](#roadmap), in order, each of which is a working compiler at its end.
+
+Everything in v2 marked **[now]** exists in the compiler today. Everything marked
+**[new]** is specified here and not yet built. **[cut]** is in v1 and is being
+removed. If a section has no marker, it is unchanged from v1 except where it
+mentions a cut or added feature.
+
+The five properties v2 is built for, in priority order, are:
+
+1. **Memory safety without giving up speed.** Ownership is checked, memory is
+   freed deterministically, and the cost of the guarantee is a move at run time
+   or a field read at compile time — never a garbage-collection pause.
+2. **Simpler syntax.** No boilerplate, no headers, no macro dialect, one way to
+   say each thing.
+3. **Zero-cost performance and real control.** A `Vec<T>` is a pointer, a length
+   and a capacity. A `for` loop is a loop. There is no interpreter, no boxing,
+   no vtable where a template would do.
+4. **Fast compiles.** Monomorphization of a small function is milliseconds. A
+   whole-program compile of a real program stays under a second, and this is a
+   design constraint rather than an accident.
+5. **Concurrency correctness.** Two threads cannot touch the same mutable value,
+   because the ownership rules make the shared-mutable case unrepresentable
+   rather than merely discouraged.
+
+## What v2 drops, and why
+
+Each of these is a thing v1 has. Each is cut deliberately, and the reason is
+recorded because the reason is the design.
+
+| Cut | Why |
+|---|---|
+| **Inheritance** (`class B : A`, `override`, `base()`, upcast) | It is the single largest source of C++ complexity for the least amount of used code. Every hierarchy is a set of types that respond to some messages, which is what `interface` already is and does without a vtable per class or an upcast that can be wrong. |
+| **The garbage collector** | A conservative mark-sweep collector cannot see a pointer held in a register the caller spilled, so it leaks; it cannot move an object, so it gives up compaction; and its pause time is a property of the program. RAII frees at a point the programmer wrote down, has no pause, and moves nothing. The cost is that a cycle leaks, and that is stated rather than hidden. |
+| **`this` extension methods** (`int Twice(this int n)`) | They make a bare call site's meaning depend on an invisible second program, and they are how a global namespace gets polluted. Free functions with an explicit first parameter say the same thing and can be found. |
+| **Properties** (`int X { get; set; }`) | A property is a method pair with a name that does not say which it is. v2 uses fields and methods, and `size()` rather than `length()` follows the same rule: a name says whether it is a field or a call. |
+| **Implicit conversions** except `int`→`float` | A conversion that happens without being written is one the reader has to know about to be sure of the program. The single widening is kept because it is lossless; nothing else is. |
+| **`T[]` as the only aggregate** | A fixed-length heap array with a length header, grown by hand, is one container out of many, and it is the one nobody wants. `Vec<T>` is the aggregate, and it is a value. |
+
+**What v2 keeps from v1, unchanged in spirit:** top-level statements, `var` and
+`auto`, structs, enums with exhaustive `match`, `Result<T,E>` with `?`,
+interfaces, closures, function pointers, templates by monomorphization, C
+interoperability in both directions, modules, the whole diagnostics story, and
+the whole optimizer.
+
+## The three decisions everything else depends on
+
+### 1. Ownership: a value has one owner, and moving is written down
+
+v1 had two answers to "who owns this memory" — the stack, or the collector —
+and no way to write a type that held a resource. v2 has one: **a value is owned
+by the variable that holds it, and ownership is transferred with `move`.**
+
+```
+var a = Vec<int>();        // a owns a heap buffer
+a.push_back(1);
+var b = move(a);            // b owns it now; a is spent
+a.push_back(2);             // error: 'a' has been moved from
+```
+
+- **`move(x)` transfers and leaves the source spent.** Reading a spent variable
+  is a compile error, not a runtime check. This is the one rule that makes the
+  whole model work, and it is checked at compile time because a use-after-move
+  is determinable from the flow.
+- **Copy is deep and is called `clone`.** `var b = a.clone();` is an explicit
+  copy. There is no implicit copy of an owning type, so a line of code never
+  quietly costs an allocation. A type with no destructor and no owning field —
+  `struct Point { int x; int y; }` — is still copied on assignment, because
+  copying it is a register move and there is nothing to own.
+- **A type is owning if it has a destructor or an owning field, and it is
+  computed by the compiler, not declared.** `Vec<T>`, `string`, and a user's
+  `struct File { int fd; ~File() { close(fd); } }` are owning because the
+  compiler can see that they hold a resource. A type that needs to be a
+  non-owning handle says so by holding a reference, not a value.
+- **References are the borrow.** `T&` is a name for a value owned by someone
+  else, checked to be alive at every use. It cannot be stored in a struct, put
+  in an array, or returned. Returning a reference is only allowed for a `&self`
+  parameter — the one function that is allowed to hand back a borrow of what it
+  was lent, and the caller already holds the owner alive.
+
+Why not a borrow checker: it is the most expensive single feature in this
+document, and getting it wrong produces a compiler that rejects correct
+programs, which is worse than one that accepts a program with a use-after-free
+the programmer can see. What v2 does instead is make the *common* case
+unrepresentable — one owner, explicit transfer, checked use — and leave raw
+pointers in `unsafe` for the cases that need them. The alternative is honest
+about its cost; see [Memory safety: what is and is not
+guaranteed](#memory-safety-what-is-and-is-not-guaranteed).
+
+### 2. Destruction: destructors run on every exit path, including `?`
+
+A `~Type()` method runs when the value's scope ends, **in reverse declaration
+order**, and on every path out of that scope: falling off the end, `return`,
+`break`, `continue`, a `?` that propagates, and a panic.
+
+That last one is the requirement with teeth. In v1, `?` was a return and there
+was nothing to unwind. In v2, `?` in a function holding a `Vec` means the
+vector's buffer is freed on the way out, so **the compiler must know every exit
+from every function that owns a value.** That is a real analysis and it is named
+here so it is not discovered as a leak in slice 3.
+
+A type's destructor is the default: destroy each owning field, recursively. A
+user-written `~Type()` runs first and then the fields are destroyed, which is
+C++'s order and the one that lets a destructor use a field it is about to
+release. A type with no destructor and no owning field has no teardown at all,
+so `struct Point` costs nothing.
+
+There is no `delete`. A value is destroyed by its scope ending, which is
+checked rather than remembered, and there is no spelling that can be gotten
+wrong. A raw allocation in `unsafe` has a `free(x)` that must appear on every
+path, and that is a `Result` — `free` returns whether it freed, so a leak
+becomes a value the program can check.
+
+**Cycles leak.** A `Vec<Box>` holding boxes that hold the `Vec` back is not
+collectable without tracing, and there is no tracer. A leak is reported at exit
+by the runtime when it can see one, and is otherwise a leak. This is stated
+here rather than discovered.
+
+### 3. Concurrency: ownership makes the data race unrepresentable
+
+Threads and channels, and one rule:
+
+> **A value belongs to one thread. Sending it to another thread moves it.**
+
+```
+var chan = Chan<int>();             // unbounded channel
+thread(() => {
+    for (var i = 0; i < 1000; i = i + 1) {
+        send(chan, i);
+    }
+});
+var total = 0;
+while (let v = recv(chan)) {        // recv yields a Result
+    total = total + v;
+}
+print(total);                       // 499500
+```
+
+Because ownership is single-threaded by construction, there is nothing to
+synchronize: two threads cannot hold the same mutable value, so there is no
+data race to prevent. A shared counter is a `Chan<int>` and the channel *is* the
+synchronization. This is why the concurrency work is small — it is the
+ownership work, reused.
+
+- **`Rc<T>` and `Arc<T>` are different types on purpose.** `Rc` is
+  single-threaded reference counting and is not `Send`. `Arc` is atomic reference
+  counting and is. Writing `Arc` in one thread and `Rc` in another is a compile
+  error, so a "I only use this on one thread" note cannot rot into a race. This
+  is the single most valuable line in the section.
+- **A channel send is a move, checked.** Sending a value that is still owned
+  elsewhere, or sending a non-`Send` value like an `Rc`, is a compile error.
+- **The guarantee stops at the C boundary.** `extern` and `export` hand raw
+  pointers across a boundary the compiler cannot see. A C function that writes
+  through a pointer the Z side also reads is a data race the language cannot
+  prevent. **`extern` declarations must be marked `unsafe` to say the pointer
+  crosses the boundary unchecked**, and the compiler will not reason about the
+  memory a C function retains. This is a real hole and it is the one place the
+  "no shared mutable state" claim needs a footnote.
+
+## Roadmap
+
+Each slice ends at a working compiler. The order is a dependency order, not a
+preference: slice 3's ownership rules are what make slice 4's thread-safety
+argument work, so the cheap syntax work comes first and the hard semantic work
+comes before the thing that depends on it.
+
+### Slice 1 — surface, no semantic change (days)
+
+Purely additive, so the test suite keeps passing throughout and this can be
+reviewed as a diff.
+
+| Change | Notes |
+|---|---|
+| `auto x = ...` | A synonym for `var`, not a replacement. Both stay. |
+| `T&` references | A borrow of a value someone else owns. `&x` yields `T&` where v1 yields `T*` for a struct. |
+| `p->f` | Alongside `p.f`. Both work. |
+| `for (auto& x : v)` | Range-for over `Vec<T>`, `Set<T>` and `string`. `foreach` stays as sugar for it. |
+| `p->i()` and `p->len` on `Vec<T>` | A `Vec` is a struct, so it needs `->` for the pointer case. |
+| `size()`, `empty()`, `push_back`, `pop_back` | C++ names. v1's `size()`, `isEmpty()`, `push()`, `pop()` are removed — same names where they agree, so `size()` is already right. |
+| `namespace` | Module scope. Also the fix for v1's M13 problem, where two imported files could not both define `helper`. |
+| `pub` | Visibility, unexported by default. Also M13. |
+
+### Slice 2 — cut inheritance, keep classes (1–2 weeks)
+
+`class B : A`, `base()`, and `override` go. `class` stays, and `virtual` stays
+with it, so a single hierarchy of your own still dispatches dynamically.
+
+What is deleted: the base-type walk in the type checker, `base()` call
+emission, and the override check. What survives untouched: vtable emission
+(`src/codegen.c:4414`), the dispatch load (`:1706`), constructors, `this`, and
+`new C(args)`. The cut is smaller than it looks because a vtable with no
+subclass is still a working vtable.
+
+`interface` becomes the only way to collect unrelated types, which it already
+was — the `subclass stored in an interface calls the override` line in
+[LANGUAGE-v1.md](LANGUAGE-v1.md) just stops having a case to describe.
+
+`lib/*.z` is unaffected: none of `StringBuilder`, `Vec<T>`, `Map<K,V>` or
+`Set<T>` inherits anything. `tests/cases/classes.z` and `classes2.z` are
+rewritten.
+
+### Slice 3 — GC to RAII, and ownership (3–4 weeks)
+
+The largest slice and the one with the named risk.
+
+- **Delete** `z_gc_init`, the mark-sweep collector, `gc_mark`, `gc_mark_roots`,
+  `gc_collect`, and the `gc_enabled` / `gc_threshold` state in
+  `runtime/z_rt.c:26-111`.
+- **Replace** `z_newarray` with a plain allocator and add `z_free`.
+- **`string`** keeps its `{len, cap}` header — that decision was made for the C
+  boundary and is still right — and gains a destructor. Copies become deep.
+- **`Vec<T>`** stops being a `class` and becomes a `{data, len, cap}` struct
+  with a destructor. It is no longer an aliasing trap: `var b = a` is either a
+  copy or an error, never a surprise.
+- **Closures** box captures in `z_box` (`runtime/z_rt.c:215`) and those boxes are
+  freed when the closure is. A closure that outlives its frame therefore needs
+  its captures to live as long as it does, which is `Rc` — the same cell, with a
+  count. This is a small change to the runtime and the reason the counter
+  example in [Closures](#closures) still works.
+- **Every exit path runs destructors**, including `?`. This is the analysis
+  named in decision 2 and it is where the time goes.
+- **`lib/string.z`'s `StringBuilder`** becomes a `struct` owning a `Vec<byte>`,
+  which removes the `str_buf_append` special case in the runtime entirely.
+
+### Slice 4 — threads and channels (3–4 weeks)
+
+Depends on slice 3 and is small because of it.
+
+- `thread(fn)` spawns, `Chan<T>` is unbounded to start, `send` and `recv` with
+  `recv` returning a `Result` so a closed channel is a value rather than a
+  panic.
+- `Rc`/`Arc` split, with `Send` as a compile-time property computed from a
+  type's fields — the same structural rule as "is this type owning".
+- `extern` becomes `unsafe extern`, and a diagnostic points at every
+  declaration that is not marked.
+- The runtime gains a thread pool, or one thread per `thread()` call if that is
+  measurably cheaper. **Decision deferred to slice 4**, because a thread-pool
+  design is a throughput question and the first version's job is to be correct.
+
+### Slice 5 — port the tests and the standard library (2 weeks, parallel)
+
+Runs alongside 1–4 rather than after, because a golden suite that has not been
+ported yet is the thing that catches slice 3's destructor paths being wrong.
+
+- All 71 golden tests and 66 error tests rewritten to the v2 surface.
+- `lib/collections.z` and `lib/string.z` become structs with destructors.
+- `make test-all` at `-O0`–`-O3` stays the gate, for the reason in
+  [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels--command-line): a pass
+  that only runs at `-O2` miscompiled once already.
+
+## Memory safety: what is and is not guaranteed
+
+The honest version, since a guarantee that needs a footnote is a guarantee that
+will be misread.
+
+**Guaranteed, with a compile error on violation:**
+
+- Reading a moved-from variable.
+- Using a reference after the value it borrows is destroyed.
+- Indexing an array or `Vec` out of range (`--bounds` is on by default in v2;
+  see the command line).
+- Destroying a value twice.
+- Sending a value to a thread that still holds it, or sending a non-`Send` one.
+- Assigning to a `const`, or initializing a `const` twice.
+
+**Guaranteed, at run time, with a message and a non-zero exit:**
+
+- A failed allocation.
+- A channel operation on a closed channel.
+- A leak, when the runtime can see one at exit.
+
+**Not guaranteed:**
+
+- A raw pointer's lifetime. `unsafe` gets `T*` back and the programmer owns it.
+- A cycle. It leaks.
+- Memory a C function retains across an `unsafe extern` boundary. The compiler
+  cannot see it and does not try.
+- Anything the `unsafe` block asks the language to stop checking. That is what
+  it is for, and it is marked at the point of use.
+
+**No data races** on any value the compiler tracks, with the `unsafe extern`
+footnote from decision 3.
 
 ## Lexical
 
-- Comments: `// line`, `/* block */`.
-- Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
-- Integer literals: decimal digits, or `0x`/`0o`/`0b` for hex/octal/binary
-  (64-bit signed `int`). `_` may separate digits.
-- Float literals: digits, a `.` and more digits, and an optional `e`/`E`
-  exponent with a sign -- `1.5`, `0.5`, `1e3`, `2E-2`, `1.5e2`. A `.` begins a
-  fraction only when a **digit** follows it, which is what leaves `21.Twice()` a
-  member access rather than the number 21 followed by a stray dot. An exponent
-  needs no fraction, so `1e3` is a float. A float literal too large to represent
-  saturates rather than being an error: `1e400` is a very large number, not a
-  mistake.
-- String literals: `"..."` with the escapes listed under Lexical below.
-- Keywords: `int bool string void var const new struct enum class match this if
-  else while for foreach in return break continue true false null extern export
-  virtual override fn method import`.
-- Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ ~ << >>`,
-  `= += -= *= /= %= &= |= ^= <<= >>=`, `++ --`, `( ) { } [ ] ; , .`.
-- Integer literals are decimal by default, or hexadecimal (`0xff`), octal
-  (`0o755`) or binary (`0b1010_0110`) by prefix. `_` is a digit separator and
-  carries no meaning: `1_000_000` is a million. A literal too large for `int` is
-  an error rather than a silent wrap, and digits running straight into letters
-  (`123abc`) is an error rather than two tokens.
-- String escapes: `\n \t \r \0 \\ \"`, `\xNN` for a byte, and `\uXXXX` for a
-  code point, encoded as UTF-8. An unrecognized escape is an error.
-- `s.length` / `len(s)` is the length in **bytes**. `s[i]` is the byte at `i` as
-  an `int` in `0..255`, and `s[a..b]` is the half-open byte range, with either
-  end optional and both clamped. A `string` is a sequence of bytes and Z has no
-  character type, so a multi-byte UTF-8 sequence is several `int`s.
+**[now]** Comments: `// line`, `/* block */`. Identifiers:
+`[A-Za-z_][A-Za-z0-9_]*`. `_` is a digit separator in numbers and carries no
+meaning.
+
+**[now]** Integer literals: decimal, or `0x`/`0o`/`0b`. Float literals: digits,
+an optional `.` and fraction, an optional `e`/`E` exponent with a sign. A `.`
+begins a fraction only when a **digit** follows it, so `21.Twice()` is a member
+access. A float literal too large to represent saturates rather than erroring.
+
+**[now]** String literals: `"..."` with `\n \t \r \0 \\ \"`, `\xNN`, and
+`\uXXXX` encoded as UTF-8. An unrecognized escape is an error. `[new]` Raw
+strings, `r"..."`, for a path or a regex, so escaping stops being a puzzle.
+
+**[cut]** `$"..."` string interpolation is removed. It desugars to a chain of
+`+`, and a reader who sees `$"n = {x}"` has to know that to know what allocates.
+**[new]** In v2, interpolation is a `format` call: `format("n = {}", x)`. It is
+one call, the `{}` are not expressions in the lexer, and it is the one function
+that knows how to turn a value into bytes.
+
+```
+var n = 3;
+print(format("n = {}, sq = {}", n, n * n));    // n = 3, sq = 9
+```
+
+**[new]** Keywords added: `auto`, `move`, `clone`, `namespace`, `pub`,
+`unsafe`, `thread`, `send`, `recv`, `Chan`, `Rc`, `Arc`, `Box`. **[now]** Kept:
+`int bool string float void var const new struct enum class match this if else
+while for foreach in return break continue true false null extern export virtual
+override fn method import`.
+
+**[now]** Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ ~ << >>`,
+`= += -= *= /= %= &= |= ^= <<= >>=`, `++ --`, `( ) { } [ ] ; , .`. **[new]**
+Added: `->`, `:`, `~` (destructor name), `::` (namespace scope).
+
+**[now]** `s[i]` is the byte at `i` as an `int` in `0..255`, and `s[a..b]` is
+the half-open byte range with either end optional and both clamped. Lengths are
+byte counts throughout: Z has no character type, so in UTF-8 one character is
+several bytes. This is stated once and applies everywhere, including in the
+bounds-check message.
 
 ## Types
+
+**[now]**
 
 | Type | Meaning | Representation |
 |------|---------|----------------|
@@ -42,139 +341,113 @@ grammar below is the source of truth for what the compiler accepts today.
 | `bool` | `true` / `false` | 0 or 1 |
 | `float` | IEEE-754 binary64 | 8 bytes; C's `double` |
 | `string` | immutable bytes with a length | pointer to the bytes; `{ len, cap }` header at `ptr[-16]` |
-| `T*` | pointer to `T` | machine word |
-| `T[]` | array of `T` | pointer to first element; length stored at `ptr[-8]` |
+| `T*` | raw pointer to `T` | machine word; `unsafe` only in v2 |
+| `T&` | **[new]** a borrow of a `T` someone else owns | machine word; never stored |
+| `T[]` | **[cut]** fixed heap array | superseded by `Vec<T>` |
 | `struct S` | user-defined value type | inline in the frame; fields at byte offsets |
+| `class C` | **[now]** heap object with a vtable | pointer; first word is the vtable |
 | `void` | no value | — |
 | `null` | the null pointer literal | `0`; assignable to any pointer |
 | `fn(P...) -> R` | function pointer | machine word: the code address |
-| `method(P...) -> R` | bound method pointer, from `&obj.M` | machine word: a pointer to a GC cell `{ code, receiver }` |
+| `method(P...) -> R` | bound method pointer, from `&obj.M` | machine word: a pointer to a cell `{ code, receiver }` |
+| `closure(P...) -> R` | **[now]** a closure value | pointer to a cell `{ code, env }` |
 
-Pointers and arrays compose (`int**`, `int*[]`). Arithmetic (`+ - * /`) works on
-`int` and on `float`; `%` is `int`-only, since there is no remainder for a
-non-integer. `+` also concatenates when either side is a `string` (the other side
-may be `string`, `int`, `bool` or `float`). Comparisons yield `bool`.
-`&&`/`||`/`!` are `bool`-only and short-circuit; a `float` is not falsey, not
-even `0.0`.
+**[new]** `Vec<T>` is a struct `{ T* data; int len; int cap; }` with a
+destructor. `Chan<T>` is a struct holding a queue and a lock. `Box<T>` is a
+single owning heap value. `Rc<T>` and `Arc<T>` are reference-counted handles,
+differing only in whether the count is atomic.
+
+Pointers, references and arrays compose (`int**`, `int*&`). Arithmetic
+(`+ - * /`) works on `int` and `float`; `%` is `int`-only. `+` concatenates
+when either side is a `string` — **[cut]**, see `format` above. Comparisons
+yield `bool`. `&&`/`||`/`!` are `bool`-only and short-circuit; a `float` is not
+falsey, not even `0.0`.
+
+**[now]** `& | ^ ~ << >>` and their compound forms work on the full 64-bit `int`
+and wrap on overflow. Shift counts follow C. Division by zero traps.
+**[new]** Overflow is a **diagnostic** in a `const` initializer and wraps at run
+time, unchanged from v1 — a run-time overflow check would cost a branch on every
+arithmetic operation, which is the opposite of zero-cost.
 
 ### The one conversion Z performs on its own
 
-`int` widens to `float` implicitly, and in no other direction. Every `int` is
-exactly representable as a binary64, so the conversion cannot lose anything,
-which is what makes it safe to do without being asked; the result of an
-operation with a `float` operand is a `float`.
-
-The reverse is never implicit. `(int)f` truncates toward zero -- it does not
-round, and does not clamp -- and assigning a `float` to an `int` is a compile
-error rather than a silent truncation. `type_widens_to` in the type module is the
-single place that decision is made.
-
-`& | ^ ~ << >>` and their compound forms operate on the full 64-bit `int` and
-wrap on overflow, matching C. `& | ^ << >>` require `int` operands; `~` is
-unary. Shift counts follow C: a count at or above 64 yields 0 (or the sign bit
-for `>>`). Division by zero traps rather than being defined.
-
-The six relational operators also accept two `string`s, ordered
-lexicographically by unsigned byte value (the ordering C's `strcmp` gives).
-Comparing a `string` with an `int` is a type error. `==`/`!=` additionally
-accept `null` against any pointer.
+**[now]** `int` widens to `float` implicitly, and in no other direction. Every
+`int` is exactly representable as a binary64, so the conversion cannot lose
+anything. The reverse is never implicit: `(int)f` truncates toward zero, and
+assigning a `float` to an `int` is a compile error.
 
 ## Structs
+
+**[now]**
 
 ```
 structDecl := "struct" IDENT "{" member* "}"
 member     := type IDENT ";"                       // field
             | type IDENT "(" params ")" block      // method
-            | type IDENT "=>" expr ";"             // get-only property
-            | type IDENT "{" "get" ";" ("set" ";")? "}"  // auto-property
+            | type IDENT "=>" expr ";"             // get-only property  [cut]
+            | type IDENT "{" "get" ";" ("set" ";")? "}"  // auto-property [cut]
 structLit  := "new" IDENT "(" expr ("," expr)* ")"
+destructor := "~" IDENT "(" ")" block
 ```
 
 - Structs are value types laid out inline with padding to each field's
-  alignment. `new S(a, b, ...)` initializes the real (non-property) fields
-  positionally.
-- Field access is `s.f`, and also works through a pointer: `p.f` (there is no
-  `->`; Z uses C#-style `.` for both). Nested: `l.a.x`.
-- Struct assignment (`a = b`) copies the whole value. `var q = p` is a copy.
-- Functions/methods returning a struct use the SysV **hidden-pointer** return
-  convention (a hidden first parameter holds the result buffer).
-- **Methods** live on the struct and get an implicit `this` receiver (a
-  hidden first pointer parameter); unqualified field names inside a method
-  resolve to `this.<field>`. Emitted symbols are mangled `Struct__method`.
-- **Properties**: `int X => expr;` is a get-only computed property;
-  `int X { get; set; }` is an auto-property backed by a field of the same
-  name (accessed directly, equivalent to a trivial getter/setter).
-- Structs are **passed to and returned from functions by pointer** for now
-  (declare the parameter as `S*`); by-value passing/returning needs a SysV
-  argument classifier and is a later milestone.
-- Structs can be array elements: `new S[n]`, `arr[i].f`.
+  alignment. `new S(a, b, ...)` initializes the real fields positionally.
+- Struct assignment copies the whole value. `var q = p` is a copy — **[new]**,
+  for a type with no owning field. For a type that owns something, `var q = p`
+  is **[cut]** and `var q = move(p)` is the transfer.
+- Functions and methods returning a struct use the SysV **hidden-pointer**
+  return convention (a hidden first parameter holds the result buffer).
+- Methods get an implicit `this` receiver, a hidden first pointer parameter.
+  Unqualified field names inside a method resolve to `this.<field>`. Symbols
+  are mangled `Struct__method`.
+- **[cut]** Auto-properties. A field is a field; a computed value is a method.
+  `p.x` and `p.X()` are not interchangeable, and not being able to tell which a
+  name is from its spelling is the bug this removes.
+- **[new]** A `~S()` destructor. Runs at scope end, after any `~S()` body and
+  before the fields are destroyed.
+
+```
+struct File {
+    int fd;
+    File(int f) { fd = f; }
+    ~File() { close_fd(fd); }         // runs, then the fields go
+}
+```
 
 ## `Result<T,E>` and `?`
 
-A call that can fail returns a `Result`: either an `Ok` carrying a `T`, or an
-`Err` carrying an `E`.
+**[now]**
 
 ```
 Result<int, string> parse(string s) {
     if (s == "42") { return Ok(42); }
     return Err("not a number: " + s);
 }
-```
 
-`Result` is a two-variant union, so everything about enums applies to it: `match`
-handles it, the exhaustiveness check applies, and the payload is bound by name.
-
-```
-match parse(s) { Ok(v) => v, Err(e) => 0 }
-```
-
-Both sides must be one machine word — `int`, `bool`, `float`, `string`, or a
-pointer — which keeps every `Result` the same sixteen bytes: a tag, then one
-payload word. A struct by value does not fit, and is a diagnostic rather than a
-truncation; a pointer to one does.
-
-`Ok(...)` and `Err(...)` cannot be written on their own, because neither says
-what the *other* type is. They take it from where the value is going: the
-declared type of a variable, the enclosing function's return type, or a
-parameter's type. `var r = Ok(3);` on its own is an error for that reason.
-
-**`?` propagates the error.** On a `Result` inside a function that returns a
-`Result` with the same `E`, `expr?` yields the `Ok` payload, and returns the
-error from the function if the value turned out to be an `Err`:
-
-```
 Result<bool, string> positive(string s) {
     var n = parse(s)?;     // an Err here returns from this function
     return Ok(n > 0);
 }
 ```
 
-Note that the two `Result`s have different `T` and the same `E`: that is the
-point. `?` moves the error along and hands back the payload, so a chain of calls
-that can each fail reads as straight-line code, and the caller who cares deals
-with the error once at the end.
+A `Result` is a two-variant union, so `match` handles it, the exhaustiveness
+check applies, and the payload is bound by name. Both sides must be one machine
+word, which keeps every `Result` sixteen bytes: a tag, then one payload word.
 
-`?` shares a token with the ternary operator, and the type decides which is
-which: a `Result` is never a valid condition, so a `?` after one is always
-propagation and a `?` after anything else is always the ternary.
+`?` yields the `Ok` payload and returns the `Err` from the function, so a chain
+of fallible calls reads as straight-line code. `?` shares a token with the
+ternary and the type decides which: a `Result` is never a valid condition.
+
+**[new]** `?` runs the destructors of everything the function owns before it
+returns. This is the requirement in decision 2 and the reason a `?` in a
+function holding a `Vec` is worth the compile time.
+
+**[new]** `Result` is how every fallible runtime operation reports: `recv` on a
+closed channel, `free` that did not free, and a `Box<T>` allocation that failed.
 
 ## Enums / sum types & pattern matching
 
-```
-enumDecl := "enum" IDENT "{" variant ("," variant)* ","? "}"
-variant  := IDENT ("(" type IDENT ("," type IDENT)* ")")?
-match    := "match" expr "{" arm ("," arm)* ","? "}"
-arm      := IDENT ("(" IDENT ("," IDENT)* ")")? "=>" expr    // a variant
-          | "_" "=>" expr                                    // wildcard
-```
-
-- A union is a tagged value: an `int` discriminant at offset 0 plus each
-  variant's payload. Construct a value with a bare variant name: `Circle(5)`.
-- `match` dispatches on the discriminant, binds the active variant's payload
-  fields, and runs the matching arm. Only the taken arm is evaluated.
-- **The match must be exhaustive** — every variant must be covered (or a `_`
-  wildcard is present), or it is a compile error. Adding a variant later makes
-  every non-exhaustive `match` fail to compile.
+**[now]** Unchanged.
 
 ```
 enum Shape { Circle(int r), Rect(int w, int h), Point }
@@ -185,141 +458,149 @@ string describe(Shape s) => match s {
 };
 ```
 
+A union is a tagged value: an `int` discriminant at offset 0 plus each variant's
+payload. `match` dispatches on the discriminant, binds the active variant's
+payload, and runs the matching arm. **The match must be exhaustive** — every
+variant covered, or a `_` wildcard — or it is a compile error. Adding a variant
+later makes every non-exhaustive `match` fail to compile.
+
 ## Ternary
 
-`cond ? a : b` — right-associative, condition must be `bool`, both branches
-must have the same type; only the taken branch is evaluated.
+**[now]** `cond ? a : b`, right-associative, condition must be `bool`, both
+branches the same type, only the taken branch evaluated.
 
 ## Operator overloading
 
-A struct can define `op_<Name>` methods that overload the binary operators.
-The operator method takes the right operand by pointer (structs are passed by
-pointer) or by value for scalar parameters like `op_Mul(int k)`:
+**[now]** A struct defines `op_<Name>` methods. **[new]** A class does too.
 
 ```
-struct Vec {
+struct Vec2 {
     int x; int y;
-    Vec op_Add(Vec* o) { return new Vec(x + o.x, y + o.y); }
-    Vec op_Mul(int k)   { return new Vec(x * k, y * k); }
-    bool op_Eq(Vec* o)  { return x == o.x && y == o.y; }
+    Vec2 op_Add(Vec2* o) { return new Vec2(x + o.x, y + o.y); }
+    Vec2 op_Mul(int k)   { return new Vec2(x * k, y * k); }
+    bool op_Eq(Vec2* o)  { return x == o.x && y == o.y; }
 }
-var v = a + b;   // -> Vec__op_Add(a, b)
 ```
 
-## C#-style sugar (desugared in the parser)
-
-- **Expression-bodied members**: `int f(int a) => a * 2;` and methods/properties
-  inside structs desugar to `{ return expr; }`.
-- **String interpolation**: `$"n = {x}, sq = {x*x}"` desugars to a chain of
-  `+` (string concat); embedded `{expr}` holes are re-lexed as sub-expressions
-  that share the enclosing scope, so they can reference locals. Escaped
-  `\{`/`\}` are literal.
-- **Extension methods**: `int Twice(this int n) { ... }` at top level lets you
-  write `5.Twice()`; it desugars to `Twice(5)`.
+**[cut]** `operator` C++ spelling is not adopted; `op_Add` reads the same in the
+grammar and does not need the lexer to know the operator set.
 
 ## Declarations
 
+**[now]**
+
 ```
 decl        := varDecl | constDecl | funcDecl | nestedFunc | statement
-varDecl     := "var" IDENT "=" expr ";"
-             | type IDENT "=" expr ";"
+varDecl     := ("var" | "auto") IDENT "=" expr ";"                 [new: auto]
+             | type IDENT ("=" expr)? ";"
 constDecl   := "const" type IDENT "=" expr ";"
-nestedFunc  := type IDENT "(" params? ")" block          // inside a function
-type        := ("int" | "bool" | "string" | "float") "*"* "[]"*
+nestedFunc  := type IDENT "(" params? ")" block
+type        := ("int" | "bool" | "string" | "float") "*"* "&"? "[]"*
              | "Result" "<" type "," type ">"
              | "interface" IDENT "{" ifaceMember* "}"
              | ("fn" | "method" | "closure") "(" typeList? ")" "->" type
-funcDecl    := type IDENT "(" params? ")" block          // definition
-             | type IDENT "(" params? ")" ";"            // declaration only
-externDecl  := "extern" type IDENT "(" params? ")" ";"
+             | "Vec" "<" type ">" | "Box" "<" type ">" | ...        [new]
+funcDecl    := type IDENT "(" params? ")" block
+             | type IDENT "(" params? ")" ";"
+externDecl  := "unsafe" "extern" type IDENT "(" params? ")" ";"     [new: unsafe]
 exportFunc  := "export" type IDENT "(" params? ")" block
 params      := param ("," param)*
 param       := type IDENT
 ```
 
-`var` infers the type from the initializer. Variables must be initialized.
-Redeclaring in the *same* scope is an error; shadowing an outer variable in a
-nested block is allowed.
+**[now]** `var` infers the type from the initializer. Variables must be
+initialized. Redeclaring in the *same* scope is an error; shadowing an outer
+variable in a nested block is allowed. A statement beginning with a type is a
+declaration, so `foo bar = 1;` reports `unknown type 'foo'`.
 
-The other declaration form names the type instead of inferring it, and the type
-may be spelled by name — a struct, a union, an enum, or a generic type
-parameter — not only as a keyword. Any number of `*` and `[]` may follow.
+**[now]** A `const` requires an explicit type, is visible only from its
+declaration onward, and occupies no frame slot. A top-level `const` may sit
+next to `main`.
+
+**[now]** A declaration without a body declares a function whose definition
+appears later. `export` means the body is here and the symbol keeps the name as
+written, emitted `.globl` so C can call it. Every other Z function is emitted
+under a private `z$` symbol so it cannot collide with a libc name or a word the
+assembler reserves.
+
+**[now]** A function may take at most 16 parameters; past the argument registers
+the surplus goes on the stack. A struct or union return spends a parameter slot
+on the hidden result pointer, so such a function is capped at 15. A method is
+capped at 15 because the receiver is a parameter too, 14 when the method
+returns an aggregate.
+
+**[new]** `namespace N { ... }` and `N::name`. Scoping is real, so two imported
+files can both define `helper` and the program can say which it means. This is
+v1's M13, which the old roadmap called out as a trap to do before any package
+manager: a package manager over a single global namespace distributes
+collisions instead of fixing them.
+
+**[new]** `pub` marks a declaration visible outside its namespace; unexported
+by default. An unexported name used from another namespace is a diagnostic, not
+a silent pass.
+
+## References and ownership
+
+**[new]** This is the v2 core. See decision 1.
 
 ```
-struct P { int x; int y; }
-
-P r = new P(3, 4);      // a struct local
-P* q = &r;              // a pointer to one
-P copy = r;             // copies by value: copy.x = 1 leaves r.x alone
-P[] rows = new P[2];    // an array of them
-T r = a;                // a type parameter, inside a generic function
+var a = Vec<int>();          // a owns a buffer
+a.push_back(1);
+var b = move(a);              // b owns it; a is spent
+a.push_back(2);               // error: 'a' has been moved from
+var c = b.clone();            // an explicit deep copy
 ```
 
-A statement that begins with a type is a declaration, not an expression, so a
-name that is not a type in that position is reported as one — `foo bar = 1;`
-says `unknown type 'foo'` rather than treating `foo` as a value.
+- **`move(x)`** transfers ownership. The source becomes spent; reading it is a
+  compile error. `move` is a keyword, not a function, so `move(x)` is never a
+  call someone can overload.
+- **`x.clone()`** is the explicit deep copy. There is no implicit copy of an
+  owning type, so no line quietly costs an allocation. `clone` on a non-owning
+  type is a copy, and is allowed.
+- **A type is owning** if it has a destructor or an owning field. The compiler
+  computes this, so it cannot be declared wrong. A non-owning type is copied on
+  assignment.
+- **`T&` is a borrow.** It cannot be stored in a struct, put in an array or
+  `Vec`, captured by a closure, or returned — except from an `&self` parameter,
+  where the caller already holds the owner alive. A `const T&` cannot be written
+  through; the compiler tracks the constness of the borrowed place.
+- **`T*` is a raw pointer, and it is `unsafe` to dereference one in v2.** It
+  exists for C interop and for the two idioms that genuinely need it. A `T*` can
+  dangle; that is why reading through one is inside `unsafe`.
 
-A `const` requires an explicit type, is visible only from its declaration
-onward, and occupies no frame slot: each reference is replaced by the literal
-during parsing. Its initializer may be a constant expression over other
-consts. A top-level `const` may sit next to `main`.
+```
+unsafe {
+    var p = malloc_raw(64);
+    *p = 7;
+    free_raw(p);              // returns a Result: it freed, or it did not
+}
+```
 
-A declaration without a body declares a function whose definition appears
-later. `extern` additionally means the body is in C: the symbol is used exactly
-as written and nothing is emitted. `export` means the opposite — the body is
-here, but the symbol keeps the name as written and is emitted `.globl` so C can
-call it. A function may take at most 16 parameters; past the argument
-registers the surplus is passed on the stack. A struct or union return spends a
-parameter slot on the hidden result pointer, so such a function is capped at 15.
-A method's list is one shorter again, at 15, because the receiver is a parameter
-too — 14 when the method returns an aggregate. The caps count the hidden
-parameters deliberately: the argument-setup tables hold one entry per parameter,
-and a function that exceeded them wrote past the end of the table rather than
-failing.
-
-Every function written in Z is emitted under a private `z$`-prefixed symbol, so
-it cannot collide with a libc symbol, a runtime helper, or a word the assembler
-reserves. `extern` and `export` are how a symbol is named deliberately.
+**Why `T*` is not banned outright:** C interop passes `string` as
+`const char *` and `extern` functions take pointers, and a language with C
+interoperability that cannot express a pointer is a language whose interop is a
+special case at every boundary — which is how the 16-byte-vs-registers problem
+in [Interoperating with C](#interoperating-with-c) happened. `T*` is kept and
+marked, rather than kept and unmarked.
 
 ## Closures
 
-A lambda is written with `=>`, and is an expression, so it can appear anywhere
-an expression can:
+**[now]** A lambda is written with `=>` and is an expression.
 
 ```
-lambda      := "(" params? ")" "=>" (block | expr)
-```
-
-```
-var add = (int a, int b) => a + b;      // an int-returning closure
-print(add(2, 3));                       // 5
+var add = (int a, int b) => a + b;
 var counter = () => { n = n + 1; return n; };
 ```
 
-The body is either a single expression, whose value is the result, or a block,
-which must `return` a value on every path. A lambda with an empty parameter list
-still needs its parentheses, so `() => 1` is a closure and `x => x` is not.
-
-A function whose result is a lambda must say so: the type of a closure is
-`closure`, spelled with the same parameter and result syntax as `fn`.
-
-```
-closure(int) -> int makeAdder(int n) {
-    return (int x) => x + n;
-}
-var plus10 = makeAdder(10);
-print(plus10(5));   // 15
-```
-
+A function returning a lambda declares `closure(params) -> ret`, kept distinct
+from `fn` because the hidden environment changes the calling convention.
 Assigning a lambda to an `int` is an error, and so is declaring a function that
-returns a lambda as `fn`. `fn` and `closure` are deliberately different types
-because they are called differently — see **ABI** — and the compiler will not
-paper over that by letting one stand in for the other.
+returns a lambda as `fn`.
 
-**Captures.** A lambda may read any variable that is in scope where it is
-written, including a local of the enclosing function, and the value is copied
-into the closure when the lambda is created. A lambda that outlives the frame it
-was written in therefore keeps working:
+**[now]** A lambda reads any variable in scope where it is written, and the value
+is copied into the closure when the lambda is created, so a closure that
+outlives its frame keeps working. A captured variable is boxed, so every closure
+over the same variable sees each write.
 
 ```
 closure() -> int counter() {
@@ -329,116 +610,95 @@ closure() -> int counter() {
 var c = counter();
 print(c());   // 1
 print(c());   // 2
-print(c());   // 3
 ```
 
-Writing to a captured variable writes to the closure's own copy, shared by every
-closure made from the same `n`; the enclosing frame is not changed. A captured
-variable is boxed, so every closure over the same variable sees each write.
+**[new]** The box becomes an `Rc` cell, so it is freed when the last closure over
+it is gone rather than at the next collection. The counter example above is
+unchanged and its boxes are reclaimed; a cycle of closures over each other is a
+leak, as it is in any reference-counted scheme.
 
-Nested data is shared rather than copied: capturing a struct or a class value
-captures a reference to it, so a lambda can read and write its fields.
+**[cut]** A lambda may not be written inside another lambda. That limit was
+there because the environment builder assumed one level; with captures in `Rc`
+cells the restriction is no longer load-bearing and lifting it is a small
+change.
 
-```
-struct P { int x; int y; }
-var p = new P(3, 4);
-var getX = () => p.x;
-print(getX());   // 3
-```
+## Pointers, arrays and `Vec<T>`
 
-A lambda may not be written inside another lambda; a closure whose body defines
-another closure is a compile-time error. There is no limit on how many lambdas
-one function may define.
+**[now]** `&x` yields a reference to an lvalue; `*p` reads and writes through a
+pointer.
 
-## Nested functions
+**[cut]** `new T[n]` and `T[]` as a fixed heap array. `Vec<T>` replaces both, and
+`&a[0]` stops being the way to pass part of an array, because `Vec<T>&` is the
+way and it knows its length.
 
-A function may also be declared inside another function, written where a
-statement goes:
-
-```
-int outer() {
-    int helper(int n) { return n + 1; }
-    int twice(int n) { return n * 2; }
-    return helper(twice(5));
-}
-```
-
-Like a lambda it is hoisted out to the top level and emitted under a symbol built
-from the enclosing function's id, so two functions that each declare `helper` do
-not collide on one symbol. The name is visible from its declaration to the end of
-the enclosing function, and — because the signature is filed as the declaration
-is read — a nested function may call itself. Declare it before calling it: there
-is no pre-scan of function bodies, so a sibling declared *later* is not yet
-known.
+**[now]** `foreach` desugars to an index-based loop, so it needs a length.
+**[new]** `for (auto& x : v)` works over `Vec<T>`, `Set<T>` and `string`, and
+`foreach (var x in v)` remains as sugar for it. Every one of those knows its own
+length, which is what the index-based desugaring needed a header for.
 
 ```
-int main() {
-    int fact(int n) {
-        if (n < 2) { return 1; }
-        return n * fact(n - 1);
-    }
-    print(fact(5));   // 120
-}
+var v = Vec<int>();
+v.push_back(3);
+v.push_back(4);
+for (auto& x : v) { x = x * 2; }     // in place; auto& is what makes it in place
+print(v[0]);                          // 6
+print(v.size());                       // 2
 ```
 
-**A nested function does not capture.** It has a frame of its own, and frame
-slots are numbered per function, so naming a variable declared beside it would
-read whatever its own frame happened to hold. That is a diagnostic rather than a
-silent wrong answer:
+`v[i]` is **always** bounds-checked in v2. **[new]** v1 had this behind
+`--bounds` because an unchecked read is faster; with a memory-safe default that
+is the wrong trade, so the check is always on and `--no-bounds` turns it off
+where the cost is measured and the code is trusted.
 
-```
-var g = 5;
-int f() { return g; }    // error: undefined variable 'g'
-```
+### `Vec<T>`
 
-The same rule stops a top-level function reading a top-level variable, for the
-same reason. Where you want to capture, use a lambda, which does.
+**[new]** A `Vec<T>` is a `{ T* data; int len; int cap; }` struct with a
+destructor. It is a value: `var b = a` is a compile error, and
+`var b = move(a)` transfers. The v1 version was a `class`, so `var b = a` was an
+alias — which is the trap a language with value-semantics structs invites.
 
-`extern` and `export` name a symbol deliberately, so neither is allowed on a
-nested function; nor is a body-less declaration, since both mean "defined
-somewhere else" and a nested function has nowhere else to be.
-
-## Pointers and arrays
-
-- `&x` yields `T*` for an lvalue `x`; `*p` reads/writes through a `T*`.
-- `new T[n]` allocates a heap array; its value is a pointer to the first
-  element. Indexing `a[i]` and pointer arithmetic both scale by the element
-  size. `a.length` reads the element count.
-- An array does not decay to a pointer: pass `&a[0]` where a `T*` is expected.
-- Indexing is unchecked unless the compiler is given `--bounds`, which range-
-  checks every array access against the header length and aborts on failure.
+| | |
+|---|---|
+| `push_back(v)` / `push(v)` | Append. Amortized O(1). |
+| `pop_back()` | Remove and return the last. `Result<T, string>` on empty, not a panic. |
+| `size()` | Element count. |
+| `capacity()` | Allocated elements. |
+| `empty()` | `size() == 0`. **[cut]** `isEmpty`. |
+| `at(i)` | Bounds-checked element. |
+| `reserve(n)` | Grow to hold `n`. |
+| `clear()` | Empty it, keeping the buffer. |
+| `clone()` | Deep copy. |
+| `data()` | The raw pointer, `unsafe` to dereference. |
 
 ## Statements
 
+**[now]**
+
 ```
-statement := block | ifStmt | whileStmt | forStmt | foreachStmt
+statement := block | ifStmt | whileStmt | forStmt | foreachStmt | rangeFor
            | returnStmt | breakStmt | continueStmt | varDecl | exprStmt
-breakStmt    := "break" ";"
-continueStmt := "continue" ";"
-ifStmt    := "if" "(" expr ")" statement ("else" statement)?
-whileStmt := "while" "(" expr ")" statement
-forStmt   := "for" "(" (varDecl|exprStmt)? ";" expr? ";" expr? ")" statement
-foreachStmt := "foreach" ("var" IDENT | type IDENT) "in" expr ")" statement
-returnStmt:= "return" expr? ";"
-block     := "{" statement* "}"
-exprStmt  := expr ";"
+ifStmt     := "if" "(" expr ")" statement ("else" statement)?
+whileStmt  := "while" "(" expr ")" statement
+forStmt    := "for" "(" (varDecl|exprStmt)? ";" expr? ";" expr? ")" statement
+foreachStmt:= "foreach" ("var"|"auto") IDENT "in" expr ")" statement
+rangeFor   := "for" "(" ("var"|"auto") "&"? IDENT ":" expr ")" statement  [new]
+returnStmt := "return" expr? ";"
+block      := "{" statement* "}"
 ```
 
-`if`/`while`/`for` conditions must be `bool`. `foreach` desugars to an
-index-based `while` loop over the collection, so the collection must be an
-*array*: a pointer has no length, and there would be no bound to iterate to.
-`++`/`--` desugar to `x = x ± 1` (the value is the *new* value).
+`if`/`while`/`for` conditions must be `bool`. `++`/`--` desugar to `x = x ± 1`.
+`break` leaves the innermost loop and `continue` starts its next iteration; in
+a `for`, `continue` jumps to the step. Both are a compile error outside a loop.
 
-`break` leaves the innermost enclosing loop and `continue` starts its next
-iteration; in a `for`, `continue` jumps to the step rather than the top of the
-body. Both are a compile error outside a loop.
+**[new]** `while (let v = recv(ch)) { ... }` binds `v` for the body and is false
+when `recv` yields `Err`, so a channel loop reads as a loop rather than as a
+loop plus an unwrap.
 
 ## Expressions
 
-Precedence, loosest to tightest:
+**[now]** Precedence, loosest to tightest:
 
-1. assignment `= += -= *= /= %= &= |= ^= <<= >>=` (right-associative; the left
-   side must be assignable)
+1. assignment `= += -= *= /= %= &= |= ^= <<= >>=`
 2. `||`
 3. `&&`
 4. `== !=`
@@ -450,135 +710,149 @@ Precedence, loosest to tightest:
 10. `* / %`
 11. `<< >>`
 12. unary `- ! & * ~`
-13. primary: literals, `new T[n]`, `(` expr `)`, variable, `print(expr)`, a
-    built-in (`abs min max clamp sqrt sin cos`), a user function, postfix
-    `[i]`, `.length`, `++`, `--`
+13. primary: literals, `new C(args)`, `(` expr `)`, variable, `print(expr)`, a
+    built-in, a user function, postfix `[i]`, `->`, `++`, `--`
 
-`&f` on a function name yields a `fn` value typed by that function's signature.
-Calling a `fn` value checks the argument count and types; `==`/`!=` compare
-identity, and the ordering operators are rejected. A function pointer is not a
-closure -- it captures nothing, where a lambda captures the declarations its
-body names.
+**[now]** `&f` on a function name yields a `fn` typed by that function's
+signature; calling it checks the argument count and types. `&obj.M` on a class
+yields a `method` value: a pointer to a cell holding the code address and the
+receiver, so the receiver stays alive as long as the pointer. A virtual method
+binds through the object's vtable.
 
-`&obj.M` on a class yields a `method` value: a pointer to a garbage-collected
-cell holding the code address and the receiver, so the receiver is traced and
-stays alive as long as the pointer. The call spends `rdi` on the receiver and
-starts the declared arguments at `rsi`. A virtual method is bound through the
-object's vtable, so it dispatches on the runtime type. A struct receiver cannot
-be bound (its methods take the receiver by value), and a `method` value may not
-return a struct (the receiver occupies the register a struct result needs).
+**[now]** The **intrinsics** are `abs(x)`, `min(a,b)`, `max(a,b)`,
+`clamp(x,lo,hi)`, `sqrt(n)`, `sin(a)`, `cos(a)`, all on `int` and returning
+`int`. `sqrt` is an exact integer root; `sin`/`cos` are fixed point with a full
+turn of `1 << 30`. **[new]** `float` overloads of all of them are added, because
+a language with `float` and an integer-only `sqrt` makes everyone write the
+conversion by hand.
 
-The **intrinsics** are `abs(x)`, `min(a,b)`, `max(a,b)`, `clamp(x,lo,hi)`,
-`sqrt(n)`, `sin(a)` and `cos(a)`, all on `int` and returning `int`. These are
-*not* the floating-point functions of the same name: `sqrt` is an exact integer
-root, and `sin`/`cos` work in fixed point with a full turn of `1 << 30` units and
-Q30 results, so `1.0` is `1 << 30`; angles wrap and the result is exactly
-periodic. Z has no `float` overloads of them.
+**[now]** `print` is a builtin: `print(int)`, `print(bool)`, `print(float)`,
+`print(string)`. A float prints with `%g`, so `1.5` is `1.5` and `100.0` is
+`100`. This is the same formatting `format` uses, so the two never disagree.
 
-The **standard library** is available without declaring anything:
-
-| | |
-|---|---|
-| `len(s)` | byte length; `0` for `null` |
-| `sub(s, start, count)` | substring; clamps at both ends, and a negative `start` counts back from the end |
-| `index_of(s, needle)` | byte offset, or `-1` |
-| `contains(s, needle)` | `bool` |
-| `starts_with(s, p)` / `ends_with(s, p)` | `bool`; an empty needle matches |
-| `char_at(s, i)` | the byte at `i` as `0..255`, or `-1` past the end |
-| `trim(s)` | strips ASCII whitespace from both ends |
-| `upper(s)` / `lower(s)` | ASCII case mapping; bytes above 127 are left alone |
-| `replace(s, from, to)` | every occurrence; an empty `from` changes nothing |
-| `repeat(s, n)` | `s` repeated `n` times |
-| `split(s, sep)` | a `string[]`; an empty `sep` splits into characters, a trailing separator produces no empty piece, and an empty `s` yields one empty piece |
-| `pow(b, e)` | integer exponentiation; a negative exponent gives `0` |
-| `gcd(a, b)` / `lcm(a, b)` | sign-insensitive; `lcm` of anything with `0` is `0` |
-
-Every one of these is checked like an ordinary call — the argument types are
-verified and the result carries a type — so `len(s) + 1` compiles and `len(3)`
-does not. A `null` string reads as the empty string rather than crashing.
-Lengths are byte counts, not character counts: Z has no character type, so in
-UTF-8 one character may be several bytes.
-
-`exp`, `log`, `tan` and the other transcendentals are absent. They are worth
-having only for a `float`, and there is nothing to call them on yet.
-
-A user function or extension method of the same name shadows any built-in, which
-is how a program defines its own `len`.
+**[cut]** `+` string concatenation. **[new]** `format(fmt, args...)` and
+`format_int(n)`, `format_float(f)`, `format_bool(b)`. A `string` is a value and
+`s = s + x` is a copy; saying so in one call is clearer than a `+` that means
+something different depending on its operands, and it gives `{}` somewhere to
+live that is not the lexer.
 
 ## Functions & entry point
 
-- A program is a sequence of top-level declarations and statements.
-- `import "path.z";` splices the named file's tokens in ahead of the importing
-  file's, so its top-level declarations are in scope with no namespace. The path
-  is relative to the importing file; each file is expanded once however many
-  times it is named; a cycle is an error. Every token keeps the file it was lexed
-  from, so diagnostics quote the file the error is actually in.
-- If a function named `main` is defined, it is the entry point; combining it
-  with top-level statements is an error.
-- Otherwise, top-level statements are wrapped in a synthesized `main` (like
-  C# top-level programs).
-- `print` is a builtin: `print(int)`, `print(bool)`, `print(float)`, `print(string)`.
-  A float prints with `%g`, so `1.5` is `1.5`, `100.0` is `100` and `0.1 + 0.2`
-  is `0.3` -- six significant digits, trading exact digits for readable ones.
-  This is the same formatting `"x = " + 1.5` uses, so the two never disagree.
-- See **Declarations** for `extern` (implemented in C) and `export` (defined in
-  Z, callable from C), and for the `z$` symbol namespace.
+**[now]** A program is a sequence of top-level declarations and statements.
+`import "path.z";` splices a file's declarations in ahead of the importing
+file's. If a function named `main` is defined, it is the entry point; combining
+it with top-level statements is an error. Otherwise top-level statements are
+wrapped in a synthesized `main`.
+
+**[new]** Top-level statements are wrapped in a synthesized `main` whose
+destructors run, so a `Vec` built at top level is freed at exit.
+
+## Threads and channels
+
+**[new]**
+
+```
+threadName := "thread" "(" expr ")"                 // spawn, returns a Thread
+chanDecl   := "Chan" "<" type ">" "(" ")"
+send       := "send" "(" expr "," expr ")"
+recv       := "recv" "(" expr ")"                   // -> Result<T, string>
+join       := expr ".join" "(" ")"
+```
+
+```
+var ch = Chan<int>();
+thread(() => {
+    for (var i = 0; i < 1000; i = i + 1) { send(ch, i); }
+    close(ch);
+});
+var total = 0;
+while (let v = recv(ch)) { total = total + v; }
+print(total);                       // 499500
+```
+
+- **A value belongs to one thread; sending moves it.** A second send of a value
+  that is still owned is a compile error, and so is sending a non-`Send` value.
+- **`Send` is computed from a type's fields**, the same way owning-ness is. A
+  struct is `Send` if its fields are, and an `Rc` is not `Send` while an `Arc`
+  is. A user type with an `Rc` field is not `Send`, and the diagnostic says
+  which field.
+- **`recv` returns a `Result`**, so a closed channel is a value and the loop ends
+  through the type system rather than a sentinel.
+- **A channel is the synchronization.** A shared counter is a `Chan<int>`, and
+  there is no `Mutex` to get wrong.
+- **`Rc` is not `Send`, `Arc` is.** A `Send` value must be moved to cross a
+  thread, and a `Sync` value may be shared by reference. Both are structural.
+- **[new]** The guarantee stops at the C boundary. `unsafe extern` hands the
+  compiler nothing; see decision 3.
 
 ## Interoperating with C
 
-Both directions are declared in the Z source, and the linker is invoked with
-whatever extra arguments follow the source file.
+**[now]** Both directions are declared in Z source, and the linker is invoked
+with whatever extra arguments follow the source file.
 
 ```
-extern int c_add(int a, int b);          // body in C
+extern int c_add(int a, int b);          // body in C      [now: unsafe in v2]
 export int z_triple(int v) { ... }       // body here, callable from C
 ```
 
+Type mapping: Z `int` ↔ C `long`, `bool` ↔ an `int` that is 0 or 1, `string` ↔
+`const char *`, aggregates ↔ a pointer to them. A struct cannot be returned by
+value across the boundary: Z returns every aggregate through a hidden result
+pointer, whereas the C ABI returns aggregates of 16 bytes or fewer in
+registers.
+
+**[new]** `extern` requires `unsafe`:
+
 ```
-./z run main.z host.c        # compile and link a C file
-./z build main.z -o main -lm # pass library flags through
+unsafe extern int c_add(int a, int b);
 ```
 
-Type mapping: Z `int` ↔ C `long` (both 64-bit), `bool` ↔ an `int` that is 0 or
-1, `string` ↔ `const char *`, aggregates ↔ a pointer to them. A struct cannot
-be returned by value across the boundary: Z returns every aggregate through a
-hidden result pointer, whereas the C ABI returns aggregates of 16 bytes or
-fewer in registers. Returning a struct from Z to Z is fine, since both sides
-agree there.
+The `unsafe` is not ceremony. It is the line saying *the compiler cannot see
+what this function does with the pointers it is given*, which is exactly what
+is true, and it is what makes the concurrency guarantee in decision 3 hold
+without a footnote: an `extern` is a place where the guarantee ends, and it says
+so where it ends. A diagnostic points at every `extern` that is not marked.
 
 ## Generics (monomorphization)
 
-Functions may take type parameters and are compiled by monomorphization: each
-distinct set of concrete type arguments produces a specialized, natively
-compiled copy (there is no runtime generic machinery, no boxing, no vtables).
+**[now]** Functions take type parameters and are compiled by monomorphization:
+each distinct set of concrete type arguments produces a specialized native
+copy. There is no runtime generic machinery, no boxing, no vtables.
 
-```csharp
-T max<T>(T a, T b) { if (a > b) { return a; } return b; }   // generic
-U pick<T, U>(T a, U b) { return b; }                        // two parameters
-int total<T>(T[] xs) { var s = 0; foreach (v in xs) { s = s + v; } return s; }
-
-int main() {
-    print(max(3, 7));       // 7
-    print(pick(3, 9));     // 9
-    var a = new int[3]; a[0]=1; a[1]=2; a[2]=3;
-    print(total(a));       // 6
-}
+```
+T max<T>(T a, T b) { if (a > b) { return a; } return b; }
+U pick<T, U>(T a, U b) { return b; }
+int total<T>(Vec<T>* v) { var s = 0; for (auto& x in v.*) { s = s + x; } return s; }
 ```
 
 - Type arguments are **inferred** from the call site; the declaration must appear
   before its uses.
-- The return type and body may reference the type parameters (`T max<T>(...)`).
-- Parameter types may be `T`, `T[]`, or `T*`; these drive inference.
-- A generic function that is never called is never emitted.
-- The template body is validated with type-parameter placeholders, then each
-  instantiation is re-type-checked against the concrete types (so a bad
-  instantiation is a compile error).
+- Parameter types may be `T`, `Vec<T>`, or `T*`.
+- A generic function that is never called is never emitted — which is most of
+  the fast-compile property.
+- The body is validated with type-parameter placeholders, then each
+  instantiation is re-type-checked against the concrete types, so a bad
+  instantiation is a compile error.
+
+**[new]** Generic **types** work, not just generic functions: `Vec<T>`,
+`Chan<T>`, `Box<T>`, `Rc<T>`, `Arc<T>`. v1 had generic classes already, since
+`class Vec<T>` compiles; the addition is that a generic type may be returned by
+value and owns through its parameters.
+
+**[new]** Template parameter constraints, for the "polymorphism without
+inheritance" job v1's inheritance did:
+
+```
+T sum<T: Addable>(Vec<T>* v) { ... }
+```
+
+**[cut]** C++'s `template<typename T>` block syntax. `T name<T>(args)` reads the
+same and the grammar stays one production.
 
 ## Interfaces
 
-An interface is a named set of method signatures. A type satisfies it by having
-those methods — nothing is declared, because a struct has no vtable of its own to
-list them in.
+**[now]** Unchanged, and after slice 2 it is the only way to collect unrelated
+types.
 
 ```
 interface Shape {
@@ -588,157 +862,167 @@ interface Shape {
 
 struct Square { int side; int Area() { return side * side; } string Name() => "square"; }
 struct Rect   { int w; int h; int Area() { return w * h; } string Name() { return "rect"; } }
-```
 
-Assigning a value to an interface-typed place converts it, and a call resolves to
-the interface's method rather than to anything the value happens to be:
-
-```
 Shape a = new Square(5);
 print(a.Area());        // 25
 print(a.Name());        // square
-```
-
-That is what makes unrelated types collectable together — structs, classes and
-subclasses of different hierarchies in one array:
-
-```
-var shapes = new Shape[3];
-shapes[0] = new Square(3);
-shapes[1] = new Rect(3, 4);
-// ...
-for (var i = 0; i < 3; i = i + 1) { print(shapes[i].Name()); }
 ```
 
 An interface value is a **pointer** to a two-word cell, `{ itab, receiver }`, so
 it is one scalar: it passes, stores, returns and compares like a pointer, and
 `null` is meaningful. The itab is a static array of code pointers, one per
 required method, **in the interface's declaration order** — that order is the
-contract, and every implementing type follows it. A method call resolves its name
-to an index in that array once, at compile time.
+contract. A **struct** is copied to the heap when it becomes an interface value,
+because the cell outlives the frame; a **class** is already a pointer.
 
-A **struct** is copied to the heap when it becomes an interface value, because
-the cell outlives the frame the value was in. A **class** is already a pointer,
-so it goes in as it stands; its itab entries are small trampolines that go
-through the receiver's vtable, which is what keeps a subclass stored in an
-interface calling the override.
+A class must declare every method it offers to an interface `virtual`. A struct
+has no such requirement, since its methods are reached directly. The method has
+to match the signature, and a diagnostic says which of the two went wrong.
 
-A class must therefore declare every method it offers to an interface `virtual`
-(or `override`) — a non-virtual method has no vtable slot to dispatch through. A
-struct has no such requirement, since its methods are reached directly.
+**[now]** A non-exhaustive `match` is a compile error, and adding a variant later
+makes every non-exhaustive `match` fail to compile. Unchanged from v1 — the
+exhaustiveness check is one of the better pieces of the front end and nothing in
+v2 gives a reason to weaken it.
 
-The method has to match the signature, not just the name, and a diagnostic says
-which of the two went wrong: `it has no method 'Name'` versus `'Scale' does not
-match the signature the interface requires`.
+**[new]** An interface value holding a `struct` receiver still copies the struct
+to the heap, because the cell outlives the frame the value was in. This is the
+one place a `struct` becomes a heap allocation without saying so, and it stays
+visible in the ABI rather than becoming a hidden box.
 
-Like every other callable in Z, an interface value that is `null` must not be
-called.
+## Classes and virtual dispatch
 
-## Classes, inheritance & virtual dispatch
+**[now, minus inheritance]** A `class` is a heap-allocated reference type with a
+vtable. Structs are value types; classes are reference types.
 
-A `class` is a heap-allocated reference type with a vtable, enabling dynamic
-(dispatch) polymorphism. Structs are value types; classes are reference types.
-
-```csharp
+```
 class Shape {
-    virtual int Area() { return 0; }          // virtual -> dispatched dynamically
+    virtual int Area() { return 0; }          // dispatched dynamically
     virtual string Name() { return "shape"; }
 }
-class Square : Shape {
+class Square {                                // no `: Shape`
     int side;
-    override int Area() { return this.side * this.side; }  // override a base virtual
-    override string Name() { return "square"; }
+    int Area() { return this.side * this.side; }
+    string Name() { return "square"; }
 }
 ```
 
 - Objects are allocated with `new C(args)`, which returns a `C*`. Each object
   stores a vtable pointer as its first word; `this.field` accesses instance
   fields.
-- A **constructor** is a method named like the class, `C(params) { ... }`. It
-  runs on `new C(args)`; `base(args)` calls the base-class constructor.
-- `virtual` introduces a dispatch slot; `override` replaces a base virtual's
-  implementation in the same slot.
-- Calling a virtual method dispatches through the receiver's vtable, so the
-  *actual* runtime class decides the implementation — even through a base-typed
-  reference. A derived class pointer may be assigned to a base class pointer
-  (upcast); an array of base pointers (`new Shape*[n]`) gives a classic
-  polymorphic collection.
-- Non-virtual methods (including inherited ones) are called directly.
+- A **constructor** is a method named like the class, `C(params) { ... }`.
+- `virtual` introduces a dispatch slot. Calling a virtual method dispatches
+  through the receiver's vtable.
+
+**[cut]** Inheritance, and with it `class B : A`, `override`, `base(args)`, and
+derived-to-base upcast. A class can still be `virtual` and dispatch; it just
+cannot be a base.
+
+**Why:** inheritance is where C++ spends the most and gets the least. A
+hierarchy is a set of related types, and `interface` says that without a
+vtable-per-class, an upcast that can be wrong, a `base()` call that can be
+forgotten, and the slicing problem. What is lost is a derived type that *is* a
+base everywhere; what is kept is that a `virtual` method on a single hierarchy
+of your own still dispatches, and that a `Vec<Shape>` of mixed `class` and
+`struct` types works.
+
+**[new]** A `class` is owning, so it has a destructor and is moved rather than
+copied. `new C()` gives a `C*` in v1; in v2 a `class` is a `Box<C>` and
+`Box` makes the ownership visible at the type. v1's raw `C*` becomes `unsafe`.
 
 ## Diagnostics
 
-Errors are reported with source spans and carets:
+**[now]** Unchanged, and this is the part of v1 that is worth more than the
+lexer. A diagnostic carries three things: what the reader was probably trying to
+write, where they were when they wrote it, and what the constraint actually was.
 
-- undefined variable / undefined function
-- cannot assign `B` to `A`
-- binary operator applied to the wrong types
-- calling a function with the wrong arity or argument type
-- `if`/`while`/`for` condition is not `bool`
-- `return` type mismatch
-- cannot index a non-array/pointer; cannot dereference a non-pointer; cannot
-  take the address of a temporary
-- unknown type, redeclaration in the same scope, missing `;`, unterminated
-  string, unexpected character
-- an unknown escape, a literal too large for `int`, digits running into letters
+- **"Did you mean"** over the names in scope, by edit distance. A wrong-case
+  name always suggests, an extension outranks a one-edit match, and the candidate
+  list is split by what the name is — a *type* position never suggests a
+  function.
+- **The enclosing function is named** in every message. A message inside a
+  lambda or a monomorphized generic also says *that*, and points at the line the
+  lambda started on.
+- **The constraint, not only the violation.** An argument type error and an
+  arity error both print the declaration they violated.
+- **Cascades are suppressed.** `print(ghost)` reports the undefined name, not
+  also that `print expects 'int' but got <null>`.
+- **Colour** on a terminal, off when redirected or piped, forced with
+  `--color`, and off under `NO_COLOR`.
+- **`--error-format=human|gcc|json`.** `gcc` is one line per problem and per
+  note, which is what an editor's error parser wants. `json` carries a stable
+  code, an explicit span in both line/col and byte offset, and the notes inline.
 
-### Warnings
+**[new]** Every new safety diagnostic names the rule and the fix, in that order,
+because a use-after-move with no explanation is a message people learn to
+ignore. The shape is fixed:
 
-The compiler also warns about code that is legal but probably not what was
-meant. Warnings are on by default, never fail a build on their own, and are
-controlled by `-w`, `-Werror`, `-Wno-<name>` and `-W<name>`:
-
-| | |
-|---|---|
-| `unused-local` | a local or parameter is declared and never referenced |
-| `shadowed-local` | a local redeclares one from an enclosing scope |
-| `unreachable` | a statement follows one that always leaves the block |
-
-A suppressed warning costs nothing to run: the check that produces it does not
-execute at all. `-Werror` turns every enabled warning into an error.
+```
+error: 'a' has been moved from
+  --> main.z:7:5
+   |
+ 7 |     a.push_back(2);
+   |     ^ cannot use a moved-from value
+   |
+note: 'a' was moved at main.z:6:5
+note: assign into it instead, or use `var b = move(a);` to transfer ownership
+```
 
 ## Runtime & GC
 
-A small C runtime (embedded in the compiler, linked into every program) provides
-`z_newarray` (heap arrays with a length header), `z_concat`, and
-`z_itoa`. All heap allocation goes through a **conservative mark-sweep
-garbage collector**: it scans the C stack and spilled registers for words that
-point into the managed heap, marks reachable objects transitively, and frees
-the rest. Collection runs automatically when the heap grows past a threshold
-(so the compiler needs no shadow-stack bookkeeping). Value types (structs) live
-in the stack frame and are unaffected by GC.
+**[now]** A small C runtime embedded in the compiler and linked into every
+program. Provides `z_newarray` (heap arrays with a length header), `z_concat`,
+`z_itoa`. All heap allocation goes through a **conservative mark-sweep garbage
+collector**: it scans the C stack and spilled registers for words that point into
+the managed heap, marks reachable objects transitively, and frees the rest.
+
+**[cut]** The collector, in slice 3: `z_gc_init`, `gc_mark`, `gc_mark_roots`,
+`gc_collect`, `gc_enabled`, `gc_threshold`. What replaces it:
+
+- `z_alloc(size)` / `z_free(p)` — a plain allocator, no collection, no roots.
+- `z_box` becomes an `Rc` cell with a count.
+- Destructors emitted by the compiler run on every scope exit.
+- A leak report at exit for allocations the runtime can account for. A cycle is a
+  leak and says so.
+
+**Why the collector goes:** it cannot see a pointer in a register the caller
+spilled, so it leaks; it cannot move an object, so it gives up compaction; and
+its pause is a function of the program's live set, which means a program's
+latency is a property of the heap rather than of the code. RAII frees at a point
+the programmer wrote down, has no pause, and moves nothing — so a `Vec<T>` is
+still a pointer, a length and a capacity, and a `for` loop over it is still a
+loop. The trade is cycles, and the trade is stated above rather than discovered
+in a leak profile.
 
 ## ABI
 
-Code targets x86-64 Linux, System V AMD64 ABI. Integers/pointers/array-ptrs are
-passed in `rdi, rsi, rdx, rcx, r8, r9`; return values in `rax`. Floats go in
-`xmm0`-`xmm7` and come back in `xmm0`. The two sequences are numbered
-independently, so a float does not displace the integers that follow it:
-`f(1.0, 2)` passes `1.0` in `xmm0` and `2` in `rsi`, not in `rdx`. The compiler
-reserves `rbp` as the frame pointer and keeps the stack 16-byte aligned at
-every call.
+**[now]** x86-64 Linux, System V AMD64. Integers/pointers/array-ptrs in `rdi,
+rsi, rdx, rcx, r8, r9`, return in `rax`. Floats in `xmm0`–`xmm7`, back in
+`xmm0`. The two sequences are numbered independently, so `f(1.0, 2)` passes
+`1.0` in `xmm0` and `2` in `rsi`. `rbp` is the frame pointer and the stack is
+16-byte aligned at every call.
 
-A closure value is a pointer to a cell of two words: the function to call, and
-the environment it captures. Calling it puts the environment in `rdi` and the
-declared arguments from `rsi` up, and the callee's prologue reads them from the
-same place. That is a different convention from a plain call, which is why
-`fn` and `closure` are separate types: the hidden environment takes `rdi` first,
-so a float among the declared arguments can no longer start at `xmm0` and
-travels as raw bits in a general-purpose register instead. Bound methods and
-constructor calls take a hidden receiver for the same reason and follow the
-same rule.
+A closure value is a pointer to a cell of two words: the function, and the
+environment. Calling it puts the environment in `rdi` and the declared arguments
+from `rsi` up. A bound method and a constructor call take a hidden receiver the
+same way.
 
 Two consequences of the 6-register limit are enforced rather than silently
-miscompiled: a function may not take more than 16 parameters (15 with a struct
-return, 15 for a method, 14 for a method returning one), and an
-`add`/`sub`/`imul`/`cmp` against a constant too wide for a sign-extended
-`imm32` is routed through a register.
+miscompiled: the parameter caps in [Declarations](#declarations), and an
+`add`/`sub`/`imul`/`cmp` against a constant too wide for a sign-extended `imm32`
+is routed through a register.
 
 Locals live at `[rbp-8]` and below. When callee-saved registers are pushed for
-register-allocated locals, `rbp` is rebased below them (`lea rbp, [rbp - 8*n]`)
-so the two regions cannot overlap, and the epilogue's pops line up again
-against the rebased frame.
+register-allocated locals, `rbp` is rebased below them so the two regions cannot
+overlap.
+
+**[new]** A `T&` is passed as a plain pointer and is indistinguishable from a
+`T*` at the ABI level, which is why its lifetime is a compile-time property and
+not a runtime one. A `Vec<T>` is passed as its three fields, so by-value is a
+memory copy under the hidden-pointer convention and a move is a field copy.
 
 ## Optimization levels & command line
+
+**[now]**
 
 ```
 z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
@@ -750,111 +1034,32 @@ z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
 | `-O0` | naive: every local in memory, no folding, a real `idiv`. A baseline to measure against, and the level to debug codegen with. |
 | `-O1` | the default: constant folding and propagation, function inlining, a liveness-based local register allocator, leaf and immediate operand selection, branch-on-flags conditions, in-place compound assignment, and constant division/modulo strength reduction. |
 | `-O2` | adds loop-invariant code motion. |
-| `-O3` | adds loop unrolling: a loop with a condition and a small enough body is emitted four times over, testing the condition before each copy. |
-| `--bounds` | range-check every array access. Costs a length load and two branches per access, which is why it is off by default. It covers array indices only; a `T*` has no length header to check against. |
+| `-O3` | adds loop unrolling. |
+| `--bounds` | **[cut]** replaced by `--no-bounds`. Bounds checks are on by default in v2. |
 | `-g` | emit DWARF: a line table, and a symbol table naming every function, its parameters and its frame-resident locals. |
 
 A level only gates passes; it never changes what a program means, and the test
-suite runs at all four levels (`make test-all`) precisely because a pass that
-only runs at a higher level can miscompile while the default level shows nothing
-wrong.
+suite runs at all four levels (`make test-all`) because a pass that only runs at
+a higher level can miscompile while the default level shows nothing wrong.
+Loop-invariant code motion shipped exactly that way once.
 
-A **counted loop whose body only accumulates loop-invariant amounts** is solved
-arithmetically and does not run at all:
+## What exists today (v1 appendix)
 
-```
-var sum = 0; var i = 0;
-while (i < 20000000) { sum = sum + 82; i = i + 1; }
-// becomes: sum = sum + 82 * 20000000
-```
+The compiler in this repository implements v1. Specifically, all of the following
+is real and tested today, and stays:
 
-That is the limit of what loop-invariant code motion can reach on its own: it
-hoists the pieces, and this notices there is nothing left to run. On the
-`loopbench` case it takes a 24 ms loop to 4 ms.
+- top-level statements, `var`, `print`, `int`/`bool`/`string`/`float`
+- the whole type system: pointers, structs with methods, enums, `Result<T,E>`
+- closures, nested functions, function pointers, bound method pointers
+- interfaces, classes with vtables, **`override` and inheritance** — the last of
+  these is what slice 2 removes
+- monomorphized generic functions and generic classes
+- a conservative mark-sweep GC — slice 3 removes it
+- modules via `import`, `extern`/`export` C interop
+- the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
+  three output formats
+- 71 golden tests, 66 error tests, `make test-all` across four `-O` levels
 
-The pattern is deliberately narrow, because getting it wrong is a wrong answer
-rather than a missed speedup. The step must be a self-update by a nonzero
-constant; the condition must compare that variable with `<`, `<=`, `>` or `>=`
-against a bound; the body must be a straight-line run of `x = x ± E`, `x += E`
-and `x -= E` where `x` is an `int`; no contribution may read the loop variable or
-an accumulator; and there must be no call, allocation, `break` or `continue`,
-since an early exit means the trip count is not the one computed. The start
-must be a constant — from the initializer, or from the nearest preceding write to
-the variable — because it is the one number the closed form cannot otherwise
-recover. Anything else runs the loop as written.
-
-Unrolling tests the condition before every copy rather than once per pass. The
-body therefore runs exactly as many times as it did rolled — the tail is handled
-by the same test instead of by a computed iteration count — and what changes is
-that the last copy branches back to the top while the others fall through into
-the next, so three-quarters of the loop-back branches are gone and consecutive
-iterations sit next to each other for the prefetcher. Each copy gets its own
-continuation label, so `continue` runs the step of the copy it appears in, and
-`break` leaves the whole loop from any copy.
-
-A loop is left rolled when it has no condition (`for(;;)`, whose trip count
-nothing bounds), when its body is over 24 statements (the point is to fit the
-body in the instruction cache, and a body that does not fit gains nothing from
-being copied four times), and at any level below `-O3`.
-
-### Inlining
-
-A call to a function defined in the same file is replaced by the function's
-body, from `-O1` up. A body that is a single `return` becomes the expression
-itself, so `twice(21)` is `21 * 21`; a longer body is spliced in as statements
-and its result is left in a hidden local. A call inside the spliced body is
-itself a candidate, so nesting is followed up to four levels deep, which is where
-code growth stops paying for the calls it removes.
-
-```
-int clamp(int v, int lo, int hi) {
-    var out = v;
-    if (v < lo) { out = lo; }
-    if (v > hi) { out = hi; }
-    return out;
-}
-print(clamp(5, 1, 3));      // the body above, inline, with no call
-```
-
-The point is the call overhead: the argument setup, the call and return, and the
-frame the callee needed for its own locals. The body's locals get slots in the
-*caller's* frame rather than a frame of their own, and a call that was only ever
-prologue and epilogue disappears.
-
-Arguments are substituted by copying the caller's expression into each place the
-callee used the parameter, so a parameter used three times costs three reads of
-the same value. That is only sound for an expression that costs nothing to
-repeat, and a call is left alone when an argument might act (`f().add(3)`) or
-cost something (`1/den`), rather than being inlined into a program that calls
-`f()` three times.
-
-These are declined, each because the pass would have to model something the
-inliner does not:
-
-| | |
-|---|---|
-| recursive functions | inlining one would leave a call to itself, so nothing is saved and the body is copied for nothing. |
-| `extern` and `export` functions | the body is not this program's to copy. |
-| a body containing a closure, a bound method, or a nested function | the environment is built where the lambda is written and points at that frame's slots; the code can move, the frame it names cannot. |
-| struct or union parameters, and functions returning one | an aggregate argument arrives as a pointer, so substituting the expression would substitute the value rather than its address. A struct result needs a hidden return pointer rebuilt, which is the same ABI in reverse. |
-| a body over 24 statements | past that the copy costs more in instruction cache than the call it removed. |
-| a lambda or nested function as the *caller* | a captured variable is a box created by a declaration outside the closure, so a copy that moved its references would name slots nothing writes. |
-
-Arguments the compiler does not recognize are passed through to the link step,
-so C libraries and linker flags work as usual.
-
-### What `-g` describes, and what it does not
-
-The line table is produced by the assembler from `.file`/`.loc` directives
-emitted beside the code, so it is exact by construction.
-
-Two things are left out on purpose. A local that the register allocator promoted
-to a callee-saved register is not described: a variable that moves between a
-register and the stack over its lifetime needs a location list to describe
-accurately, and emitting a location that is right only part of the time is worse
-than emitting none, so a debugger reports it as optimized out. Parameters are
-always spilled to the frame in the prologue, so those are exact.
-
-And a local is typed as a `long`, a `boolean` or a `char *` only. Z has three
-scalar types; anything else gets no type attribute at all, which a debugger
-shows as an untyped value rather than a confidently wrong one.
+Read [LANGUAGE-v1.md](LANGUAGE-v1.md) for the v1 specification in full, including
+the sections this document does not repeat: optimization passes in detail,
+inlining rules and what it declines, and the DWARF format.

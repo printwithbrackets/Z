@@ -395,13 +395,22 @@ void z_bounds_fail(long idx, long len) { bounds_fail("array", idx, len); }
 void z_str_bounds_fail(long idx, long len) { bounds_fail("string", idx, len); }
 
 /* Heap array with an 8-byte length header; the returned pointer points at the
- * first element and the element count lives at ptr[-8]. */
+ * first element and the element count lives at ptr[-8].
+ *
+ * The elements are zeroed. `new T[n]` is documented and used as "n elements,
+ * all zero" -- `foreach` over a fresh array is expected to yield n zeroes, and
+ * every growable collection starts by handing out a `new T[cap]` and filling in
+ * what it needs. Getting that by accident is the problem: it worked only
+ * because a fresh malloc from an untouched page happens to read as zero, so the
+ * day the collector recycled a block the first read of a new array returned
+ * whatever the last user of those bytes left there. */
 void *z_newarray(long count, long elemsize) {
     if (count < 0)
         count = 0;
-    unsigned char *base =
-        (unsigned char *)gc_alloc(sizeof(long) + (size_t)count * (size_t)elemsize);
+    size_t payload = (size_t)count * (size_t)elemsize;
+    unsigned char *base = (unsigned char *)gc_alloc(sizeof(long) + payload);
     *(long *)base = count;
+    memset(base + sizeof(long), 0, payload);
     return base + sizeof(long);
 }
 
@@ -480,6 +489,18 @@ char *z_str_buf_append(char *buf, const char *s) {
 /* A one-byte string holding `b`, truncated to a byte. The counterpart of
  * char_at: Z has no character type, so a byte is an int in an expression and a
  * one-byte string when it has to go into a buffer. */
+/* Ends the program with `code`, after flushing. There is no way for a Z program to
+ * fail and say why -- there is no exception and no process exit yet -- so this is
+ * what a library reaches for when it cannot continue, and what a program uses to
+ * return a non-zero status. */
+void z_die(long code) {
+    fflush(stdout);
+    fflush(stderr);
+    exit((int)code);
+}
+
+void z_exit(long code) { z_die(code); }
+
 char *z_char_str(long b) {
     char *out = zstr_alloc_impl(1);
     out[0] = (char)(b & 0xff);
@@ -896,6 +917,67 @@ char *z_ftoa(double v) {
     char buf[40];
     snprintf(buf, sizeof buf, "%g", v);
     return zstr_copy(buf, strlen(buf));
+}
+
+/* ---- value-to-text and value-to-hash ----
+ *
+ * These are the two questions that depend on a value's *type*, and the code
+ * generator asks them with the type in hand: `to_text(x)` lowers to a different
+ * runtime call for an int, a bool, a float, a string, an aggregate and a pointer.
+ * They exist because a generic function cannot ask the question itself -- it can
+ * ask `typeof(x)`, but every branch after the test still has to type-check, and
+ * `int_to_string(x)` does not compile when x is a string. So the branch that
+ * would have run is exactly the branch that would not compile, and the only
+ * place that can answer is where the type is still known.
+ *
+ * A struct, an array, a union and a void print a name rather than a value: there
+ * is no canonical text for an aggregate here, and a pointer address would differ
+ * between two runs, which is worse than saying "this was a Point". */
+
+char *z_int_to_text(long v) { return z_itoa(v); }
+
+char *z_bool_to_text(long v) { return zstr_copy(v ? "true" : "false", v ? 4 : 5); }
+
+char *z_ptr_to_text(long v) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)v);
+    return zstr_copy(buf, strlen(buf));
+}
+
+char *z_agg_to_text(const char *name) { return zstr_copy(name, strlen(name)); }
+
+char *z_void_to_text(void) { return zstr_copy("void", 4); }
+
+char *z_str_to_text(const char *s) { return z_str_dup(s); }
+
+char *z_float_to_text(double v) { return z_ftoa(v); }
+
+/* A hash of a scalar. The multiply-and-shift moves entropy downward into the low
+ * bits, which are the only ones a table's mask looks at -- indexing by the raw
+ * value puts 1, 2 and 3 in slots 1, 2 and 3, and every probe lands in a cluster.
+ *
+ * The sign bit is masked off, so -1 and the most negative int share a slot. They
+ * are still different keys; they just start looking in the same place, and the
+ * probe checks every slot on the run before concluding a key is absent. */
+long z_hash_num(long k, long cap) {
+    unsigned long v = (unsigned long)k & 0xffffffffUL;
+    v = (v * 2654435761UL) & 0xffffffffUL;
+    v ^= v >> 15;
+    v = (v * 2246822519UL) & 0xffffffffUL;
+    v ^= v >> 13;
+    return (long)(v & (unsigned long)(cap - 1));
+}
+
+/* FNV-1a over the bytes, which is the same hash every language reaches for
+ * because it needs nothing but a multiply and an xor. */
+long z_hash_str(const char *k, long cap) {
+    unsigned long h = 2166136261UL;
+    long n = zlen(k);
+    for (long i = 0; i < n; i++) {
+        h ^= (unsigned long)(unsigned char)k[i];
+        h = (h * 16777619UL) & 0x7fffffffffffffffUL;
+    }
+    return (long)(h & (unsigned long)(cap - 1));
 }
 
 /* ---- integer library ----

@@ -1,0 +1,81 @@
+// The parts of Vec<T>, Map<K,V> and Set<T> that the collections test does not
+// reach.
+//
+// `collections` covers the common path: building, aliasing, growth, the ends.
+// This covers the rest of the declared surface, one method per line, so a method
+// that stops working is a failing line here rather than a surprise in a program
+// that uses it. Every value printed is the one the method's comment claims.
+int main() {
+    /* ---- Vec: views and partial operations ---- */
+    var v = new Vec<int>();
+    for (var i = 0; i < 5; i++) {
+        v.push(i);
+    }
+    print(v.reversed().toString());      // 3, 2, 1, 0
+    print(v.slice(1, 3).toString());      // 1, 2
+    print(v.sliceFrom(2).toString());    // 2, 3
+    print(v.sliceTo(2).toString());      // 0, 1
+    print(v.take(2).toString());         // 0, 1
+    print(v.join("|"));                  // 0|1|2|3
+    var head = v.take(2);
+    v.pushAll(head);
+    print(v.size());                     // 7
+    v.drop(1);
+    print(v.size());                     // 6
+
+    /* clear keeps the buffer, release frees it, and both empty the vector. */
+    v.clear();
+    print(v.isEmpty());                  // true
+    v.push(1);
+    v.release();
+    print(v.isEmpty());                  // true
+
+    /* ---- Map: fallback reads, computed defaults, and iteration ---- */
+    var m = new Map<string, int>();
+    m.set("a", 1);
+    m.set("b", 2);
+    print(m.get("a", -1));               // 1
+    print(m.get("zz", -1));              // -1 -- absent is an ordinary answer
+    print(m.getOr("c", 30));             // 30
+    print(m.size());                     // 3 -- getOr inserted it
+    print(m.slots() >= m.size());        // true
+    print(m.keysOf().size());            // 3
+    print(m.values().size());            // 3
+    print(m.join(" "));                  // three k=v pairs
+    print(m.remove("a"));                // true -- it was there
+    print(m.remove("a"));                // false -- it is not
+    m.clear();
+    print(m.isEmpty());                  // true
+
+    /* ---- Set: addIfNew, subset, equality ---- */
+    var s = new Set<int>();
+    s.add(1);
+    s.add(2);
+    s.add(1);
+    print(s.size());                     // 2 -- a second add changes nothing
+    print(s.addIfNew(3));                // true -- 3 was not there
+    print(s.addIfNew(3));                // false -- it is now
+    print(s.has(1));                     // true
+    print(s.has(99));                    // false
+    var sub = new Set<int>();
+    sub.add(1);
+    sub.add(3);
+    print(s.containsAll(sub));           // true
+    print(sub.isEqualTo(s));             // false -- s has an element sub lacks
+    print(s.isEqualTo(s));               // true
+    print(s.remove(1));                  // true
+    print(s.size());                     // 2
+
+    /* ---- the same containers keyed by float, which is a different lowering
+     * of the hash rather than the same one reached differently ---- */
+    var mf = new Map<float, int>();
+    mf.set(1.5, 10);
+    mf.set(2.5, 20);
+    print(mf.get(1.5, -1));              // 10
+    print(mf.get(2.5, -1));              // 20
+    print(mf.size());                    // 2
+    var sf = new Set<float>();
+    sf.add(1.5);
+    print(sf.has(1.5));                  // true
+    return 0;
+}

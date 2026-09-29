@@ -238,19 +238,43 @@ typedef struct {
     TokenKind kind;
 } Op;
 static const Keyword KEYWORDS[] = {
-    {"int", T_KW_INT},         {"bool", T_KW_BOOL},        {"float", T_KW_FLOAT},
-    {"string", T_KW_STRING},   {"void", T_KW_VOID},
-    {"var", T_KW_VAR},         {"const", T_KW_CONST},
+    {"int", T_KW_INT},
+    {"bool", T_KW_BOOL},
+    {"float", T_KW_FLOAT},
+    {"string", T_KW_STRING},
+    {"void", T_KW_VOID},
+    /* `auto` is a synonym for `var`, not a replacement: both spell the same
+     * thing, and a program written with one compiles after the other exists. */
+    {"var", T_KW_VAR},
+    {"auto", T_KW_VAR},
+    {"const", T_KW_CONST},
     {"new", T_KW_NEW},
-    {"struct", T_KW_STRUCT},   {"enum", T_KW_ENUM},
-    {"match", T_KW_MATCH},     {"this", T_KW_THIS},
-    {"if", T_KW_IF},           {"else", T_KW_ELSE},
-    {"while", T_KW_WHILE},     {"for", T_KW_FOR},
-    {"foreach", T_KW_FOREACH}, {"in", T_KW_IN},
-    {"return", T_KW_RETURN},   {"break", T_KW_BREAK},
+    {"struct", T_KW_STRUCT},
+    {"enum", T_KW_ENUM},
+    {"match", T_KW_MATCH},
+    {"this", T_KW_THIS},
+    {"if", T_KW_IF},
+    {"else", T_KW_ELSE},
+    {"while", T_KW_WHILE},
+    {"for", T_KW_FOR},
+    {"foreach", T_KW_FOREACH},
+    {"in", T_KW_IN},
+    {"return", T_KW_RETURN},
+    {"break", T_KW_BREAK},
     {"continue", T_KW_CONTINUE},
-    {"true", T_KW_TRUE},      {"null", T_KW_NULL},      {"extern", T_KW_EXTERN},   {"export", T_KW_EXPORT},   {"fn", T_KW_FN},        {"closure", T_KW_CLOSURE},        {"method", T_KW_METHOD},        {"import", T_KW_IMPORT},    {"false", T_KW_FALSE},     {"class", T_KW_CLASS},{"interface", T_KW_INTERFACE},
-    {"virtual", T_KW_VIRTUAL}, {"override", T_KW_OVERRIDE},
+    {"true", T_KW_TRUE},
+    {"null", T_KW_NULL},
+    {"extern", T_KW_EXTERN},
+    {"export", T_KW_EXPORT},
+    {"fn", T_KW_FN},
+    {"closure", T_KW_CLOSURE},
+    {"method", T_KW_METHOD},
+    {"import", T_KW_IMPORT},
+    {"false", T_KW_FALSE},
+    {"class", T_KW_CLASS},
+    {"interface", T_KW_INTERFACE},
+    {"virtual", T_KW_VIRTUAL},
+    {"override", T_KW_OVERRIDE},
 };
 
 static int peek_char(Lexer *lx, int off) {
@@ -456,20 +480,19 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                 /* A float literal is never an overflow error: 1e400 is a large
                  * number, not a mistake. */
                 if (is_alnum(peek_char(&lx, 0)))
-                    diag_error(nspan, "unexpected '%c' after a numeric literal",
-                               peek_char(&lx, 0));
+                    diag_error(nspan, "unexpected '%c' after a numeric literal", peek_char(&lx, 0));
                 tk.kind = T_F64;
             } else {
-            if (ndigits == 0 && base != 10)
-                diag_error(nspan, "this literal has no digits");
-            if (overflow)
-                diag_error(nspan, "this literal does not fit in 'int' (max %lld)", Z_INT_MAX);
-            /* A digit run that runs into letters is a typo, not two tokens:
-             * "123abc" and "0x1g" are both mistakes worth naming. */
-            if (is_alnum(peek_char(&lx, 0)))
-                diag_error(nspan, "unexpected '%c' after a numeric literal", peek_char(&lx, 0));
-            tk.kind = T_INT;
-            tk.ival = (long long)val;
+                if (ndigits == 0 && base != 10)
+                    diag_error(nspan, "this literal has no digits");
+                if (overflow)
+                    diag_error(nspan, "this literal does not fit in 'int' (max %lld)", Z_INT_MAX);
+                /* A digit run that runs into letters is a typo, not two tokens:
+                 * "123abc" and "0x1g" are both mistakes worth naming. */
+                if (is_alnum(peek_char(&lx, 0)))
+                    diag_error(nspan, "unexpected '%c' after a numeric literal", peek_char(&lx, 0));
+                tk.kind = T_INT;
+                tk.ival = (long long)val;
             }
         } else if (is_alpha(c)) {
             int b = lx.pos;
@@ -567,21 +590,56 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
         } else {
             /* Operators and punctuation, longest match first. */
             static const Op OPS[] = {
-                {"=>", T_FATARROW}, {"->", T_ARROW}, {"==", T_EQ},         {"!=", T_NE},       {"<=", T_LE},
-                {">=", T_GE},       {"&&", T_AND},        {"||", T_OR},       {"+=", T_PLUS_EQ},
-                {"-=", T_MINUS_EQ}, {"*=", T_STAR_EQ},    {"/=", T_SLASH_EQ}, {"%=", T_PERCENT_EQ},
-                {"++", T_PLUSPLUS}, {"--", T_MINUSMINUS}, {"+", T_PLUS},      {"-", T_MINUS},
-                {"*", T_STAR},      {"/", T_SLASH},       {"%", T_PERCENT},   {"=", T_ASSIGN},
-                {"<<=", T_SHL_EQ},  {">>=", T_SHR_EQ},  {"<<", T_SHL},     {">>", T_SHR},
-                {"&=", T_AMP_EQ},   {"|=", T_PIPE_EQ},  {"^=", T_CARET_EQ},        {"<", T_LT},        {">", T_GT},
-                {"!", T_NOT},       {"&", T_AMP},         {"|", T_PIPE},      {"^", T_CARET},
+                {"=>", T_FATARROW},
+                {"->", T_ARROW},
+                {"==", T_EQ},
+                {"!=", T_NE},
+                {"<=", T_LE},
+                {">=", T_GE},
+                {"&&", T_AND},
+                {"||", T_OR},
+                {"+=", T_PLUS_EQ},
+                {"-=", T_MINUS_EQ},
+                {"*=", T_STAR_EQ},
+                {"/=", T_SLASH_EQ},
+                {"%=", T_PERCENT_EQ},
+                {"++", T_PLUSPLUS},
+                {"--", T_MINUSMINUS},
+                {"+", T_PLUS},
+                {"-", T_MINUS},
+                {"*", T_STAR},
+                {"/", T_SLASH},
+                {"%", T_PERCENT},
+                {"=", T_ASSIGN},
+                {"<<=", T_SHL_EQ},
+                {">>=", T_SHR_EQ},
+                {"<<", T_SHL},
+                {">>", T_SHR},
+                {"&=", T_AMP_EQ},
+                {"|=", T_PIPE_EQ},
+                {"^=", T_CARET_EQ},
+                {"<", T_LT},
+                {">", T_GT},
+                {"!", T_NOT},
+                {"&", T_AMP},
+                {"|", T_PIPE},
+                {"^", T_CARET},
                 {"~", T_TILDE},
-                {"(", T_LPAREN},    {")", T_RPAREN},      {"{", T_LBRACE},    {"}", T_RBRACE},
-                {"[", T_LBRACKET},  {"]", T_RBRACKET},    {";", T_SEMI},      {",", T_COMMA},
+                {"(", T_LPAREN},
+                {")", T_RPAREN},
+                {"{", T_LBRACE},
+                {"}", T_RBRACE},
+                {"[", T_LBRACKET},
+                {"]", T_RBRACKET},
+                {";", T_SEMI},
+                {",", T_COMMA},
                 /* `..` is listed before `.` so the longest match wins: the loop
                  * takes the first entry that matches, and a slice written `..`
                  * would otherwise lex as two field accesses. */
-                {"..", T_DOTDOT},   {".", T_DOT},       {"?", T_QUESTION},    {":", T_COLON},
+                {"..", T_DOTDOT},
+                {".", T_DOT},
+                {"?", T_QUESTION},
+                {":", T_COLON},
             };
             int matched = 0;
             for (size_t k = 0; k < sizeof OPS / sizeof(*OPS) && !matched; k++) {

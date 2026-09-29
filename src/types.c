@@ -16,6 +16,8 @@ void typectx_init(TypeCtx *ctx, Arena *arena) {
     ctx->t_f64->kind = TK_F64;
     ctx->t_string = arena_alloc(arena, sizeof(Type));
     ctx->t_string->kind = TK_STRING;
+    ctx->t_any = arena_alloc(arena, sizeof(Type));
+    ctx->t_any->kind = TK_ANY;
 }
 
 Type *type_void(TypeCtx *ctx) { return ctx->t_void; }
@@ -23,6 +25,8 @@ Type *type_int(TypeCtx *ctx) { return ctx->t_int; }
 Type *type_bool(TypeCtx *ctx) { return ctx->t_bool; }
 Type *type_f64(TypeCtx *ctx) { return ctx->t_f64; }
 Type *type_string(TypeCtx *ctx) { return ctx->t_string; }
+
+Type *type_any(TypeCtx *ctx) { return ctx->t_any; }
 
 Type *type_new_param(TypeCtx *ctx, const char *name) {
     Type *t = arena_alloc(ctx->arena, sizeof(Type));
@@ -181,9 +185,7 @@ void union_finish(UnionDef *ud) {
 /* A Result's payload is one machine word. `type_is_scalar` covers int, bool,
  * float, string and pointers -- everything Z can pass in a register -- which is
  * what keeps the layout uniform at sixteen bytes. */
-static int result_payload_fits(Type *t) {
-    return t != NULL && type_is_scalar(t);
-}
+static int result_payload_fits(Type *t) { return t != NULL && type_is_scalar(t); }
 
 int type_is_result(Type *t) {
     return t != NULL && t->kind == TK_UNION && t->udef != NULL &&
@@ -439,7 +441,11 @@ void struct_add_prop(TypeCtx *ctx, StructDef *sd, const char *name, Type *type, 
 int type_size(Type *t) {
     switch (t->kind) {
     case TK_VOID:
-        return 0;
+    /* `any` is only ever a built-in's declared parameter type, and the argument
+     * is replaced by its real type before anything asks its size. A word is the
+     * answer that cannot be wrong if that ever stops being true. */
+    case TK_ANY:
+        return 8;
     case TK_IFACE:
         /* One pointer: to the { itab, receiver } cell. */
         return 8;
@@ -503,6 +509,11 @@ int type_assignable(Type *dst, Type *src) {
 }
 
 int type_equals(Type *a, Type *b) {
+    /* `any` is what a polymorphic built-in's parameter is declared as, so it
+     * matches whatever it is handed. Nothing else can produce it, so this cannot
+     * make two unrelated types equal. */
+    if ((a != NULL && a->kind == TK_ANY) || (b != NULL && b->kind == TK_ANY))
+        return 1;
     if (a == b)
         return 1;
     if (a == NULL || b == NULL)
@@ -515,6 +526,10 @@ int type_equals(Type *a, Type *b) {
     case TK_BOOL:
     case TK_F64:
     case TK_STRING:
+    /* Unreachable: the `any` case is answered above, before the kinds are
+     * compared. Listed so that adding a kind does not silently change what
+     * `type_equals` says about two of them. */
+    case TK_ANY:
         return 1;
     case TK_IFACE:
         return a->idef == b->idef;
@@ -548,8 +563,8 @@ int type_is_scalar(Type *t) {
     /* A `float` is included: it is 8 bytes and occupies one slot, so everything
      * that reasons about a scalar's size is right about it. What it is *not* is
      * a general-purpose-register value, which is what type_is_float is for. */
-    return t->kind == TK_INT || t->kind == TK_BOOL || t->kind == TK_F64 ||
-           t->kind == TK_STRING || t->kind == TK_PTR;
+    return t->kind == TK_INT || t->kind == TK_BOOL || t->kind == TK_F64 || t->kind == TK_STRING ||
+           t->kind == TK_PTR;
 }
 
 int type_is_float(Type *t) { return t != NULL && t->kind == TK_F64; }
@@ -616,7 +631,9 @@ const char *type_name(TypeCtx *ctx, Type *t) {
          * time, so this assembles the signature in a local and then copies it
          * into a slot of its own. */
         char tmp[256];
-        const char *lead = t->kind == TK_CLOSURE ? "closure(" : t->kind == TK_MPTR ? "method(" : "fn(";
+        const char *lead = t->kind == TK_CLOSURE ? "closure("
+                           : t->kind == TK_MPTR  ? "method("
+                                                 : "fn(";
         size_t off = (size_t)snprintf(tmp, sizeof tmp, "%s", lead);
         for (int i = 0; i < t->nparams && off < sizeof tmp; i++) {
             const char *pt = type_name(ctx, t->ptypes[i]);
@@ -652,6 +669,16 @@ const char *type_name(TypeCtx *ctx, Type *t) {
         break;
     case TK_TYPEPARAM:
         snprintf(buf, sizeof bufs[0], "%s", t->pname ? t->pname : "T");
+        break;
+    case TK_ANY:
+        snprintf(buf, sizeof bufs[0], "any");
+        break;
+    default:
+        /* A kind with no name here is a kind this switch predates. Saying so is
+         * better than returning whatever the rotating buffer last held, which is
+         * what an unhandled case did: a diagnostic would name a type the reader
+         * never wrote. */
+        snprintf(buf, sizeof bufs[0], "<kind %d>", (int)t->kind);
         break;
     }
     return buf;

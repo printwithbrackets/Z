@@ -90,11 +90,11 @@ typedef enum {
     T_PERCENT_EQ,
     T_PLUSPLUS,
     T_MINUSMINUS,
-    T_PIPE,   /* |  */
-    T_CARET,  /* ^  */
-    T_TILDE,  /* ~  */
-    T_SHL,    /* << */
-    T_SHR,    /* >> */
+    T_PIPE,  /* |  */
+    T_CARET, /* ^  */
+    T_TILDE, /* ~  */
+    T_SHL,   /* << */
+    T_SHR,   /* >> */
     T_AMP_EQ,
     T_PIPE_EQ,
     T_CARET_EQ,

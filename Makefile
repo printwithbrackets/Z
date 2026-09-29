@@ -1,6 +1,12 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror
-CFLAGS  += -MMD -MP
+# The generated src/runtime_src.h and src/std_src.h hold the whole Z runtime and
+# the whole standard library as C string literals, so one string is tens of
+# kilobytes. C99 only *requires* an implementation to accept 4095 characters in a
+# literal; every compiler this targets handles tens of megabytes, and relying on
+# that is far better than the alternative, which is a hand-maintained array of
+# decimal byte values that no one can read or diff.
+CFLAGS  += -Wno-overlength-strings -MMD -MP
 LDFLAGS ?=
 
 BIN     := z
@@ -38,14 +44,21 @@ src/main.o: src/runtime_src.h src/std_src.h
 
 # The Z runtime is embedded into the compiler as a byte array so a built
 # `z` is self-contained (no runtime file needed at compile time).
-src/runtime_src.h: runtime/z_rt.c
-	@python3 -c "d=open('runtime/z_rt.c','rb').read(); print('/* generated */'); print('static const char runtime_src[] = {' + ','.join(str(b) for b in d) + ',0};')" > $@
+src/runtime_src.h: runtime/z_rt.c tools/embed.py
+	@python3 tools/embed.py runtime_src runtime/z_rt.c > $@
 
-# The standard library, the same way. Each file is announced with a line comment
-# naming it, so a diagnostic that points into the prelude names the file a reader
-# can go and read.
-src/std_src.h: $(STDLIB)
-	@python3 -c "import sys; out=['/* generated */','static const char std_src[] = {']; [out.append('/* --- %s --- */' % p) or out.append(','.join(str(b) for b in open(p,'rb').read())) for p in sys.argv[1:]]; out.append(',0};'); print('\n'.join(out))" $(STDLIB) > $@
+# The standard library, the same way.
+#
+# One C string per file rather than one concatenated blob, plus a table naming
+# them. That is what lets the driver lex each file on its own and stamp the right
+# file name on the tokens, so a diagnostic inside the library says which file it
+# is in -- the alternative is one NUL-terminated blob with every span pointing at
+# a synthetic name and a line number counted across three files. The escaping is
+# octal for every byte outside the printable ASCII range, so the generated file is
+# valid C regardless of what the sources contain, and the result is readable
+# enough to diff.
+src/std_src.h: $(STDLIB) tools/embed.py
+	@python3 tools/embed.py std_src $(STDLIB) > $@
 
 # Golden + diagnostic tests; run after the compiler links.
 test: $(BIN) tests/run

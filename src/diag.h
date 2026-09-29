@@ -83,8 +83,7 @@ int diag_edit_distance(const char *a, const char *b);
 /* Queues a "did you mean" note if a candidate is close enough. `what` names the
  * kind of thing ("variable", "function", "method", "type", "field",
  * "variant"), so the note reads as a sentence rather than a diff. */
-void diag_suggest_note(const char *what, const char *name, const char *const *candidates,
-                       int n);
+void diag_suggest_note(const char *what, const char *name, const char *const *candidates, int n);
 
 /* ---- reporting ---- */
 

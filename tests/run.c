@@ -38,6 +38,14 @@ static int run_cmd_capture(const char *cmd, char *out, int cap) {
         return -1;
     int n = (int)fread(out, 1, (size_t)cap - 1, p);
     out[n] = 0;
+    /* fread stops at the buffer limit, but the child is still writing. Draining
+     * the rest of the pipe is what keeps it from taking SIGPIPE, which would
+     * otherwise surface as a nonzero exit and a spurious "compile failed" for a
+     * build that succeeded. A test that emits more output than `cap` (one with
+     * hundreds of warnings, say) is exactly that case. */
+    int c;
+    while ((c = fgetc(p)) != EOF)
+        ;
     int status = pclose(p);
     if (status == -1)
         return -1;
@@ -58,14 +66,78 @@ int main(int argc, char **argv) {
     /* Golden cases. */
     char path[512], exp_path[512], cmd[2048];
     static const char *cases[] = {
-        "hello",    "arith",      "vars",      "bools",    "ifelse",         "loops",
-        "funcs",    "recursion",  "strings",   "compound", "mainfunc",       "nested_calls",
-        "manyargs", "scopes",     "shadows",   "mainret",  "forloop",        "pointers",
-        "arrays",   "foreach",    "strconcat", "structs",  "structs_nested", "interp",
-        "methods",  "props",      "ext",       "fatarrow", "opoverload",     "tern",
-        "gc",       "enum_match", "constfold", "regalloc", "divmod",         "boolstr",
-        "generics", "generics2",  "classes",   "classes2", "integration",
-        "strings2", "frame_layout", "bitwise",      "consts",         "breakcontinue", "nested_loops", "null", "strcmp", "intrinsics", "trig", "symnames", "bigconst", "fnptr", "methodptr", "literals", "stdlib", "floats", "closures", "closures_toplevel", "nested_fn", "typed_locals", "local_types", "unroll", "closedform", "inliner", "result", "interfaces",
+        "hello",
+        "arith",
+        "vars",
+        "bools",
+        "ifelse",
+        "loops",
+        "funcs",
+        "recursion",
+        "strings",
+        "compound",
+        "mainfunc",
+        "nested_calls",
+        "manyargs",
+        "scopes",
+        "shadows",
+        "mainret",
+        "forloop",
+        "pointers",
+        "arrays",
+        "foreach",
+        "strconcat",
+        "structs",
+        "structs_nested",
+        "interp",
+        "methods",
+        "props",
+        "ext",
+        "fatarrow",
+        "opoverload",
+        "tern",
+        "gc",
+        "enum_match",
+        "constfold",
+        "regalloc",
+        "divmod",
+        "boolstr",
+        "generics",
+        "generics2",
+        "classes",
+        "classes2",
+        "integration",
+        "strings2",
+        "collections",
+        "collections2",
+        "frame_layout",
+        "bitwise",
+        "consts",
+        "breakcontinue",
+        "nested_loops",
+        "null",
+        "strcmp",
+        "intrinsics",
+        "trig",
+        "symnames",
+        "bigconst",
+        "fnptr",
+        "methodptr",
+        "literals",
+        "stdlib",
+        "floats",
+        "closures",
+        "closures_toplevel",
+        "nested_fn",
+        "typed_locals",
+        "local_types",
+        "unroll",
+        "closedform",
+        "licm_bigframe",
+        "inliner",
+        "result",
+        "interfaces",
+        "cxxsyntax",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -104,18 +176,73 @@ int main(int argc, char **argv) {
 
     /* Diagnostic cases. */
     static const char *errs[] = {
-        "undefined_var", "type_mismatch",       "missing_semi", "unknown_func", "bad_condition",
-        "arity",         "unterminated_string", "stray_char",   "return_type",  "undefined_type",
-        "too_many_params", "too_many_method_params", "bad_const", "dup_const",
-        "bitwise_on_string", "break_outside_loop", "continue_outside_loop", "intrinsic_arity", "intrinsic_arg_type", "compare_mixed", "extern_with_body", "extern_arity", "extern_argtype", "export_no_body", "fnptr_argcount", "fnptr_argtype", "fnptr_signature", "fnptr_order", "fnptr_arity_mismatch", "methodptr_struct_recv", "methodptr_no_method", "methodptr_struct_return",
-        "foreach_ptr", "foreach_nonarray", "bad_escape", "int_overflow", "empty_radix_literal", "digits_then_letters",
-        "float_to_int", "float_mod", "float_bitwise", "float_not", "float_shift",
-        "lambda_return_type", "lambda_not_int", "lambda_fn_return", "lambda_in_lambda",
-        "nested_fn_capture", "fn_reads_toplevel_var", "nested_fn_extern", "nested_fn_no_body",
-        "result_mismatch", "result_no_ret", "result_ambiguous", "result_too_big",
-        "iface_missing_method", "iface_bad_signature", "iface_nonvirtual", "iface_no_method",
-        "suggest_var", "suggest_method", "suggest_type", "nonexhaustive_names", "enclosing_fn",
-        "sig_note", "argtype_note",
+        "undefined_var",
+        "type_mismatch",
+        "missing_semi",
+        "unknown_func",
+        "bad_condition",
+        "arity",
+        "unterminated_string",
+        "stray_char",
+        "return_type",
+        "undefined_type",
+        "too_many_params",
+        "too_many_method_params",
+        "bad_const",
+        "dup_const",
+        "bitwise_on_string",
+        "break_outside_loop",
+        "continue_outside_loop",
+        "intrinsic_arity",
+        "intrinsic_arg_type",
+        "compare_mixed",
+        "extern_with_body",
+        "extern_arity",
+        "extern_argtype",
+        "export_no_body",
+        "fnptr_argcount",
+        "fnptr_argtype",
+        "fnptr_signature",
+        "fnptr_order",
+        "fnptr_arity_mismatch",
+        "methodptr_struct_recv",
+        "methodptr_no_method",
+        "methodptr_struct_return",
+        "foreach_ptr",
+        "foreach_nonarray",
+        "bad_escape",
+        "int_overflow",
+        "empty_radix_literal",
+        "digits_then_letters",
+        "float_to_int",
+        "float_mod",
+        "float_bitwise",
+        "float_not",
+        "float_shift",
+        "arrow_on_nonptr",
+        "lambda_return_type",
+        "lambda_not_int",
+        "lambda_fn_return",
+        "lambda_in_lambda",
+        "nested_fn_capture",
+        "fn_reads_toplevel_var",
+        "nested_fn_extern",
+        "nested_fn_no_body",
+        "result_mismatch",
+        "result_no_ret",
+        "result_ambiguous",
+        "result_too_big",
+        "iface_missing_method",
+        "iface_bad_signature",
+        "iface_nonvirtual",
+        "iface_no_method",
+        "suggest_var",
+        "suggest_method",
+        "suggest_type",
+        "nonexhaustive_names",
+        "enclosing_fn",
+        "sig_note",
+        "argtype_note",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -237,7 +364,8 @@ int main(int argc, char **argv) {
                 {"has .debug_abbrev", "readelf -S /tmp/z_test_dbg", ".debug_abbrev"},
                 {"unit is well-formed", "readelf --debug-dump=info /tmp/z_test_dbg",
                  "DW_TAG_compile_unit"},
-                {"names a function", "readelf --debug-dump=info /tmp/z_test_dbg", "DW_TAG_subprogram"},
+                {"names a function", "readelf --debug-dump=info /tmp/z_test_dbg",
+                 "DW_TAG_subprogram"},
                 {"locates a function", "readelf --debug-dump=info /tmp/z_test_dbg", "DW_AT_low_pc"},
                 {"has a line table", "objdump --dwarf=decodedline /tmp/z_test_dbg", "line"},
             };
@@ -432,7 +560,8 @@ int main(int argc, char **argv) {
      * declarations, passed on the command line so the link step sees it. The
      * sibling <name>.c is the C side. */
     static const char *interop[] = {
-        "extern", "export",
+        "extern",
+        "export",
     };
     for (size_t i = 0; i < sizeof interop / sizeof interop[0]; i++) {
         snprintf(path, sizeof path, "%s/%s.z", io_dir, interop[i]);
@@ -450,8 +579,7 @@ int main(int argc, char **argv) {
         char link[4096];
         snprintf(link, sizeof link, "./%s run %s %s 2>&1", zc, path, cmd);
         char actual[1 << 16];
-        if (run_cmd_capture(link, actual, sizeof actual) != 0 ||
-            strcmp(expected, actual) != 0) {
+        if (run_cmd_capture(link, actual, sizeof actual) != 0 || strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
                     interop[i], expected, actual);
             fail++;
@@ -477,8 +605,7 @@ int main(int argc, char **argv) {
         }
         snprintf(cmd, sizeof cmd, "./%s run %s %s 2>&1", zc, path, opt_flag());
         char actual[1 << 16];
-        if (run_cmd_capture(cmd, actual, sizeof actual) != 0 ||
-            strcmp(expected, actual) != 0) {
+        if (run_cmd_capture(cmd, actual, sizeof actual) != 0 || strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
                     modules[i], expected, actual);
             fail++;

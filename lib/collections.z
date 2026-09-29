@@ -1,0 +1,584 @@
+/* Collections: Vec<T>, Map<K,V>, Set<T>.
+ *
+ * Written in Z and embedded in the compiler, so they are checked by the same
+ * front end as the code that uses them. A bug in one is a bug any program using
+ * it would have found, rather than something only the C side can reach.
+ *
+ * `Vec<T>`, `Map<K,V>` and `Set<T>` are generic *classes*, monomorphized the same
+ * way a generic function is: `Vec<int>` and `Vec<string>` are two separate types
+ * with two separate copies of the code, and neither is built until something
+ * asks for it.
+ *
+ * ---- class or struct? ----
+ *
+ * The roadmap asked this and the answer is **class**.
+ *
+ * A growable buffer is something two names should share, so assignment shares
+ * it, and that is exactly what a class means in this language. The alternative
+ * is worse than it first looks: a `Vec` as a struct would be three words -- buffer,
+ * length, capacity -- and copying it would leave two headers pointing at one
+ * buffer. Growing one would reallocate, and the other would keep reading the old
+ * array, so `var b = a; b.push(x); print(a.size());` would quietly be wrong. In
+ * a language whose structs copy, a struct holding a pointer is a trap, and a
+ * growable container is the worst place to have one: the failure is invisible
+ * until the two copies disagree.
+ *
+ * So the consequence worth being explicit about: **passing a Vec to a function
+ * passes the collection, not a copy of its handle.** A method that mutates is
+ * mutating what the caller holds. The ones below are named for what they change.
+ *
+ * ---- what is deliberately not here ----
+ *
+ * **No `Slice<T>`.** A slice is a pointer and a length, and Z cannot name "a
+ * pointer to T plus an int" in one type without a struct -- and a struct cannot
+ * hold `T` without the whole type being generic, which is a different problem
+ * from the one a slice is for. What is here is `slice(a, b)`, which returns a
+ * fresh `Vec`: a copy, and honestly so. Without lifetimes, a view would have to
+ * either borrow (and a borrow checker is a larger language than this one) or
+ * outlive its container silently. A copy costs something you can see.
+ *
+ * **No iterator objects.** `foreach` takes an array, and interfaces arrived after
+ * this design and were not retrofitted into it. `for (var i = 0; i < v.size();
+ * i++)` is the iteration, and it is what a `Vec` of a generic element type can
+ * express today.
+ *
+ * **Fields and methods are not private.** Z has no visibility yet, so the
+ * convention here is a comment and a leading capital for the few methods that
+ * are plumbing (`grow`, `find`, `slotFor`, `rehash`). M13 makes it real.
+ */
+
+/* The type codes `typeof` returns. These are the compiler's TypeKind values, in
+ * the enum's own order, and src/parser.c's type_kind_code is the other end of
+ * this. The order is load-bearing: a code that moves silently turns every
+ * `typeof` branch in the standard library into the wrong answer. */
+const int TYPE_VOID = 0;
+const int TYPE_INT = 1;
+const int TYPE_BOOL = 2;
+const int TYPE_FLOAT = 3;
+const int TYPE_STRING = 4;
+const int TYPE_PTR = 5;
+const int TYPE_ARRAY = 6;
+const int TYPE_STRUCT = 7;
+const int TYPE_UNION = 8;
+const int TYPE_FNPTR = 9;
+const int TYPE_MPTR = 10;
+const int TYPE_CLOSURE = 11;
+const int TYPE_IFACE = 12;
+const int TYPE_TYPEPARAM = 13;
+
+/* ---- Vec<T> ---- */
+
+class Vec<T> {
+    T[] data; /* `cap` elements allocated, `len` of them live */
+    int len;
+    int cap;
+
+    /* An empty vector with room for 8. Eight is not a tuned number: it is where
+     * growing costs more copying than the header it saves, and every small
+     * vector a program builds fits.
+     *
+     * There is one constructor and not two. Z dispatches a call by name, so a
+     * second `Vec(int)` would be a second method with the same name, and there is
+     * no way to write `new Vec<T>(0)` that means "empty" and `new Vec<T>(10)`
+     * that means "ten zeroes". `reserve` is how a vector that knows its size
+     * says so, and it is a separate name for that reason. */
+    Vec() {
+        cap = 8;
+        data = new T[cap];
+        len = 0;
+    }
+
+    int size() { return len; }
+    int capacity() { return cap; }
+    bool isEmpty() { return len == 0; }
+
+    /* The element at `i`.
+     *
+     * Out of range is a message and a non-zero exit rather than a clamp or a
+     * silent zero. `--bounds` is opt-in, so this is the check that always runs,
+     * and a program that indexes a vector wrongly should say which index and
+     * which length rather than read whatever the collector left there. */
+    T at(int i) {
+        if (i < 0 || i >= len) {
+            print("Vec index " + i + " out of range, length is " + len);
+            die(1);
+        }
+        return data[i];
+    }
+
+    /* Appends. Amortized O(1): the buffer doubles, so n appends copy n elements
+     * in total rather than n squared. */
+    void push(T v) {
+        if (len == cap) { this.Grow(cap * 2); }
+        data[len] = v;
+        len++;
+    }
+
+    /* Appends everything in `other`. Amortized against the receiving vector's own
+     * growth, so appending another vector to this one is linear.
+     *
+     * The parameter is `Vec<T>*` because a class type and its pointer are
+     * different types, the same rule `Set.inner` follows. Written as `Vec<T>`
+     * it named the class rather than a handle to one, and no vector could be
+     * passed at all -- which is why nothing called it until now. */
+    void pushAll(Vec<T>* other) {
+        this.Grow(len + other.len);
+        for (var i = 0; i < other.len; i++) {
+            data[len + i] = other.data[i];
+        }
+        len = len + other.len;
+    }
+
+    /* Removes and returns the last element. */
+    T pop() {
+        if (len == 0) {
+            print("Vec.pop on an empty vector");
+            die(1);
+        }
+        len--;
+        return data[len];
+    }
+
+    /* Removes the element at `i`, shifts the rest down, and returns it. The
+     * shift is O(n) and always will be: removing from the middle of a sequence
+     * while preserving its order cannot be otherwise. */
+    T removeAt(int i) {
+        if (i < 0 || i >= len) {
+            print("Vec.removeAt index " + i + " out of range, length is " + len);
+            die(1);
+        }
+        var out = data[i];
+        for (var k = i; k + 1 < len; k++) { data[k] = data[k + 1]; }
+        len--;
+        return out;
+    }
+
+    void insertAt(int i, T v) {
+        if (i < 0 || i > len) {
+            print("Vec.insertAt index " + i + " out of range, length is " + len);
+            die(1);
+        }
+        this.Grow(len + 1);
+        for (var k = len; k > i; k--) { data[k] = data[k - 1]; }
+        data[i] = v;
+        len++;
+    }
+
+    /* Empties the vector, keeping the buffer. The one to reach for in a loop: a
+     * vector that is refilled should not give back its allocation each time
+     * round. Release is for one that is finished. */
+    void clear() { len = 0; }
+
+    /* Empties the vector and drops the buffer, so the collector can have it. */
+    void release() {
+        cap = 8;
+        len = 0;
+        data = new T[8];
+    }
+
+    /* A copy with the elements in the other order. */
+    Vec<T>* reversed() {
+        var out = new Vec<T>();
+        out.reserve(len);
+        for (var i = len - 1; i >= 0; i--) { out.push(data[i]); }
+        return out;
+    }
+
+    /* The elements in `from`..`to` -- either end optional, both clamped, an
+     * inverted range empty. The vector form of `s[a..b]`, and a copy, because a
+     * view would have to borrow. */
+    Vec<T>* slice(int from, int to) {
+        if (from < 0) { from = len + from; }
+        if (to < 0) { to = len + to; }
+        if (from < 0) { from = 0; }
+        if (to > len) { to = len; }
+        if (to < from) { to = from; }
+        var out = new Vec<T>();
+        out.reserve(to - from);
+        for (var i = from; i < to; i++) { out.push(data[i]); }
+        return out;
+    }
+
+    Vec<T>* sliceFrom(int from) { return this.slice(from, len); }
+    Vec<T>* sliceTo(int to) { return this.slice(0, to); }
+
+    /* The first `n` elements, as a new vector. */
+    Vec<T>* take(int n) { return this.slice(0, n); }
+
+    /* Room for `n` elements in total, without changing the length. The way to
+     * pre-size a vector that is about to be filled, and the replacement for a
+     * second constructor: `new Vec<int>()` then `v.reserve(1000)` is one
+     * allocation instead of ten doublings. */
+    void reserve(int n) {
+        if (n > cap) { this.Grow(n); }
+    }
+
+    /* Drops the first `n` elements, shifting the rest down. One pass and no
+     * reallocation, where removeAt(0) in a loop would be a pass each. */
+    void drop(int n) {
+        if (n <= 0) { return; }
+        if (n >= len) { this.clear(); return; }
+        for (var i = 0; i + n < len; i++) { data[i] = data[i + n]; }
+        len = len - n;
+    }
+
+    /* indexOf, contains and remove are deliberately absent.
+     *
+     * They would be a linear scan comparing elements with `==`, and `==` is the
+     * wrong question for a class: it is identity, so `indexOf` on a
+     * `Vec<Vec<int>>` would only ever find an element that *is* the one handed
+     * to it, never one that looks like it. Three methods that answer the wrong
+     * question for half the element types a Vec can hold is worse than not
+     * having them, so they are not here: use an index, or a Map keyed on the
+     * value.
+     *
+     * The elements joined with `sep`, the same spelling the string `join` has. */
+    string join(string sep) {
+        var out = new StringBuilder();
+        for (var i = 0; i < len; i++) {
+            if (i > 0) { out.append(sep); }
+            out.append(to_text(data[i]));
+        }
+        return out.toString();
+    }
+
+    string toString() { return this.join(", "); }
+
+    /* Grows the buffer to at least `want` elements, doubling, and copies.
+     *
+     * The whole amortized argument lives here. `want` is honoured when it
+     * exceeds the doubling, so a caller that knows it needs a thousand elements
+     * does not get sixteen reallocations on the way there. */
+    void Grow(int want) {
+        if (want <= cap) { return; }
+        var next = cap * 2;
+        if (next < want) { next = want; }
+        var bigger = new T[next];
+        for (var i = 0; i < len; i++) { bigger[i] = data[i]; }
+        data = bigger;
+        cap = next;
+    }
+}
+
+/* ---- Map<K,V> ----
+ *
+ * Open addressing with linear probing, over parallel arrays.
+ *
+ * The alternatives, and why they lose here. Separate chaining needs a linked list
+ * per bucket, and in a language with no generics on fields that means another
+ * generic class per key type -- so the chaining version of this was two generic
+ * classes and an allocation per bucket. A `Vec<Vec<K>>` of indices is the same
+ * idea without the second class and costs the same per-bucket allocation. Linear
+ * probing needs none of that: three flat arrays, growth is three `new`s, and a
+ * removal is a state change rather than list surgery.
+ *
+ * The costs are the ones every open-addressed table has. A slot is three words
+ * and a probe touches two of them, so a lookup is more cache misses than a
+ * chained one. Holding the load factor at or below 0.7 bounds it, and that is
+ * what `set` grows on. */
+
+class Map<K,V> {
+    K[] keys;
+    V[] vals;
+    /* 0 = never used, 1 = live, 2 = removed.
+     *
+     * A separate array rather than a sentinel *value* of type K, and that is the
+     * one decision in this file worth arguing for. Every other shape needs a value
+     * that cannot be a real key -- 0, the empty string, the null pointer -- and
+     * that is a restriction on the caller that is invisible until it bites: a Map
+     * with a zero key silently loses the entry. A third array costs 8 bytes a
+     * slot and one line to read, and in exchange every type in the language is a
+     * usable key, with no exceptions and nothing to document. */
+    int[] state;
+    int cap;  /* a power of two, so the modulo is a mask */
+    int len;  /* live entries */
+    int used; /* live + removed: what growth is decided from */
+
+    Map() {
+        cap = 16;
+        keys = new K[cap];
+        vals = new V[cap];
+        state = new int[cap];
+        len = 0;
+        used = 0;
+    }
+
+    /* Room for `n` entries, rounded up to a power of two. The single-constructor
+     * rule again: a second `Map(int)` would be a second method with the same
+     * name and the first would win every call. */
+    void reserve(int n) {
+        if (n > cap) { this.Rehash(n); }
+    }
+
+    int size() { return len; }
+    bool isEmpty() { return len == 0; }
+
+    /* The slot count, so a caller deciding whether a Map is the right shape can
+     * see how full it is. */
+    int slots() { return cap; }
+    string load() { return len + " entries in " + cap + " slots"; }
+
+    bool has(K k) { return this.Find(k) >= 0; }
+
+    /* The value for `k`, or `fallback` if there is none.
+     *
+     * Not a Result. "Absent" is the ordinary state of a lookup rather than an
+     * exceptional one, and making every read pay for a match would be the wrong
+     * default -- most reads of a map are for a key that is there. `getOr` below
+     * is the "compute a default and remember it" case, which is a different
+     * operation and says so. */
+    V get(K k, V fallback) {
+        var s = this.Find(k);
+        if (s < 0) { return fallback; }
+        return vals[s];
+    }
+
+    /* The value for `k`, inserting `make` first if it is not already there. The
+     * shape of a cache, a memo table, and a counter that starts at one. `make` is
+     * an expression so it is only evaluated when there is something to store. */
+    V getOr(K k, V make) {
+        var s = this.Find(k);
+        if (s >= 0) { return vals[s]; }
+        this.set(k, make);
+        return make;
+    }
+
+    void set(K k, V v) {
+        /* An existing key is overwritten in place: no growth, no count change.
+         * Finding it first is what stops a second entry appearing for a key that
+         * is already there, which is the failure mode of inserting at the first
+         * free slot on the probe run without looking. */
+        var s = this.Find(k);
+        if (s >= 0) {
+            vals[s] = v;
+            return;
+        }
+        /* Grow before inserting, never after: a table past its load factor has
+         * probe sequences long enough to dominate the cost of the insert. */
+        if ((used + 1) * 10 > cap * 7) { this.Rehash(cap * 2); }
+        var i = this.SlotFor(k);
+        if (state[i] == 0) { used++; }
+        state[i] = 1;
+        keys[i] = k;
+        vals[i] = v;
+        len++;
+    }
+
+    /* Removes the entry for `k`, and says whether there was one.
+     *
+     * The slot becomes *removed*, not free. Emptying it would break any probe
+     * sequence passing through it: a later key probing past here would stop at
+     * the empty slot and conclude it was absent, and the map would report fewer
+     * entries than it was holding. */
+    bool remove(K k) {
+        var i = this.Find(k);
+        if (i < 0) { return false; }
+        state[i] = 2;
+        len--;
+        return true;
+    }
+
+    void clear() {
+        cap = 16;
+        keys = new K[cap];
+        vals = new V[cap];
+        state = new int[cap];
+        len = 0;
+        used = 0;
+    }
+
+    /* The keys, in slot order.
+     *
+     * Neither insertion order nor sorted, and neither is free: insertion order
+     * would mean a separate index array kept in step with every rehash, and
+     * sorted would mean an ordering between arbitrary K that `==` cannot give.
+     * A map that pretended to be ordered would be lying about something a caller
+     * would come to rely on, so keysOf says what it is and a caller who needs an
+     * order sorts the result. */
+    Vec<K>* keysOf() {
+        var out = new Vec<K>();
+        out.reserve(len);
+        for (var i = 0; i < cap; i++) {
+            if (state[i] == 1) { out.push(keys[i]); }
+        }
+        return out;
+    }
+
+    /* The values, in slot order. */
+    Vec<V>* values() {
+        var out = new Vec<V>();
+        out.reserve(len);
+        for (var i = 0; i < cap; i++) {
+            if (state[i] == 1) { out.push(vals[i]); }
+        }
+        return out;
+    }
+
+    string join(string sep) {
+        var ks = this.keysOf();
+        return ks.join(sep);
+    }
+
+    /* The entries as `key=value`, in slot order. For printing a map whole, which
+     * is what a failed assertion about one wants. Reads the arrays directly
+     * rather than going through get, because every live slot by definition has a
+     * value and a lookup here would only cost a probe to find out. */
+    string toString() {
+        var out = new StringBuilder();
+        var first = true;
+        for (var i = 0; i < cap; i++) {
+            if (state[i] != 1) { continue; }
+            if (!first) { out.append(", "); }
+            first = false;
+            out.append(to_text(keys[i]));
+            out.append("=");
+            out.append(to_text(vals[i]));
+        }
+        return out.toString();
+    }
+
+    /* The slot holding `k`, or -1. The probe is the whole algorithm: walk from
+     * the hash, one slot at a time, until the key matches or the run ends at a
+     * never-used slot. A *removed* slot does not end the run, which is the only
+     * reason removing is not simply emptying. */
+    int Find(K k) {
+        var i = hash_of(k, cap);
+        for (var probe = 0; probe < cap; probe++) {
+            if (state[i] == 0) { return -1; }
+            if (state[i] == 1 && keys[i] == k) { return i; }
+            i = (i + 1) & (cap - 1);
+        }
+        return -1;
+    }
+
+    /* The slot `k` belongs in: the first never-used or removed one on its probe
+     * run. Taking the first *either* is what keeps two keys that hash alike from
+     * landing in the same place, and a key reinserted over its own tombstone
+     * gets the earliest free slot on the run -- which is where its probe expects
+     * to find it. */
+    int SlotFor(K k) {
+        var i = hash_of(k, cap);
+        for (var probe = 0; probe < cap; probe++) {
+            if (state[i] == 0 || state[i] == 2) { return i; }
+            i = (i + 1) & (cap - 1);
+        }
+        return i;
+    }
+
+    /* Rehashes into a table of `newCap` slots, keeping the live entries.
+     *
+     * `used` is what decides when this runs, not `len`. A table full of
+     * tombstones probes as badly as a full one while holding almost nothing, so a
+     * program that adds and removes in a loop would otherwise slow to a crawl and
+     * never recover. The removed slots are dropped here, which is the only time
+     * they ever are. */
+    void Rehash(int newCap) {
+        if (newCap < 16) { newCap = 16; }
+        /* A power of two, because the probe wraps with a mask rather than a
+         * modulo. Rounding up here rather than at the call site means `reserve`
+         * takes any number and the invariant still holds. */
+        var p = 1;
+        while (p < newCap) { p = p * 2; }
+        newCap = p;
+        var oldK = keys;
+        var oldV = vals;
+        var oldS = state;
+        var oldCap = cap;
+        cap = newCap;
+        keys = new K[cap];
+        vals = new V[cap];
+        state = new int[cap];
+        var keep = len;
+        len = 0;
+        used = 0;
+        for (var i = 0; i < oldCap; i++) {
+            if (oldS[i] != 1) { continue; }
+            var j = this.SlotFor(oldK[i]);
+            state[j] = 1;
+            keys[j] = oldK[i];
+            vals[j] = oldV[i];
+            len++;
+            used++;
+        }
+        if (keep != len) {
+            print("Map.rehash lost an entry: kept " + keep + ", rehashed " + len);
+            die(1);
+        }
+    }
+}
+
+/* The two type-directed questions -- a value's text form, and a value's hash --
+ * are the built-ins `to_text` and `hash_of`, not functions written here.
+ *
+ * That is not a shortcut around a missing feature, it is the whole reason they
+ * work. A generic function *can* ask what it was instantiated with: inside a
+ * `Map<int,V>` instance the key really is an `int`, and `typeof` says so. But
+ * every branch after that test still has to type-check, and the branch that would
+ * have run -- `char_at(k, i)` on a key that turned out to be a string -- is
+ * exactly the branch that would not compile for a key that is not. Writing the
+ * dispatch in Z means writing code that cannot compile for half the types it is
+ * meant to handle. The code generator has the same information and none of the
+ * restriction, so the question is asked there.
+ *
+ * It also means the standard library declares no interface that `int` and
+ * `string` would both have to satisfy, and `to_text` on a `Vec<SomeStruct>`
+ * prints the struct's name rather than failing to compile. */
+
+/* ---- Set<T> ----
+ *
+ * A `Map<T,bool>` would work and would be one class fewer. It is not what is
+ * here, because a set that can be asked for a value is a set that will be:
+ * `get` with a fallback is a `contains` that does not read like one, and the pair
+ * of questions a set answers is `has` and nothing else. A wrapper over Map would
+ * be four methods long, and four too few. */
+class Set<T> {
+    /* A pointer, because a class *is* a reference. This is the one thing a
+     * declaration has to spell out that a method's return type does not: `Set`
+     * as a return type already means `Set*`, but a field and a parameter are
+     * types like any other, and the class type is a different type from its
+     * pointer. Writing `Map<T,bool> inner` is a type error, and saying so is
+     * better than silently copying a handle. */
+    Map<T,bool>* inner;
+
+    Set() { inner = new Map<T,bool>(); }
+
+    /* Room for `n` elements. */
+    void reserve(int n) { inner.reserve(n); }
+
+    int size() { return inner.size(); }
+    bool isEmpty() { return inner.isEmpty(); }
+    bool has(T v) { return inner.has(v); }
+
+    void add(T v) { inner.set(v, true); }
+
+    /* Adds `v` and says whether it was new. The shape a caller wants when
+     * counting distinct things: `if (seen.addIfNew(x)) { count++; }` */
+    bool addIfNew(T v) {
+        if (inner.has(v)) { return false; }
+        inner.set(v, true);
+        return true;
+    }
+
+    bool remove(T v) { return inner.remove(v); }
+    void clear() { inner.clear(); }
+
+    /* The elements, in slot order -- the order keysOf gives, because it is the
+     * same Map underneath. */
+    Vec<T>* values() { return inner.keysOf(); }
+
+    /* Every element of `other` is in this one. */
+    bool containsAll(Set<T>* other) {
+        var theirs = other.values();
+        for (var i = 0; i < theirs.size(); i++) {
+            if (!this.has(theirs.at(i))) { return false; }
+        }
+        return true;
+    }
+
+    /* The same elements as `other`, in any order. */
+    bool isEqualTo(Set<T>* other) {
+        return this.size() == other.size() && this.containsAll(other);
+    }
+
+    string toString() { return this.values().join(", "); }
+}

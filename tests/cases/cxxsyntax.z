@@ -1,0 +1,84 @@
+// `auto` and `->`: the C++-flavored spellings added in v2 slice 1.
+//
+// `auto` is a synonym for `var`, so both are exercised side by side rather than
+// separately, which is the property that matters -- a program written with one
+// keeps working when the other exists.
+struct Point {
+    int x;
+    int y;
+    int Sum() { return x + y; }
+    int Scaled(int k) { return (x + y) * k; }
+}
+
+class Counter {
+    int n;
+    Counter() { n = 0; }
+    int Get() { return n; }
+    void Bump() { n = n + 1; }
+}
+
+int main() {
+    // auto and var produce the same thing.
+    auto a = 3;
+    var b = 4;
+    print(a + b);
+
+    // auto with no initializer type to lean on: inference is the same path.
+    auto s = "hi";
+    auto f = 1.5;
+    auto t = true;
+    print(s);
+    print(f);
+    print(t);
+
+    // `->` on a struct pointer: a field.
+    auto p = new Point(3, 4);
+    auto q = &p;
+    print(q->x);
+    print(q->y);
+
+    // `->` on a struct pointer: a method with no arguments.
+    print(q->Sum());
+
+    // `->` on a struct pointer: a method with arguments.
+    print(q->Scaled(10));
+
+    // `.` still works, and agrees with `->` on the same value.
+    print(q.x);
+    print(p.Sum());
+
+    // `->` through a pointer held two levels of indirection away, so the
+    // desugaring is exercised on a pointer-to-pointer rather than a fresh
+    // `&p`.
+    auto pp = &q;
+    print(pp->x);
+    print(pp->Sum());
+
+    // A write through `->` lands in the same place a write through `.` does.
+    q->x = 100;
+    print(p.x);
+    p.y = 200;
+    print(q->y);
+    print(q->Sum());
+
+    // `->` on a class pointer, including a method with no arguments.
+    auto c = new Counter();
+    auto cp = &c;
+    cp->Bump();
+    cp->Bump();
+    cp->Bump();
+    print(cp->Get());
+
+    // A method with a receiver passed as a parameter, reached with `->`.
+    struct Take {
+        int v;
+        void Set(int n) { v = n; }
+        int Get() { return v; }
+    }
+    auto t2 = new Take(0);
+    auto tp = &t2;
+    tp->Set(77);
+    print(tp->Get());
+    print(t2.v);
+    return 0;
+}
