@@ -33,17 +33,34 @@ typedef struct Var {
     int is_param;   /* a parameter rather than a local statement */
     int is_synth;   /* compiler-generated, or in a body we never see: not warnable */
     Span decl_span; /* where the name was written, for diagnostics */
+    int needs_drop; /* the type owns something, so the scope must destroy it */
     struct Var *next;
 } Var;
 
 typedef struct Scope {
     Var *vars;
+    /* Sibling link for the deferred unused-local report: every closed scope is
+     * chained onto the parser so `report_unused_locals` can walk them after the
+     * destructor pass has decided which values count as used. */
+    struct Scope *warn_next;
+    /* The locals in this scope that own something, in declaration order. Their
+     * destructors run when the scope ends, so this is what the drop list is
+     * built from. Held per scope rather than per function because the order is
+     * per scope: a nested block's values go before the enclosing block's. */
+    Var **drops;
+    int ndrops;
+    int drop_cap;
     struct Scope *parent;
     /* The outermost scope of a function body. Name lookup stops here: a variable
      * declared outside a function lives in a different frame, so naming it from
      * inside would read a slot holding something else entirely. */
     int is_fn_body;
 } Scope;
+
+/* How deep the open-scope stack may get. A block nested this far is already past
+ * the parser's own recursion limit, so a program that reaches it is rejected
+ * before it can overflow the stack rather than after. */
+#define MAX_DROP_SCOPES 128
 
 /* A function declared inside another function, mapping the name the program
  * writes to the symbol emitted for it. */
@@ -202,6 +219,19 @@ typedef struct {
     int lam_owner;  /* func id of the lambda being parsed */
     int lam_active; /* nonzero while inside a lambda body */
     int cur_owner;  /* func id of the function whose frame is being built */
+
+    /* The scopes currently open in the function being parsed, innermost last.
+     * A `return` or a `?` has to destroy what every one of them owns, and it is
+     * three blocks deep when it is parsed, so the scopes have to be reachable
+     * from wherever the exit is. Reset at a function boundary -- a lambda body
+     * is a separate function with its own frame, and its scopes are not the
+     * enclosing function's. */
+    Scope *open_scopes[MAX_DROP_SCOPES];
+    int nopen;
+
+    /* Every scope that has been closed, newest first, for the deferred
+     * unused-local report. See scope_pop. */
+    Scope *popped_scopes;
 
     /* The `Result` type the expression being parsed is expected to have, when
      * that is known: the declared type of a variable's initializer, the return
@@ -760,24 +790,51 @@ static Type *parse_type_at(Parser *p, int i) {
 static void scope_push(Parser *p) {
     Scope *s = arena_alloc(p->arena, sizeof *s);
     s->vars = NULL;
+    s->drops = NULL;
+    s->ndrops = 0;
+    s->drop_cap = 0;
     s->parent = p->scope;
     p->scope = s;
+    /* Tracked so a `return` or a `?` can reach every scope it is leaving. A
+     * scope beyond the limit is still pushed, so parsing continues and the
+     * program gets its other diagnostics rather than nothing. */
+    if (p->nopen < MAX_DROP_SCOPES) p->open_scopes[p->nopen++] = s;
+    else
+        diag_error(cur(p)->span, "blocks nested more than %d deep", MAX_DROP_SCOPES);
 }
 
 /* Leaves a scope, reporting any variable declared in it that was never
  * referenced. Runs whether or not the block turned out to be well-formed, so a
- * program that fails to compile still gets its warnings. */
+ * program that fails to compile still gets its warnings.
+ *
+ * The reporting is deferred: whether a variable is unused is not known until the
+ * destructor pass has run, because a value that owns something is used by
+ * existing -- the destructor call at the end of its scope is a real use, and
+ * `var t = new T()` written only to be destroyed is not dead code. Warning here
+ * told every such declaration it was unused, on every program with a
+ * destructor in it. The scope is parked on `popped_scopes` instead and
+ * `report_unused_locals` walks it once the drops are known. */
 static void scope_pop(Parser *p) {
     Scope *s = p->scope;
     if (s == NULL)
         return;
-    if (warn_enabled(W_UNUSED_LOCAL)) {
-        for (Var *v = s->vars; v != NULL; v = v->next) {
+    s->warn_next = p->popped_scopes;
+    p->popped_scopes = s;
+    if (p->nopen > 0 && p->open_scopes[p->nopen - 1] == s) p->nopen--;
+    p->scope = s->parent;
+}
+
+/* Warns about every local left over from a closed scope that nothing ended up
+ * reading. Runs after the destructor pass, which is what marks an owned value
+ * used. Same order the warnings used to come out in: innermost scope first,
+ * and within a scope, last declaration first. */
+static void report_unused_locals(Parser *p) {
+    if (!warn_enabled(W_UNUSED_LOCAL))
+        return;
+    for (Scope *s = p->popped_scopes; s != NULL; s = s->warn_next)
+        for (Var *v = s->vars; v != NULL; v = v->next)
             if (!v->used && !v->is_synth)
                 diag_warn(W_UNUSED_LOCAL, v->decl_span, "'%s' is declared but never used", v->name);
-        }
-    }
-    p->scope = s->parent;
 }
 
 static Var *lookup_var_local(Parser *p, const char *name) {
@@ -1013,6 +1070,33 @@ static int declare_var(Parser *p, const char *name, Type *type) {
     v->is_synth = 0;
     v->decl_span = cur(p)->span;
     v->used = 0;
+    /* A value that owns something is used by existing: the destructor call at
+     * the end of its scope is a real use of the variable, and a program that
+     * declares a value purely to be destroyed would otherwise be told it is
+     * dead code. */
+    /* Whether this owns something is decided when the scope closes, not here.
+     *
+     * A type can be incomplete at the point a local is declared: a class body
+     * is parsed in a later pass than the functions that mention it, so a
+     * `var t = new T()` written before `class T` has a destructor registered
+     * yet. Deciding here made the answer depend on declaration order, which is
+     * exactly the kind of thing that is correct in one test and wrong in
+     * another. At the end of the scope every type the function mentioned is
+     * complete, so the question has one answer. */
+    v->needs_drop = 0;
+    {
+        Scope *sc = p->scope;
+        if (sc->ndrops == sc->drop_cap) {
+            int ncap = sc->drop_cap == 0 ? 4 : sc->drop_cap * 2;
+            Var **nd = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Var *));
+            if (sc->drops != NULL)
+                memcpy(nd, sc->drops, (size_t)sc->ndrops * sizeof(Var *));
+            sc->drops = nd;
+            sc->drop_cap = ncap;
+        }
+        /* Recorded in declaration order; `build_drops` walks it backwards. */
+        sc->drops[sc->ndrops++] = v;
+    }
     v->next = p->scope->vars;
     p->scope->vars = v;
     return base;
@@ -5033,6 +5117,260 @@ static int stmt_terminates(Stmt *s) {
     }
 }
 
+
+
+/* ---- the destructor pass ----
+ *
+ * Runs after the whole program is parsed, because whether a value owns
+ * something is not knowable while parsing: a class body is read in a later pass
+ * than the functions that mention it, so deciding at the declaration made the
+ * answer depend on the order the parser happened to walk the file.
+ *
+ * Two shapes are expanded:
+ *
+ *   - a block's own scope, at the end of the block
+ *   - a `return`, for the function body's scope, immediately before the return
+ *
+ * A `return` inside a block already sits after that block's own drops, because
+ * the block's are appended at its end and the return is inside it -- so the
+ * order is inner block first, function body last, which is the order the frame
+ * implies.
+ */
+
+/* The destructor calls for one scope, in reverse declaration order, or NULL when
+ * the scope owns nothing.
+ *
+ * The receiver is the value itself for a class (a class variable already holds
+ * the object pointer, which is what a method's `this` is) and the address of the
+ * frame slot for a struct. Passing the address of a class's *pointer* variable
+ * would make `this` point at the frame slot rather than the object, so every
+ * field read inside a destructor came back as whatever the frame held. */
+static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
+    if (sc == NULL || sc->ndrops == 0)
+        return NULL;
+    int n = sc->ndrops;
+    Stmt **items = arena_alloc_array(p->arena, (size_t)n, sizeof(Stmt *));
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        Var *v = sc->drops[n - 1 - i];
+        v->needs_drop = type_needs_drop(v->type);
+        if (v->needs_drop)
+            v->used = 1; /* existing is a use: see the unused-local warning */
+        if (!v->needs_drop)
+            continue;
+        Type *st = v->type;
+        if (is_kind(st, TK_PTR) && is_kind(st->base, TK_STRUCT))
+            st = st->base;
+        if (!is_kind(st, TK_STRUCT) || st->sdef == NULL)
+            continue;
+        StructDef *sd = st->sdef;
+        StructMethod *m = struct_find_dtor(sd);
+        if (m == NULL)
+            continue; /* a field was owning, not the value itself */
+        char *mang = arena_alloc(p->arena, strlen(sd->name) + strlen(m->name) + 3);
+        snprintf(mang, strlen(sd->name) + strlen(m->name) + 3, "%s__%s", sd->name, m->name);
+        Expr *slot = new_expr(p, E_VAR, v->decl_span);
+        slot->name = arena_strdup(p->arena, v->name);
+        slot->slot = v->offset;
+        slot->type = v->type;
+        Expr *recv;
+        if (sd->is_class) {
+            recv = slot;
+            recv->type = type_ptr(p->ty, st);
+        } else {
+            recv = new_expr(p, E_ADDR, v->decl_span);
+            recv->lhs = slot;
+            recv->type = type_ptr(p->ty, st);
+        }
+        Expr **args = arena_alloc_array(p->arena, 1, sizeof(Expr *));
+        args[0] = recv;
+        Expr *call = new_expr(p, E_CALL, v->decl_span);
+        call->name = mang;
+        call->args = args;
+        call->nargs = 1;
+        call->type = type_void(p->ty);
+        Stmt *s = new_stmt(p, S_EXPR, v->decl_span);
+        s->expr = call;
+        items[k++] = s;
+    }
+    if (k == 0)
+        return NULL;
+    Stmt *b = new_stmt(p, S_BLOCK, span);
+    b->items = items;
+    b->nitems = k;
+    return b;
+}
+
+/* The destructor calls for every scope a `return` is leaving, innermost scope
+ * first and, within a scope, reverse declaration order -- or NULL when the
+ * return leaves nothing that owns.
+ *
+ * The walk starts at the scope the return was written in and climbs to the
+ * function's parameter scope, which it stops *at* rather than destroys: a
+ * parameter belongs to the caller, and a callee that tore it down would be
+ * freeing something it was only lent. Everything between is this function's
+ * own, and a return unwinds all of it.
+ *
+ * This is a chain rather than a single scope because a return is not always in
+ * the function's outermost block. A `return` inside a nested block has to
+ * destroy that block's values as well as the function's, and it is the
+ * *innermost* scope's values that are destroyed first. */
+static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span) {
+    if (inner == NULL)
+        return NULL;
+    /* Count first so the list is allocated once. Upper bound: one destructor
+     * call per recorded local across every scope on the chain. */
+    int cap = 0;
+    for (Scope *sc = inner; sc != NULL; sc = sc->parent)
+        cap += sc->ndrops;
+    if (cap == 0)
+        return NULL;
+    Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
+    int k = 0;
+    for (Scope *sc = inner; sc != NULL && !sc->is_fn_body; sc = sc->parent) {
+        Stmt *d = build_drops(p, sc, span);
+        if (d == NULL)
+            continue;
+        for (int j = 0; j < d->nitems; j++)
+            items[k++] = d->items[j];
+    }
+    if (k == 0)
+        return NULL;
+    Stmt *b = new_stmt(p, S_BLOCK, span);
+    b->items = items;
+    b->nitems = k;
+    return b;
+}
+
+/* Appends `d`'s statements to a statement list, returning the new list and
+ * count through the pointers so a caller's list can grow. */
+static void list_append(Parser *p, Stmt ***items_io, int *n_io, Stmt *d) {
+    if (d == NULL || d->nitems == 0)
+        return;
+    int n = *n_io;
+    int m = n + d->nitems;
+    Stmt **out = arena_alloc_array(p->arena, (size_t)m, sizeof(Stmt *));
+    for (int i = 0; i < n; i++)
+        out[i] = (*items_io)[i];
+    for (int i = 0; i < d->nitems; i++)
+        out[n + i] = d->items[i];
+    *items_io = out;
+    *n_io = m;
+}
+
+/* Expands every block scope and every return in a statement list. Inner first,
+ * so a nested block's values are destroyed before the enclosing block's.
+ *
+ * Every statement is visited exactly once. A block is rewritten where it stands
+ * -- its drops are appended to its own item list -- and the walk then moves on,
+ * because what gets appended is a run of destructor calls and none of those is
+ * itself a block or a return. Revisiting the block is not merely wasteful:
+ * `build_drops` answers from the scope, not from the block, so a second call
+ * returns the same drops again and appends them a second time, forever. */
+static int emit_drops_in(Parser *p, Stmt **items, int n) {
+    int emitted = 0;
+    for (int i = 0; i < n; i++) {
+        Stmt *s = items[i];
+        if (s == NULL)
+            continue;
+        if (s->kind == S_BLOCK) {
+            /* Inside before outside, so the inner block's drops are already
+             * sitting at the end of its own body when the enclosing ones land. */
+            if (s->own_scope != NULL)
+                emitted += emit_drops_in(p, s->items, s->nitems);
+            Stmt *d = build_drops(p, s->own_scope, s->span);
+            if (d != NULL) {
+                list_append(p, &s->items, &s->nitems, d);
+                emitted += d->nitems;
+            }
+            continue;
+        }
+        if (s->kind == S_RETURN) {
+            Stmt *d = build_drops_chain(p, s->ret_scope, s->span);
+            if (d != NULL) {
+                /* The body scope is recorded on the return, so this statement is
+                 * a block after the rewrite: the drops and the return. */
+                Stmt **out = arena_alloc_array(p->arena, (size_t)(d->nitems + 1), sizeof(Stmt *));
+                for (int j = 0; j < d->nitems; j++)
+                    out[j] = d->items[j];
+                out[d->nitems] = s;
+                Stmt *b = new_stmt(p, S_BLOCK, s->span);
+                b->items = out;
+                b->nitems = d->nitems + 1;
+                items[i] = b;
+                emitted += d->nitems;
+            }
+            continue;
+        }
+        if (s->kind == S_FUNC) {
+            /* A function is an item of the program list, and its body is where
+             * every local it owns lives. Without this the pass never looks
+             * inside a function at all. */
+            if (s->fbody != NULL) {
+                if (s->fbody->kind == S_BLOCK)
+                    emitted += emit_drops_in(p, s->fbody->items, s->fbody->nitems);
+                else {
+                    Stmt *wrap[1];
+                    wrap[0] = s->fbody;
+                    emitted += emit_drops_in(p, wrap, 1);
+                }
+                /* The fall-off-the-end exit. Every `return` above destroys the
+                 * body scope on its way out, but a function that ends without
+                 * one -- every void function -- reaches the end of its body with
+                 * the body's locals still live, and those are the values that
+                 * leak. The body's own block is never visited by the S_BLOCK
+                 * arm above (the walk is over its items), so this is the only
+                 * place the body's own drop list can be emitted.
+                 *
+                 * When the last statement is a return these land after it and
+                 * are unreachable, which costs a few bytes of assembly and
+                 * nothing else: the return path already has its own copy. */
+                if (s->fbody->kind == S_BLOCK) {
+                    Stmt *d = build_drops(p, s->fbody->own_scope, s->fbody->span);
+                    if (d != NULL) {
+                        list_append(p, &s->fbody->items, &s->fbody->nitems, d);
+                        emitted += d->nitems;
+                    }
+                }
+            }
+            s->owns_drops = emitted > 0;
+            continue;
+        }
+        if (s->kind == S_IF || s->kind == S_WHILE || s->kind == S_FOR) {
+            /* Each arm goes through the list walk as a single item rather than
+             * being descended into directly. A block body is itself a scope, and
+             * its own drops are appended by the S_BLOCK arm above; passing its
+             * *items* instead walked straight past it, so a value declared in a
+             * loop body or an `if` body was never destroyed -- and a loop body
+             * is re-entered every iteration, so that is the one place a leak
+             * accumulates rather than happening once. */
+            if (s->body != NULL) {
+                Stmt *wrap[1];
+                wrap[0] = s->body;
+                emitted += emit_drops_in(p, wrap, 1);
+            }
+            if (s->orelse != NULL) {
+                Stmt *wrap[1];
+                wrap[0] = s->orelse;
+                emitted += emit_drops_in(p, wrap, 1);
+            }
+            if (s->for_init != NULL) {
+                Stmt *wrap[1];
+                wrap[0] = s->for_init;
+                emitted += emit_drops_in(p, wrap, 1);
+            }
+        }
+    }
+    return emitted;
+}
+
+/* Runs the destructor pass over the whole program. */
+static void emit_drops(Parser *p, Stmt *program) {
+    if (program == NULL)
+        return;
+    emit_drops_in(p, program->items, program->nitems);
+}
+
 static Stmt *parse_block(Parser *p) {
     Span start = cur(p)->span;
     if (!match(p, T_LBRACE)) {
@@ -5060,10 +5398,30 @@ static Stmt *parse_block(Parser *p) {
     if (!match(p, T_RBRACE)) {
         diag_error(cur(p)->span, "expected '}' to close block");
     }
+    /* The destructor calls for this scope go after its last statement, so the
+     * drops run on the way out rather than being a second entry into the
+     * block. This is the *normal* exit; the early exits are handled where they
+     * are parsed, because a `return` three blocks down still has to destroy
+     * everything those three blocks own. */
+    /* A function body's own scope is not dropped here. Its locals live until
+     * the function returns, and every exit from the body is a `return` (or a
+     * `?` propagating out of it), and each of those already emits the drops for
+     * the scopes it is leaving -- the body scope among them. Emitting them a
+     * second time at the end of the block put them after the return, where they
+     * are dead code, and a destructor that runs only on the fallthrough path
+     * runs on almost no path at all. */
+    /* The scope this block introduced is recorded on the block; the destructor
+     * calls are appended afterwards by emit_drops, once every type the program
+     * mentions is complete. Deciding here made the answer depend on whether a
+     * class had been read yet, which is a question about the order the parser
+     * walks the file rather than about the program -- a `var t = new T()`
+     * written above `class T` came out owning nothing. */
+    Scope *own = p->scope;
     scope_pop(p);
     Stmt *s = new_stmt(p, S_BLOCK, start);
     s->items = items;
     s->nitems = n;
+    s->own_scope = own;
     return s;
 }
 
@@ -6941,6 +7299,19 @@ static Expr *parse_match(Parser *p, Span start) {
     return e;
 }
 
+/* The method name a type's destructor is registered under, and the symbol it is
+ * emitted as. The two differ: `~` cannot appear in an assembler symbol, so the
+ * emitted name spells it `dtor`. Keeping one function responsible means the
+ * parse side and the emit side cannot disagree about which method *is* the
+ * destructor. */
+static char *dtor_name(Parser *p, StructDef *sd) {
+    if (sd == NULL)
+        return NULL;
+    char *n = arena_alloc(p->arena, strlen(sd->name) + 6);
+    snprintf(n, strlen(sd->name) + 6, "dtor%s", sd->name);
+    return n;
+}
+
 static Stmt *parse_struct_decl(Parser *p, int is_class) {
     Span start = cur(p)->span;
     advance(p); /* 'struct' or 'class' */
@@ -7028,6 +7399,48 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         prescan_struct_members(p, sd, p->pos, written);
     }
     while (!at(p, T_RBRACE) && !at(p, T_EOF)) {
+        /* `~Type() { ... }` -- a destructor.
+         *
+         * A destructor is a method named after the type with a `~` in front, and
+         * it takes no arguments: the value being destroyed is the receiver, and
+         * there is nothing else to say. The emitted symbol has the `~` spelled
+         * `dtor` because `~` is not a character the assembler accepts in a
+         * symbol name, and a mangling that does not assemble is not a
+         * mangling.
+         *
+         * It is parsed before the member-type lookahead because `~` is not a
+         * type token and would otherwise be reported as a bad member type. */
+        if (at(p, T_TILDE)) {
+            Span dspan = cur(p)->span;
+            advance(p);
+            if (!at(p, T_IDENT)) {
+                diag_error(cur(p)->span, "expected a type name after '~'");
+                break;
+            }
+            char *dname = cur(p)->text;
+            advance(p);
+            if (sd == NULL || strcmp(dname, name) != 0) {
+                diag_error(dspan,
+                           "a destructor is named after its type: expected '~%s' but got '~%s'",
+                           name, dname);
+            }
+            if (!at(p, T_LPAREN)) {
+                diag_error(cur(p)->span, "expected '(' after '~%s'", name);
+                break;
+            }
+            /* One destructor per type. A second one would emit the same symbol
+             * twice and fail in the assembler, which is a worse error than
+             * saying so here. */
+            if (sd != NULL && struct_find_method(sd, dtor_name(p, sd)) != NULL) {
+                diag_error_code(dspan, "duplicate_destructor", "'%s' already has a destructor",
+                                name);
+            }
+            /* `sname` is the *type* the method is registered on, because that
+             * is what the receiver is looked up from; `mname` is the method's
+             * own name, which for a destructor is the mangled spelling. */
+            parse_method(p, sd, name, type_void(p->ty), dtor_name(p, sd), dspan, 0);
+            continue;
+        }
         int mvirtual = 0;
         if (at(p, T_KW_VIRTUAL)) {
             mvirtual = 1;
@@ -7308,6 +7721,18 @@ static Stmt *parse_stmt(Parser *p) {
             }
         }
         expect_semi(p);
+        /* A `return` leaves every scope it is inside, and each of them has to
+         * destroy what it owns first, innermost first. The innermost scope open
+         * here is recorded on the return, and the pass walks up from it to the
+         * function's own parameter scope -- which is where the walk stops,
+         * because a parameter is the caller's value and tearing it down here
+         * would destroy an object this function was only lent.
+         *
+         * The body's locals are in a *different* scope from the parameters, a
+         * block scope pushed for the function body itself. Recording the
+         * function's scope found only the parameters, so a return destroyed
+         * nothing the function had actually declared. */
+        s->ret_scope = p->scope;
         return s;
     }
     case T_LBRACE:
@@ -7395,9 +7820,13 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
     p.toks = toks;
     p.ntoks = ntoks;
     {
-        TypeCtx ctx;
-        typectx_init(&ctx, arena);
-        p.ty = &ctx;
+        /* On the arena, not the stack: the destructor pass runs after the whole
+         * file is read and allocates types through this context, and a
+         * `TypeCtx` on this frame would be a dangling pointer by then -- which
+         * is a segfault in type_ptr with no diagnostic and no output. */
+        TypeCtx *ctx = arena_alloc(arena, sizeof(TypeCtx));
+        typectx_init(ctx, arena);
+        p.ty = ctx;
     }
     p.strings = strings;
     {
@@ -7523,10 +7952,20 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
 
     program->items = items;
     program->nitems = n;
+    /* Destructors are expanded first, once every type is complete -- see the
+     * comment on emit_drops. The order matters: the inliner has to be able to
+     * see the destructor calls to know it must leave the body alone, so a pass
+     * that ran afterwards would find bodies it had already spliced and would
+     * have no way to tell what it had done. Running it second was not merely
+     * late, it meant every destructor call the inliner had already inlined away
+     * was simply gone, and a program with a destructor in an inlined function
+     * ran its destructors never. */
+    emit_drops(&p, program);
     /* Inlining runs over the finished program, so a call is inlinable no matter
      * which order the two functions were written in, and the synthesized entry is
      * a function like any other as far as it is concerned. */
     inline_program(&p, program);
+    report_unused_locals(&p);
     scope_pop(&p);
     return program;
 }
@@ -8788,6 +9227,12 @@ static void inline_program(Parser *p, Stmt *program) {
         for (int i = 0; i < program->nitems; i++) {
             Stmt *it = program->items[i];
             if (it == NULL || it->kind != S_FUNC)
+                continue;
+            /* A body with destructors in it is not inlinable. The spliced copy
+             * would tear down values in the caller's frame, and the callee's own
+             * body would tear the same objects down again at its own exit -- two
+             * destructor runs for one construction. See owns_drops. */
+            if (it->owns_drops)
                 continue;
             InlineCtx ic;
             memset(&ic, 0, sizeof ic);

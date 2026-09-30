@@ -394,6 +394,55 @@ void struct_add_method(TypeCtx *ctx, StructDef *sd, StructMethod *m) {
     sd->methods[sd->nmethods++] = m;
 }
 
+/* Destructors are registered under `dtor<Name>`. See struct_find_dtor. */
+StructMethod *struct_find_dtor(StructDef *sd) {
+    size_t n = strlen(sd->name);
+    char buf[256];
+    if (n + 5 > sizeof buf)
+        return NULL;
+    memcpy(buf, "dtor", 4);
+    memcpy(buf + 4, sd->name, n + 1);
+    return struct_find_method(sd, buf);
+}
+
+int type_needs_drop(Type *t) {
+    if (t == NULL)
+        return 0;
+    if (t->kind == TK_PTR) {
+        /* A pointer to a *class* is a handle on a heap object, and a handle owns
+         * what it points at -- that is the difference between a class and a
+         * struct, and it is why `new Tracked()` has to be destroyed. A pointer
+         * to a *struct* is a borrow: the struct is still in its owner's frame,
+         * so the pointer owns nothing and dropping through it would free
+         * something the frame still holds. */
+        if (t->base != NULL && t->base->kind == TK_STRUCT && t->base->sdef != NULL &&
+            t->base->sdef->is_class)
+            return struct_find_dtor(t->base->sdef) != NULL;
+        return 0;
+    }
+    if (t->kind == TK_ARRAY) {
+        /* An array owns its elements, so an array of a class is owning. A fixed
+         * array of a struct is not, unless the element is. */
+        if (t->base == NULL)
+            return 0;
+        if (type_needs_drop(t->base))
+            return 1;
+        return t->base->kind == TK_STRUCT && t->base->sdef != NULL && t->base->sdef->is_class &&
+               struct_find_dtor(t->base->sdef) != NULL;
+    }
+    if (t->kind != TK_STRUCT)
+        return 0;
+    StructDef *sd = t->sdef;
+    if (sd == NULL)
+        return 0;
+    if (struct_find_dtor(sd) != NULL)
+        return 1;
+    for (int i = 0; i < sd->nfields; i++)
+        if (type_needs_drop(sd->fields[i].type))
+            return 1;
+    return 0;
+}
+
 StructMethod *struct_find_method(StructDef *sd, const char *name) {
     for (int i = 0; i < sd->nmethods; i++)
         if (strcmp(sd->methods[i]->name, name) == 0)

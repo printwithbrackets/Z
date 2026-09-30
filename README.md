@@ -18,6 +18,20 @@ slice 2, each replaced by a diagnostic that says to use an `interface` instead.
 `class`, `virtual` and the vtable stay, because a class stored in an interface
 is still dispatched through one.
 
+**Destructors are half-built, and one half is a live footgun.** A `~Type()`
+method runs when a value's scope ends, in reverse declaration order. It works on
+scope end, on `return` (unwinding every open scope, innermost first), per
+iteration in a loop body, and at the end of a void function. It does **not** yet
+run on `?`, on `break` or `continue`, and it does not tear down an owning field
+of a type with no destructor of its own. The compiler has no allocator hook, so
+a destructor is a side-effect hook only — it can `print`, `close` or decrement,
+but there is no `free` to call.
+
+**Do not return a local that owns something.** `R* f() { var mine = new R(5);
+return mine; }` destroys `mine` on the way out, so the caller reads freed memory
+and then drops it a second time. Slice 3's move semantics are what fix this;
+until they land, return a fresh allocation instead of a named local.
+
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no
 inheritance, and threads that cannot data-race because ownership makes sharing

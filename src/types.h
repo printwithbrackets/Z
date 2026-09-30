@@ -242,6 +242,20 @@ struct UnionDef {
 /* Registers a method and a property backing field on a struct. */
 void struct_add_method(TypeCtx *ctx, StructDef *sd, StructMethod *m);
 StructMethod *struct_find_method(StructDef *sd, const char *name);
+
+/* The destructor of a type, or NULL. Registered under the mangled name, since
+ * `~` cannot appear in an assembler symbol. */
+StructMethod *struct_find_dtor(StructDef *sd);
+
+/* True when a value of this type owns something and must be destroyed when its
+ * scope ends.
+ *
+ * A type owns if it declares a destructor, or if any field of it does -- the
+ * default teardown destroys each owning field, so `struct Pair { Vec<int> a; }`
+ * is owning without saying so. It is computed from the type's own declaration
+ * rather than declared, because a flag a programmer can set is a flag that can
+ * be set wrong, and getting it wrong here is a double free. */
+int type_needs_drop(Type *t);
 StructDef *struct_method_owner(StructDef *sd, const char *name);
 void struct_add_prop(TypeCtx *ctx, StructDef *sd, const char *name, Type *type, int offset);
 void struct_add_prop_field(TypeCtx *ctx, StructDef *sd, const char *name, Type *type);

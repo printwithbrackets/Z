@@ -1,0 +1,38 @@
+in scope
+drop
+3
+drop
+2
+drop
+1
+left scope
+5
+hello
+inner scope
+drop
+5
+outer still live
+drop
+4
+nested done
+calling makeOne
+drop
+6
+made
+7
+drop
+10
+drop
+9
+109
+drop
+101
+drop
+102
+loop done
+drop
+201
+break done
+end of main
+drop
+7

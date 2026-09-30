@@ -140,6 +140,7 @@ int main(int argc, char **argv) {
         "cxxsyntax",
         "rangefor",
         "addrof_field",
+        "destructors",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);

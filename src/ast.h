@@ -160,10 +160,24 @@ struct Stmt {
     /* S_BLOCK and the top-level program */
     Stmt **items;
     int nitems;
+    /* S_BLOCK: the scope this block introduced, so the destructor pass can find
+     * the locals it owns. NULL on a block that shares its enclosing scope. */
+    struct Scope *own_scope;
+    /* S_RETURN: the scope the `return` was written in -- the innermost one it
+     * is leaving. Its locals die first; the pass then walks up the parent chain
+     * for the rest, stopping at the function's parameter scope. */
+    struct Scope *ret_scope;
     /* S_BLOCK: when nonzero, codegen emits this label after the block's items,
      * and it is what an S_LEAVE inside the block jumps to. Zero on every block
      * that is not an inlined body. */
     int inl_label;
+
+    /* S_FUNC: the destructor pass put at least one destructor call in this
+     * body. The inliner declines such a function: a spliced body would run its
+     * teardown in the caller's frame, where the value it destroys is a frame
+     * slot the inliner has renumbered, and the callee's own copy would then run
+     * the same drops a second time at its own exit. */
+    int owns_drops;
 
     /* LICM: loop-invariant subexpressions hoisted out of this loop, computed
      * once before the loop and read from a frame slot inside it. */

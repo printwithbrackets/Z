@@ -1,0 +1,91 @@
+// Destructors: `~Type() { ... }` runs when a value's scope ends.
+//
+// Z has no `delete`. A value is destroyed by its scope ending, which is checked
+// rather than remembered and cannot be spelled wrong. Order is reverse
+// declaration order, and it runs on *every* way out of the scope, not just
+// falling off the end -- which is the whole reason this is worth having over a
+// `free` the programmer has to remember to call before each of five exits.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() {
+        print("drop");
+        print(this.id);
+    }
+}
+
+// A destructor reads a field of the object, so this also checks the receiver is
+// the object rather than a frame slot that happens to hold it.
+
+int main() {
+    // Normal exit: drops run in reverse declaration order, 3 then 2 then 1.
+    {
+        var a = new Tracked(1);
+        var b = new Tracked(2);
+        var c = new Tracked(3);
+        print("in scope");
+    }
+    print("left scope");
+
+    // A type with no destructor costs nothing to declare and nothing to run.
+    {
+        var x = 5;
+        print(x);
+        var y = "hello";
+        print(y);
+    }
+
+    // Nested scopes drop innermost first.
+    {
+        var outer = new Tracked(4);
+        {
+            var inner = new Tracked(5);
+            print("inner scope");
+        }
+        print("outer still live");
+    }
+    print("nested done");
+
+    // A function that returns still destroys what it owns. This is the case a
+    // `free` the programmer has to remember gets wrong: there are five exits
+    // from a function and the one you forget is the one that leaks.
+    print("calling makeOne");
+    var made = makeOne();
+    print("made");
+    print(made.id);
+
+    // A `return` from inside a nested scope destroys both scopes' values, inner
+    // first.
+    var got = early(9);
+    print(got);
+
+    // A loop that runs to completion drops each iteration's value as it ends,
+    // rather than all of them at the end of the function.
+    for (var i = 1; i <= 2; i = i + 1) {
+        var scoped = new Tracked(100 + i);
+    }
+    print("loop done");
+
+    // `break` leaves the loop, so the values the iteration owns go with it.
+    for (var j = 1; j <= 5; j = j + 1) {
+        var earlyExit = new Tracked(200 + j);
+        if (j == 2) { break; }
+    }
+    print("break done");
+
+    print("end of main");
+    return 0;
+}
+
+Tracked* makeOne() {
+    var local = new Tracked(6);
+    return new Tracked(7);
+}
+
+int early(int v) {
+    var kept = new Tracked(v);
+    {
+        var inner = new Tracked(v + 1);
+    }
+    return v + 100;
+}

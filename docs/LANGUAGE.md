@@ -104,6 +104,13 @@ guaranteed](#memory-safety-what-is-and-is-not-guaranteed).
 
 ### 2. Destruction: destructors run on every exit path, including `?`
 
+**[partial]** A first cut of this section is in the compiler: the destructor
+syntax, reverse-declaration-order teardown, and the `return` and scope-end paths
+work today. The `?`, `break`, `continue` and panic paths do not, a type with no
+destructor of its own does not tear down its owning fields, and there is no move
+semantics yet, so returning an owned local frees it out from under the caller.
+See [What exists today](#what-exists-today-v1-appendix) for the exact split.
+
 A `~Type()` method runs when the value's scope ends, **in reverse declaration
 order**, and on every path out of that scope: falling off the end, `return`,
 `break`, `continue`, a `?` that propagates, and a panic.
@@ -1084,7 +1091,35 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 71 golden tests, 66 error tests, `make test-all` across four `-O` levels
+- 168 tests in all — 88 golden, 71 diagnostic, and 9 runtime, interop, warning
+  and module tests — with `make test-all` green across four `-O` levels
+
+**Destructors, partially.** `~Type()` is parsed, registered, and expanded into
+calls at the end of a scope. What works, and is tested:
+
+- teardown in reverse declaration order when a block ends
+- teardown on `return`, unwinding *every* open scope, innermost scope first
+- teardown per iteration for a value declared in a loop body
+- teardown at the end of a void function that falls off its last statement
+- both `class` (the receiver is the value) and `struct` (the receiver is the
+  address of the frame slot)
+- nothing at all for a type with no destructor and no owning field, and an owning
+  local does not draw an unused-local warning, because the destructor call is a
+  real use of it
+- a function whose body owns something is declined by the inliner, so its drops
+  cannot be spliced into a caller's frame
+
+What does not work yet, and so does **not** satisfy the rest of section 2:
+
+- `?` propagating out of a function that owns a value leaks it, silently
+- `break` and `continue` out of a scope skip its teardown
+- a type with no destructor of its own does not destroy its owning fields; the
+  recursive default teardown of this section is not implemented
+- there is no allocator hook and no `free`, so a destructor can only run side
+  effects — it cannot actually release memory. The heap is still the GC's
+- there is no move semantics, so `return` of an owned local destroys the value
+  before the caller can use it, and the caller's own drop then runs a second
+  time. Move semantics are what make this correct, and they are not built
 
 Read [LANGUAGE-v1.md](LANGUAGE-v1.md) for the v1 specification in full, including
 the sections this document does not repeat: optimization passes in detail,
