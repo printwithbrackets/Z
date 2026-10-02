@@ -242,18 +242,36 @@ complain — and it was the golden tests that caught it rather than a crash.
 
 ### Slice 3 — GC to RAII, and ownership (3–4 weeks)
 
-The largest slice and the one with the named risk.
+The largest slice and the one with the named risk. The first two bullets are
+done, and the rest of the slice is waiting on them.
 
-- **Delete** `z_gc_init`, the mark-sweep collector, `gc_mark`, `gc_mark_roots`,
-  `gc_collect`, and the `gc_enabled` / `gc_threshold` state in
-  `runtime/z_rt.c:26-111`.
-- **Replace** `z_newarray` with a plain allocator and add `z_free`.
+- **done — Delete** `z_gc_init`, the mark-sweep collector, `gc_mark`,
+  `gc_mark_roots`, `gc_collect`, and the `gc_enabled` / `gc_threshold` state in
+  `runtime/z_rt.c`. `z_gc_init` and `z_gc` are gone from the runtime and the
+  `call z_gc_init` is gone from the generated entry function.
+- **done — Replace** `z_newarray` with a plain allocator and add `z_free`.
+  `z_alloc` is `malloc` with a fatal allocation failure, and `z_free` is its
+  counterpart. `z_str_free` and `z_array_free` are the two header-aware
+  spellings the compiler will call once ownership is tracked.
+  **Nothing calls them yet**, so every allocation a program makes is still live
+  at exit. That is deliberate and it is the reason the collector had to go
+  before the ownership rules rather than after: a destructor that freed
+  unconditionally would double-free every value a program copied, so the
+  frees cannot be wired up until a copy of an owning value is a diagnostic
+  instead of a silent alias.
+  The swap also found a bug the collector had been hiding: both headers are
+  stored immediately *before* the payload, and both allocators were writing
+  them at `ptr - 16`, which was only in bounds because the collector's own
+  24-byte block header left room for them. They are stored inside the block now.
 - **`string`** keeps its `{len, cap}` header — that decision was made for the C
   boundary and is still right — and gains a destructor. Copies become deep.
+  `cap == 0` is what distinguishes a literal from a heap string, so a literal
+  can be stored and copied anywhere without anything trying to free it, and every
+  heap string allocates at least one byte so the two can never be confused.
 - **`Vec<T>`** stops being a `class` and becomes a `{data, len, cap}` struct
   with a destructor. It is no longer an aliasing trap: `var b = a` is either a
   copy or an error, never a surprise.
-- **Closures** box captures in `z_box` (`runtime/z_rt.c:215`) and those boxes are
+- **Closures** box captures in `z_box` (`runtime/z_rt.c`) and those boxes are
   freed when the closure is. A closure that outlives its frame therefore needs
   its captures to live as long as it does, which is `Rc` — the same cell, with a
   count. This is a small change to the runtime and the reason the counter
@@ -1000,18 +1018,22 @@ note: 'a' was moved at main.z:6:5
 note: assign into it instead, or use `var b = move(a);` to transfer ownership
 ```
 
-## Runtime & GC
+## Runtime & allocator
 
 **[now]** A small C runtime embedded in the compiler and linked into every
 program. Provides `z_newarray` (heap arrays with a length header), `z_concat`,
-`z_itoa`. All heap allocation goes through a **conservative mark-sweep garbage
-collector**: it scans the C stack and spilled registers for words that point into
-the managed heap, marks reachable objects transitively, and frees the rest.
+`z_itoa`. All heap allocation goes through **a plain allocator**: `z_alloc` is
+`malloc` and a failed allocation is fatal with a message, `z_free` is `free`, and
+a string's header is stored inside its own block rather than in front of it.
 
 **[cut]** The collector, in slice 3: `z_gc_init`, `gc_mark`, `gc_mark_roots`,
-`gc_collect`, `gc_enabled`, `gc_threshold`. What replaces it:
+`gc_collect`, `gc_enabled`, `gc_threshold`. Done. What replaces it:
 
 - `z_alloc(size)` / `z_free(p)` — a plain allocator, no collection, no roots.
+  **[now]**
+- `z_str_free(s)` / `z_array_free(p)` — the two header-aware spellings, which
+  subtract the header before freeing and skip a literal, whose `cap` is 0.
+  **[now]**, but nothing calls them yet: see [Slice 3](#slice-3--gc-to-raii-and-ownership).
 - `z_box` becomes an `Rc` cell with a count.
 - Destructors emitted by the compiler run on every scope exit.
 - A leak report at exit for allocations the runtime can account for. A cycle is a
@@ -1087,7 +1109,7 @@ is real and tested today, and stays:
 - interfaces, classes with vtables, **`override` and inheritance** — the last of
   these is what slice 2 removes
 - monomorphized generic functions and generic classes
-- a conservative mark-sweep GC — slice 3 removes it
+- a plain `malloc` allocator with a `free` to match it, no collector
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
@@ -1115,8 +1137,11 @@ What does not work yet, and so does **not** satisfy the rest of section 2:
 - `break` and `continue` out of a scope skip its teardown
 - a type with no destructor of its own does not destroy its owning fields; the
   recursive default teardown of this section is not implemented
-- there is no allocator hook and no `free`, so a destructor can only run side
-  effects — it cannot actually release memory. The heap is still the GC's
+- a destructor still cannot release memory. `z_free`, `z_str_free` and
+  `z_array_free` all exist and are correct, but the compiler does not call them,
+  so **every allocation a program makes is live until the program exits**. The
+  frees cannot be wired up before move semantics, because a copy of an owning
+  value is currently a silent alias and freeing both copies is a double free
 - there is no move semantics, so `return` of an owned local destroys the value
   before the caller can use it, and the caller's own drop then runs a second
   time. Move semantics are what make this correct, and they are not built

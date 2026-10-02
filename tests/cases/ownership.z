@@ -1,0 +1,64 @@
+// There is no collector. Memory comes from malloc, and a value's destructor
+// gives it back when its scope ends -- so the property worth testing is that
+// nothing depends on a collection happening to not run, and that a header is
+// stored inside its own allocation rather than in front of it.
+
+int main() {
+    // Live data survives an unbounded number of allocations. Under a collector
+    // this was the test that a collection could not lose it. Without one it is
+    // the test that no allocation is quietly reusing a block something else
+    // still holds.
+    var keep = "kept";
+    var arr = new int[3];
+    arr[0] = 11; arr[1] = 22; arr[2] = 33;
+    var i = 0;
+    while (i < 20000) {
+        var scratch = "garbage" + i;
+        /* Read, so the allocation is not dead code -- and never true, so the
+         * scratch string is built and dropped exactly as intended. */
+        if (scratch.length == 99999999) { print("never"); }
+        i = i + 1;
+    }
+    print(keep);
+    print(arr[0] + arr[1] + arr[2]);
+
+    /* A string's { len, cap } header is written *inside* its allocation.
+     *
+     * This used to be written sixteen bytes before whatever the allocator
+     * returned, which was in bounds only because the mark-sweep collector
+     * prefixed every block with a 24-byte header and the string header fitted in
+     * the slack behind it. Deleting the collector turned that into a write of up
+     * to sixteen bytes outside the block.
+     *
+     * `split` is what caught it: the empty piece between two separators is a
+     * fresh allocation, and it sits next to the pieces around it, so a header
+     * written past the end of one lands in the header of another and its length
+     * comes back as whatever the allocator left there. The symptom was a `join`
+     * of the result computing a length in the terabytes. */
+    var parts = split("one,two,,three", ",");
+    print(parts.length);
+    print(parts[0].length);
+    print(parts[1].length);
+    print(parts[2].length);   // 0: the empty piece is a real string, not null
+    print(parts[3].length);
+    print(join(",", parts));
+
+    // Every piece of a one-character split is a one-byte allocation, so this is
+    // the tightest packing of headers the allocator ever sees.
+    var bytes = split("abcd", "");
+    print(bytes.length);
+    print(bytes[0].length + bytes[1].length + bytes[2].length + bytes[3].length);
+
+    // A string built one piece at a time, each piece its own allocation, and
+    // then read back after every one of them has been made.
+    var grown = "";
+    var j = 0;
+    while (j < 500) {
+        grown = grown + "ab";
+        j = j + 1;
+    }
+    print(grown.length);   // 1000
+    print(grown[0]);
+    print(grown[999]);
+    return 0;
+}

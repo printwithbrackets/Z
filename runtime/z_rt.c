@@ -1,134 +1,39 @@
-/* Z runtime: a conservative mark-sweep tracing garbage collector plus the
- * array/string helpers the compiler emits calls to.
+/* Z runtime: the allocator, the array/string helpers, and the library the
+ * compiler emits calls to.
  *
- * The collector is *conservative*: it scans the machine stack and the spilled
- * register set for words that look like pointers into the managed heap. This
- * means the compiler needs no shadow-stack bookkeeping — every live Z
- * pointer is, by construction, a machine word somewhere on the stack or in a
- * callee-saved register. It is linked into every compiled program. */
-#include <setjmp.h>
+ * There is no collector. Memory comes from `malloc` and goes back when the
+ * owning value's scope ends, which is what the destructors are for: the
+ * compiler decides which values own something and calls the destructor at
+ * every exit from the scope that declared it. That trade is deliberate -- a
+ * tracing collector has to guess what is live from a conservative scan of the
+ * machine stack, and a wrong guess is silent corruption, while a destructor
+ * either runs or does not and the compiler can see which. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct GcBlock {
-    struct GcBlock *next;
-    size_t size;        /* payload bytes */
-    unsigned char mark; /* 1 = reachable this cycle */
-} GcBlock;
-
-/* Each managed allocation is a GcBlock header followed by `size` payload
- * bytes. The payload pointer handed to the program is header+1. */
-#define PAYLOAD(b) ((void *)((char *)(b) + sizeof(GcBlock)))
-#define BLOCK_OF(p) ((GcBlock *)((char *)(p) - sizeof(GcBlock)))
-
-static GcBlock *gc_head = NULL;
-static size_t gc_bytes = 0;
-static size_t gc_threshold = 1u << 20; /* collect after ~1 MiB live */
-static char *gc_stack_base = NULL;     /* high-water mark of the C stack */
-static int gc_enabled = 1;
-
-static void gc_mark(void *p);
-
-static int gc_is_heap_ptr(void *p) {
-    for (GcBlock *b = gc_head; b != NULL; b = b->next) {
-        void *lo = PAYLOAD(b);
-        if ((char *)p >= (char *)lo && (char *)p < (char *)lo + b->size)
-            return 1;
-    }
-    return 0;
-}
-
-static void gc_mark_ptrs_in(const void *lo, const void *hi) {
-    const char *c = (const char *)lo;
-    c = (const char *)((uintptr_t)c & ~(uintptr_t)7); /* align to 8 */
-    for (; c + 8 <= (const char *)hi; c += 8) {
-        void *candidate;
-        memcpy(&candidate, c, sizeof candidate);
-        if (candidate != NULL && gc_is_heap_ptr(candidate))
-            gc_mark(candidate);
-    }
-}
-
-static void gc_mark(void *p) {
-    if (gc_is_heap_ptr(p) == 0)
-        return;
-    GcBlock *b = BLOCK_OF(p);
-    if (b->mark)
-        return;
-    b->mark = 1;
-    /* Trace interior references: an object may point to other objects. */
-    gc_mark_ptrs_in(PAYLOAD(b), (char *)PAYLOAD(b) + b->size);
-}
-
-/* Conservative root scan: spilled registers + the live C stack region. */
-static void gc_mark_roots(void) {
-    jmp_buf regs;
-    setjmp(regs); /* forces live registers into the jmp_buf */
-    gc_mark_ptrs_in(&regs, (char *)&regs + sizeof regs);
-
-    char here;
-    const char *lo = &here;
-    const char *hi = gc_stack_base ? gc_stack_base : lo;
-    if (hi > lo) {
-        gc_mark_ptrs_in(lo, hi);
-    }
-}
-
-static void gc_collect(void) {
-    if (gc_head == NULL)
-        return;
-    for (GcBlock *b = gc_head; b != NULL; b = b->next)
-        b->mark = 0;
-    gc_mark_roots();
-    GcBlock **link = &gc_head;
-    size_t live = 0;
-    while (*link != NULL) {
-        GcBlock *b = *link;
-        if (b->mark) {
-            live += b->size;
-            link = &b->next;
-        } else {
-            *link = b->next;
-            gc_bytes -= b->size;
-            free(b);
-        }
-    }
-    gc_threshold = live * 2;
-    if (gc_threshold < (1u << 20))
-        gc_threshold = 1u << 20;
-}
-
-/* Records the high-water mark of the C stack. The compiler calls this at
- * program entry (in the generated entry function) so the conservative root
- * scan covers every live Z frame, not just the deepest allocation site. */
-void z_gc_init(void) {
-    char probe;
-    gc_stack_base = &probe;
-}
-
-static void *gc_alloc(size_t size) {
+/* The allocator every managed allocation goes through.
+ *
+ * A failed allocation is fatal with a message rather than a null return: every
+ * caller in here dereferences the result immediately, and threading a null
+ * check through the string library to reach a program that cannot report it
+ * would be a check nothing on the path could act on. */
+void *z_alloc(size_t size) {
     if (size == 0)
         size = 1;
-    if (gc_stack_base == NULL) {
-        char probe;
-        gc_stack_base = &probe; /* fallback if init was not called */
-    }
-    if (gc_enabled && gc_bytes + size > gc_threshold)
-        gc_collect();
-    GcBlock *b = (GcBlock *)malloc(sizeof(GcBlock) + size);
-    if (b == NULL) {
+    void *p = malloc(size);
+    if (p == NULL) {
         fprintf(stderr, "z: out of memory\n");
         exit(1);
     }
-    b->size = size;
-    b->mark = 0;
-    b->next = gc_head;
-    gc_head = b;
-    gc_bytes += size;
-    return PAYLOAD(b);
+    return p;
 }
+
+/* Releases an allocation from z_alloc. `p` is the payload pointer, so a
+ * block with a header is freed by subtracting that header first -- see
+ * `z_str_free` and `z_array_free`, which are the two the compiler calls. */
+void z_free(void *p) { free(p); }
 
 /* ---- compiler-facing runtime API ---- */
 
@@ -213,7 +118,7 @@ long z_trig(long a, int want_cos) {
  * makes assignment through a closure visible to the enclosing function, rather
  * than writing to a copy nobody else can see. */
 void *z_box(long v) {
-    long *cell = (long *)gc_alloc(sizeof(long));
+    long *cell = (long *)z_alloc(sizeof(long));
     *cell = v;
     return cell;
 }
@@ -221,7 +126,7 @@ void *z_box(long v) {
 /* A one-word box for a float, which arrives in xmm0 rather than a general
  * register. */
 void *z_box_f(double v) {
-    double *cell = (double *)gc_alloc(sizeof(double));
+    double *cell = (double *)z_alloc(sizeof(double));
     *cell = v;
     return cell;
 }
@@ -230,14 +135,14 @@ void *z_box_f(double v) {
 void *z_box_n(long n) {
     if (n < 8)
         n = 8;
-    return gc_alloc((size_t)n);
+    return z_alloc((size_t)n);
 }
 
 /* Allocates the cell a bound method pointer refers to: the code address and
  * the receiver, side by side. GC-managed, so the receiver is traced and stays
  * alive for as long as the pointer does. */
 void *z_newbinding(void *code, void *recv) {
-    void **cell = (void **)gc_alloc(2 * sizeof(void *));
+    void **cell = (void **)z_alloc(2 * sizeof(void *));
     cell[0] = code;
     cell[1] = recv;
     return cell;
@@ -248,7 +153,7 @@ void *z_newbinding(void *code, void *recv) {
  * different things: here they are an itab and a receiver, not a code address and
  * a receiver. The layout, and so the collector's tracing of it, is identical. */
 void *z_newiface(void *itab, void *recv) {
-    void **cell = (void **)gc_alloc(2 * sizeof(void *));
+    void **cell = (void **)z_alloc(2 * sizeof(void *));
     cell[0] = itab;
     cell[1] = recv;
     return cell;
@@ -311,6 +216,20 @@ long z_isqrt(long n) {
  * builder's append amortized: a buffer that has room takes the bytes where they
  * are, and only reallocates when it is full. `cap` is also why `+` cannot grow
  * in place -- see z_concat.
+ *
+ * `cap == 0` means the bytes are *static*: the string is a literal, laid out in
+ * the executable's .rodata by the code generator, and there is nothing to free.
+ * Every heap string therefore allocates at least one byte, which is what keeps
+ * the two cases apart without a flag word. A field that is only "not zero when
+ * static" is the kind of implicit invariant that rots the first time someone
+ * adds a path that builds an empty string on the heap, so the allocation floor
+ * is here rather than spread across every constructor.
+ *
+ * That is also the property that makes a literal safe to hand around: a literal
+ * can be stored in any number of values, copied, and returned from a function,
+ * and none of those owns anything. A heap string that reaches a variable is
+ * owned by exactly one, and `z_str_free` is what makes that a rule rather than
+ * an intention.
  */
 typedef struct ZStrHdr {
     long len;
@@ -318,6 +237,17 @@ typedef struct ZStrHdr {
 } ZStrHdr;
 
 #define ZH(b) ((ZStrHdr *)((char *)(b) - sizeof(ZStrHdr)))
+
+/* Releases a string's bytes, if it has any.
+ *
+ * The compiler calls this from the destructor of every `string`-typed value when
+ * its scope ends. A literal has `cap == 0` and is skipped, so storing one in a
+ * local costs nothing at run time and cannot fault on the way out. */
+void z_str_free(char *s) {
+    if (s == NULL || ZH(s)->cap == 0)
+        return;
+    z_free((char *)s - sizeof(ZStrHdr));
+}
 
 /* The length in bytes. A NULL string is the empty string, so `len(null)` is 0
  * rather than a crash -- the same reading every other function here takes. */
@@ -335,10 +265,24 @@ char *z_str_buf_new(long cap);
 static char *zstr_alloc_impl(long cap) {
     if (cap < 0)
         cap = 0;
-    char *p = (char *)gc_alloc(sizeof(ZStrHdr) + (size_t)cap + 1);
-    ZStrHdr *h = ZH(p);
+    /* One byte minimum, so `cap` is never 0 on the heap and a heap string is
+     * always distinguishable from a literal. See the header comment. */
+    if (cap < 1)
+        cap = 1;
+    /* The header goes in the block, not in front of it. It used to be written
+     * sixteen bytes *before* whatever the allocator returned, which was only in
+     * bounds because the collector's own 24-byte block header left room for it:
+     * the header of one string was stored in the slack of the block before it.
+     * A plain allocator has no slack, and the string header became a write of
+     * up to sixteen bytes outside the allocation. `split` was the first program
+     * to notice -- the empty piece between two separators is a fresh
+     * allocation right next to its neighbour, and the neighbour's length came
+     * back as garbage. */
+    char *base = (char *)z_alloc(sizeof(ZStrHdr) + (size_t)cap + 1);
+    ZStrHdr *h = (ZStrHdr *)base;
     h->len = 0;
     h->cap = cap;
+    char *p = base + sizeof(ZStrHdr);
     p[0] = '\0';
     return p;
 }
@@ -400,25 +344,35 @@ void z_str_bounds_fail(long idx, long len) { bounds_fail("string", idx, len); }
  * The elements are zeroed. `new T[n]` is documented and used as "n elements,
  * all zero" -- `foreach` over a fresh array is expected to yield n zeroes, and
  * every growable collection starts by handing out a `new T[cap]` and filling in
- * what it needs. Getting that by accident is the problem: it worked only
- * because a fresh malloc from an untouched page happens to read as zero, so the
- * day the collector recycled a block the first read of a new array returned
- * whatever the last user of those bytes left there. */
+ * what it needs.
+ *
+ * The count is stored in the block rather than in front of it, for the reason
+ * `zstr_alloc_impl` gives: writing it before the allocator's own pointer put it
+ * outside the allocation, and only the collector's block header had been hiding
+ * that. */
 void *z_newarray(long count, long elemsize) {
     if (count < 0)
         count = 0;
     size_t payload = (size_t)count * (size_t)elemsize;
-    unsigned char *base = (unsigned char *)gc_alloc(sizeof(long) + payload);
+    unsigned char *base = (unsigned char *)z_alloc(sizeof(long) + payload);
     *(long *)base = count;
     memset(base + sizeof(long), 0, payload);
     return base + sizeof(long);
 }
 
-/* Allocates a zero-initialized class object of `size` bytes (GC-managed). */
+/* Releases a heap array from `z_newarray`. The payload pointer is what the
+ * program holds, so the length header comes off first. */
+void z_array_free(void *p) {
+    if (p == NULL)
+        return;
+    z_free((char *)p - sizeof(long));
+}
+
+/* Allocates a zero-initialized class object of `size` bytes. */
 void *z_newobj(long size) {
     if (size < 0)
         size = 0;
-    unsigned char *p = (unsigned char *)gc_alloc((size_t)size);
+    unsigned char *p = (unsigned char *)z_alloc((size_t)size);
     for (long i = 0; i < size; i++)
         p[i] = 0;
     return p;
@@ -530,9 +484,6 @@ char *z_itoa(long v) {
     return out;
 }
 
-/* Explicit collection hook (the collector also runs automatically on growth). */
-void z_gc(void) { gc_collect(); }
-
 /* Prints a float, the way Z's `print` does for one.
  *
  * This exists so the compiler never has to make a variadic call itself. Calling
@@ -556,9 +507,9 @@ void z_print_f(double v) { printf("%g\n", v); }
  *
  *   - A NULL argument reads as the empty string, so `len(null)` is 0 rather than
  *     a crash, and `contains(null, "x")` is false.
- *   - Every returned string is gc_alloc'd, so the collector owns it and the
- *     caller never frees. An intermediate stays reachable through a local while
- *     a later allocation can trigger a collection.
+ *   - Every returned string is heap-allocated, so the caller owns it and the
+ *     owning value's destructor releases it. A literal is not heap-allocated and
+ *     has no destructor -- see `z_str_free` for how the two are told apart.
  *   - A length is measured in bytes, not characters. Z has no character type, so
  *     a multi-byte UTF-8 sequence is three bytes, `s[0]` is its first byte, and
  *     `s.length` counts three. That is the same rule indexing has always had;

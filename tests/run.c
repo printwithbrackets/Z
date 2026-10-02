@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
         "fatarrow",
         "opoverload",
         "tern",
-        "gc",
+        "ownership",
         "enum_match",
         "constfold",
         "regalloc",

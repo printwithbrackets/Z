@@ -4,28 +4,37 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Status: v2 slices 1 and 2 are built.** A working end-to-end compiler:
-source → lexer → parser → type checker → x86-64 assembly → native binary. It
-has a real type system, pointers, heap arrays, structs with methods and
-properties, `for`/`foreach` and the range-based `for`, enums with exhaustive
-pattern matching, monomorphized generics, `Vec`/`Map`/`Set`, classes with
-vtables, interfaces, a tracing garbage collector for the heap, IEEE-754
-`float`, closures, nested functions, a standard library, warnings, DWARF debug
-info, and a register-allocating, constant-folding, strength-reducing backend.
+**Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
+A working end-to-end compiler: source → lexer → parser → type checker → x86-64
+assembly → native binary. It has a real type system, pointers, heap arrays,
+structs with methods and properties, `for`/`foreach` and the range-based `for`,
+enums with exhaustive pattern matching, monomorphized generics, `Vec`/`Map`/`Set`,
+classes with vtables, interfaces, a plain `malloc` allocator and a `free` to match
+it, IEEE-754 `float`, closures, nested functions, a standard library, warnings,
+DWARF debug info, and a register-allocating, constant-folding, strength-reducing
+backend.
 
 **Z has no inheritance.** `class B : A`, `override` and `base(...)` were cut in
 slice 2, each replaced by a diagnostic that says to use an `interface` instead.
 `class`, `virtual` and the vtable stay, because a class stored in an interface
 is still dispatched through one.
 
+**The collector is gone, and nothing is freed yet.** Slice 3 deleted
+`z_gc_init` and the whole mark-sweep collector, and replaced `gc_alloc` with a
+plain `z_alloc` over `malloc` plus a `z_free` to match it. Memory now has an
+owner that the compiler can see and nothing has claimed it yet, so **every
+allocation a program makes is still live until the program exits**. `z_str_free`
+and `z_array_free` exist and are correct, but the compiler does not call them
+yet, because a destructor that freed unconditionally would double-free every
+value a program copied. Wiring them up is the next step of slice 3, and it needs
+the move semantics first.
+
 **Destructors are half-built, and one half is a live footgun.** A `~Type()`
 method runs when a value's scope ends, in reverse declaration order. It works on
 scope end, on `return` (unwinding every open scope, innermost first), per
 iteration in a loop body, and at the end of a void function. It does **not** yet
 run on `?`, on `break` or `continue`, and it does not tear down an owning field
-of a type with no destructor of its own. The compiler has no allocator hook, so
-a destructor is a side-effect hook only — it can `print`, `close` or decrement,
-but there is no `free` to call.
+of a type with no destructor of its own.
 
 **Do not return a local that owns something.** `R* f() { var mine = new R(5);
 return mine; }` destroys `mine` on the way out, so the caller reads freed memory
@@ -163,7 +172,7 @@ The compiler is a classic multi-pass pipeline, each pass in its own module:
 | Types | `src/types.c` | pointer-based `Type` graph, sizes/alignment, struct defs |
 | Codegen | `src/codegen.c` | typed AST → x86-64 assembly (System V AMD64 ABI), lvalue/rvalue |
 | Driver | `src/main.c` | orchestrates passes, embeds + links the runtime, invokes `cc` |
-| Runtime | `runtime/z_rt.c` | conservative mark-sweep GC + heap array alloc, the string representation and its library; embedded in the binary |
+| Runtime | `runtime/z_rt.c` | `malloc`-backed allocator plus `z_free`, heap array alloc, the string representation and its library; embedded in the binary |
 | Stdlib | `lib/*.z` | `StringBuilder` and the rest, in Z; embedded and spliced ahead of every unit |
 | Types | `src/types.c` | pointer-based `Type` graph: scalars, pointers, arrays, structs, tagged unions, type params |
 | Arena | `src/arena.c` | bump allocator — all compiler memory freed in one call |
@@ -187,7 +196,7 @@ system assembler — we do not write an ELF encoder.
   a pointer are argument-checked.
 - **M3.11 (done):** **closures** — `(params) => expr` or `(params) => { ... }` as
   an expression, capturing anything in scope where it is written. A closure is a
-  GC cell of `{ code, env }`; captured variables are boxed, so a closure that
+  heap cell of `{ code, env }`; captured variables are boxed, so a closure that
   outlives the frame it was written in keeps working and every closure over the
   same variable sees each write. A function returning one declares
   `closure(params) -> ret`, kept distinct from `fn` because the hidden
@@ -205,7 +214,7 @@ system assembler — we do not write an ELF encoder.
   into the importing one, resolved relative to it, de-duplicated, cycle-checked,
   and with per-file diagnostics.
 - **M3.10 (done):** bound method pointers — `&obj.M` yields a `method(...)`
-  value, a pointer to a GC cell holding `{ code, receiver }` so the receiver
+  value, a pointer to a heap cell holding `{ code, receiver }` so the receiver
   stays alive; a virtual method binds through the vtable. Scalar representation,
   so no aggregate copy machinery is involved.
 - **M4 (done):** `Result<T,E>` + `?`. A `Result` is a two-variant union, so `match`,
@@ -215,7 +224,7 @@ system assembler — we do not write an ELF encoder.
   fallible calls reads as straight-line code. Both parameters must be one word,
   which keeps every `Result` the same sixteen bytes and makes the propagated
   error a copy rather than a conversion.
-- **M5 (done):** tracing GC — a conservative mark-sweep collector in the runtime (scans the C stack + spilled registers), triggered on heap growth; keeps live data, reclaims garbage.
+- **M5 (built, then deleted):** tracing GC — a conservative mark-sweep collector in the runtime (scans the C stack + spilled registers), triggered on heap growth; kept live data and reclaimed garbage. v2 slice 3 removed it, because a conservative scan cannot see a pointer the caller holds only in a register, so it leaked, and its pause time is a property of the program rather than of the code. See [Known miscompiles](#known-miscompiles-found-and-fixed) for what deleting it exposed.
 - **M6a (done):** enums / sum types (tagged unions) + **exhaustive** `match` with payload binding (compile error if a variant is unhandled).
 - **M6b (done):** generic functions via monomorphization (type inference, `T`/`T[]`/`T*` params, struct returns; no runtime generics). **Interfaces/traits** remain.
 - **Match arms shared one scope,** so two arms binding the same payload name collided. Each arm is now its own scope, and `_` is accepted as a binding that is deliberately not read.
@@ -552,6 +561,21 @@ Recorded because each was invisible at the default optimization level, and
   the two spellings that share the token decide by lookup rather than by hope.
   `addrof_field` is the test, and it ends with a method pointer to show the
   other half of the branch still works.
+- **Every string and array header was written outside its own allocation.** Both
+  are `{ len, cap }` and `{ count }` headers stored immediately *before* the
+  payload, and both allocators wrote that header at `ptr - 16` where `ptr` was
+  whatever the allocator returned. That was in bounds only because the collector
+  prefixed every block with a 24-byte `GcBlock` header and the Z header fitted in
+  the slack behind it, so for the life of the collector every string's header was
+  quietly stored inside the *previous* allocation. Deleting the collector (v2
+  slice 3) is what turned it into a write of up to sixteen bytes past the end of
+  the block. `split` is what noticed, because the empty piece between two
+  separators is a fresh allocation sitting against its neighbour, so the write
+  landed in the neighbour's header and `join` computed a total length in the
+  terabytes. The headers are now stored *inside* the block they belong to, and
+  `ownership` is the test. The lesson is the one the zeroed-array comment beside
+  `z_newarray` already made: a hidden dependency on allocator slack is not a
+  safety property, it is a bug that has not been reached yet.
 
 ## Performance
 

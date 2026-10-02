@@ -4395,9 +4395,8 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
      * never collides with the user's own `main`. The `push rbp` realigns the
      * stack for the ABI. */
     if (entry != NULL) {
-        /* Initialize the GC's stack base at the top of the stack, then enter. */
         buf_puts(&out, "  .globl main\nmain:\n  push rbp\n  mov rbp, rsp\n");
-        buf_puts(&out, "  call z_gc_init\n  call z_main\n");
+        buf_puts(&out, "  call z_main\n");
         if (!is_kind(entry->ret_type, TK_INT))
             buf_puts(&out, "  xor eax, eax\n");
         buf_puts(&out, "  pop rbp\n  ret\n");
@@ -4465,24 +4464,25 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
      * -- the length is already known at compile time, which is the one case
      * where knowing it costs nothing.
      *
-     * `cap` equals `len`: a literal is never grown. That is not an
-     * optimization but a safety property, because the code that appends to a
-     * string in place is allowed to do so only where it owns the buffer, and a
-     * literal is in read-only memory. Leaving a literal with spare capacity
-     * would turn a latent write into a segfault.
+     * `cap` is 0, and that is the whole point of the field here rather than a
+     * coincidence: 0 is how the runtime tells a literal from a heap string, and
+     * so a literal is never freed and never grown in place. `cap == len` would
+     * say "no spare capacity" just as well, but it would also be indistinguishable
+     * from a heap string holding exactly its own length -- which is every string
+     * the library returns -- and freeing one of those would be a free() of a
+     * .rodata address.
      *
-     * The label names the *bytes*, sixteen past the header, because that is
-     * the value a Z string holds.
+     * The label names the *bytes*, sixteen past the header, because that is the
+     * value a Z string holds.
      *
      * .rodata, so a literal really is read-only. That is what makes the
-     * cap == len rule above a guarantee rather than a convention: the one code
-     * path that appends in place would fault here instead of quietly scribbling
-     * over a literal, which is the outcome the rule exists to make impossible
-     * and a page fault is the cheapest possible way to find out it was not. */
+     * cap == 0 rule above a guarantee rather than a convention: a literal
+     * handed to the buffer-append path reallocates instead of writing in place,
+     * so the one path that would scribble over a literal cannot reach it. */
     buf_puts(&out, "  .section .rodata\n");
     for (int i = 0; i < strings->count; i++) {
-        buf_printf(&out, ".align 8\n.Lstr%d:\n  .quad %d\n  .quad %d\n  .asciz \"", i,
-                   strings->lens[i], strings->lens[i]);
+        buf_printf(&out, ".align 8\n.Lstr%d:\n  .quad %d\n  .quad 0\n  .asciz \"", i,
+                   strings->lens[i]);
         emit_escaped_n(&cg, strings->items[i], strings->lens[i]);
         buf_puts(&out, "\"\n");
     }
@@ -4504,8 +4504,8 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
         buf_puts(&out, "\"\n");
     }
     buf_puts(&out, ".Lfmt_int:\n  .asciz \"%ld\\n\"\n");
-    buf_puts(&out, ".align 8\n.Ltrue_str:\n  .quad 4\n  .quad 4\n  .asciz \"true\"\n");
-    buf_puts(&out, ".align 8\n.Lfalse_str:\n  .quad 5\n  .quad 5\n  .asciz \"false\"\n");
+    buf_puts(&out, ".align 8\n.Ltrue_str:\n  .quad 4\n  .quad 0\n  .asciz \"true\"\n");
+    buf_puts(&out, ".align 8\n.Lfalse_str:\n  .quad 5\n  .quad 0\n  .asciz \"false\"\n");
 
     /* The debug sections go last, once every function's description is known.
      * They return to .text afterwards so the section note below is not left
