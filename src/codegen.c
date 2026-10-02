@@ -188,8 +188,31 @@ typedef struct {
     const char *cur_sym;
     LocalInfo *locals; /* per-function register-allocation candidates */
     int nlocals, loc_cap;
-    int pool_mask;    /* bitmask of POOL_REGS indices actually used */
-    int loop_marker;  /* incremented once per loop walked; see LocalInfo.loop_marker */
+    int pool_mask;   /* bitmask of POOL_REGS indices actually used */
+    int loop_marker; /* incremented once per loop walked; see LocalInfo.loop_marker */
+    /* Frame slots holding fresh string values that nothing has taken over yet.
+     * A temporary lives until the end of the statement that made it, which is
+     * the smallest scope that is always reached: `print(a + b)` allocates a
+     * string that no variable ever names, and without this it is live until the
+     * program exits.
+     *
+     * They are *pinned*, which is the whole difficulty. The temp stack is
+     * reclaimed by every assignment and call by resetting `temp_top`, so a slot
+     * holding a temporary would be handed to the next expression inside the same
+     * statement and the pointer overwritten before the release reads it. Pinning
+     * makes `temp_alloc` step over them, and the statement that made them unpins
+     * them on the way out so the frame does not grow without bound. */
+    int *pinned;
+    int npinned;
+    int pin_cap;
+    /* Nonzero while generating an expression that may not run at all: the untaken
+     * arm of a ternary, or the right operand of a short-circuited `&&`/`||`. Both
+     * are emitted, so anything that records a temporary would leave a slot holding
+     * the *previous* statement's pointer, and the release at the end of this
+     * statement would free that. Suppressing is the safe direction: the cost when
+     * the branch does run is a leak of one value, against a double free when it
+     * does not. */
+    int no_str_temp;
     uint64_t *rodata; /* 64-bit constants (magic multipliers etc.) */
     int nrodata, ro_cap;
     /* Type names `to_text` needs to print an aggregate, collected as the calls
@@ -327,9 +350,20 @@ static int is_kind(Type *t, TypeKind k) { return t != NULL && t->kind == k; }
 static int is_aggregate(Type *t) { return is_kind(t, TK_STRUCT) || is_kind(t, TK_UNION); }
 
 /* Reserves n consecutive temp slots (for a struct value) and returns the base. */
+static int temp_alloc(CG *cg);
+
 static int temp_alloc_many(CG *cg, int n) {
-    int base = cg->temp_top;
-    cg->temp_top += n;
+    /* Reserve `n` slots. It skips pinned ones for the same reason `temp_alloc`
+     * does: a pinned slot is holding a string temporary that has to survive until
+     * the end of the statement, and a block reservation that walked over one
+     * would hand the caller a range containing a live pointer, which is how an
+     * integer ended up in a slot the statement was about to free. */
+    int base = 0;
+    for (int i = 0; i < n; i++) {
+        int t = temp_alloc(cg);
+        if (i == 0)
+            base = t;
+    }
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
     return base;
@@ -453,6 +487,16 @@ static void load_temp(CG *cg, int t, const char *reg) {
 
 static int temp_alloc(CG *cg) {
     int t = cg->temp_top++;
+    /* A pinned slot is holding a string temporary that has to survive until the
+     * end of the statement, so it cannot be handed out again. Rescan from the
+     * start after a step, because the skipped index may itself be followed by
+     * another pinned one. The list is a handful of entries at most. */
+    for (int i = 0; i < cg->npinned; i++) {
+        if (cg->pinned[i] == t) {
+            t = cg->temp_top++;
+            i = -1;
+        }
+    }
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
     return t;
@@ -2018,7 +2062,70 @@ static int iface_note_itab(CG *cg, StructDef *impl, IfaceDef *idef) {
     return 1;
 }
 
+static void gen_expr_body(CG *cg, Expr *e);
+static void gen_stmt_body(CG *cg, Stmt *s);
+
+/* A fresh string value that nothing has taken over is a temporary, and a
+ * temporary has to be released rather than left for the collector that no longer
+ * exists.
+ *
+ * It is spilled into a frame slot first because the release happens at the end of
+ * the statement while the value was produced somewhere inside it: `print(a + b)`
+ * has a fresh string in argument position and an int as the statement's own
+ * value, so there is no single expression left to attach a release to. The slot
+ * is left allocated (`temp_top` is not restored) so nothing reuses it before the
+ * statement ends, which is what stops a loop body from overwriting the pointer it
+ * is about to free.
+ *
+ * A literal is excluded: it is static data, not an allocation, so there is nothing
+ * to release and a spill would be pure cost. `str_result_owned` is the parser
+ * saying a store or a `return` already took this value over, and freeing it here
+ * as well is the double free this stage exists to prevent. */
+static void note_str_temp(CG *cg, Expr *e) {
+    if (cg->no_str_temp)
+        return;
+    if (e == NULL || e->kind == E_STRING || !is_kind(e->type, TK_STRING))
+        return;
+    if (expr_is_borrowed_string(e) || e->str_result_owned)
+        return;
+    /* An assignment's value is the *destination's* value, so its owner is the
+     * slot rather than the statement. Releasing it here freed the string the
+     * assignment had just stored, which is why a local declared with `var` was
+     * fine and `buf = str_buf_new(0)` was not: the first is an S_VAR with no
+     * expression node of its own, the second is an E_ASSIGN whose type is the
+     * string it just wrote. `move` is the same shape, by definition. */
+    if (e->kind == E_ASSIGN || e->kind == E_MOVE)
+        return;
+    /* A hoisted expression was computed once, before the loop, into a frame slot
+     * of its own. Every iteration reads that same value back, so releasing it per
+     * iteration frees the same allocation over and over -- and `print("ab" +
+     * "cd")` inside a loop is exactly that, since the concatenation of two
+     * literals is loop-invariant and the strength reducer hoists it. The hoisted
+     * slot lives as long as the function, which is the right lifetime for a value
+     * the loop reads on every pass. */
+    if (e->hoisted_slot != 0)
+        return;
+    int t = temp_alloc(cg);
+    store_temp(cg, t);
+    if (cg->npinned == cg->pin_cap) {
+        int ncap = cg->pin_cap == 0 ? 8 : cg->pin_cap * 2;
+        int *nd = realloc(cg->pinned, (size_t)ncap * sizeof(int));
+        if (nd == NULL) {
+            fprintf(stderr, "z: out of memory\n");
+            exit(1);
+        }
+        cg->pinned = nd;
+        cg->pin_cap = ncap;
+    }
+    cg->pinned[cg->npinned++] = t;
+}
+
 static void gen_expr(CG *cg, Expr *e) {
+    gen_expr_body(cg, e);
+    note_str_temp(cg, e);
+}
+
+static void gen_expr_body(CG *cg, Expr *e) {
     /* Loop-invariant code motion may have already computed this into a slot
      * ahead of the enclosing loop; read it back instead of recomputing. While
      * emitting that very computation the guard must not fire. */
@@ -2445,11 +2552,16 @@ static void gen_expr(CG *cg, Expr *e) {
         cg->temp_top = t;
         load_temp(cg, t, "rax");
         buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", lelse);
+        /* Both arms are emitted but only one runs. The value that survives is
+         * the ternary's own, which the caller records once, so recording inside
+         * an arm is not just unnecessary but wrong. */
+        cg->no_str_temp++;
         gen_expr(cg, e->rhs);
         buf_printf(cg->out, "  jmp .L%d\n", lend);
         buf_printf(cg->out, ".L%d:\n", lelse);
         gen_expr(cg, e->args[0]);
         buf_printf(cg->out, ".L%d:\n", lend);
+        cg->no_str_temp--;
         break;
     }
     case E_UNARY:
@@ -2565,13 +2677,20 @@ static void gen_expr(CG *cg, Expr *e) {
             int lend = next_label(cg);
             gen_expr(cg, e->lhs);
             buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", lfalse);
+            /* The right operand may not run. See the ternary: recording inside a
+             * branch that can be skipped reads as recording whatever the slot
+             * held before. */
+            cg->no_str_temp++;
             gen_expr(cg, e->rhs);
+            cg->no_str_temp--;
             buf_printf(cg->out, "  jmp .L%d\n.L%d:\n  mov rax, 0\n.L%d:\n", lend, lfalse, lend);
         } else if (e->op == T_OR) {
             int lend = next_label(cg);
             gen_expr(cg, e->lhs);
             buf_printf(cg->out, "  cmp rax, 0\n  jne .L%d\n", lend);
-            gen_expr(cg, e->rhs);
+            cg->no_str_temp++;
+            gen_expr(cg, e->rhs); /* as above: this side may not run */
+            cg->no_str_temp--;
             buf_printf(cg->out, ".L%d:\n", lend);
         } else {
             long long cr;
@@ -3470,7 +3589,26 @@ static void licm_hoist(CG *cg, Stmt *body, Expr *step, int emit) {
     cg->emitting_hoist = 0;
 }
 
+/* Generates one statement and releases every temporary string it made.
+ *
+ * The list is saved and restored rather than cleared, so an enclosing statement's
+ * own temporaries survive: `f(g())` releases `g()`'s string when the call
+ * statement ends, not when the function does. Loops go through here once per
+ * iteration, which is what makes `for (...) { print(a + b); }` release per
+ * iteration rather than accumulating. */
 static void gen_stmt(CG *cg, Stmt *s) {
+    int saved = cg->npinned;
+    gen_stmt_body(cg, s);
+    for (int i = saved; i < cg->npinned; i++) {
+        load_temp(cg, cg->pinned[i], "rdi");
+        buf_printf(cg->out, "  call z_str_free\n");
+    }
+    /* Unpinned, so the slots go back to the pool for the next statement. The
+     * frame keeps its high-water mark, which is what temp_high is for. */
+    cg->npinned = saved;
+}
+
+static void gen_stmt_body(CG *cg, Stmt *s) {
     /* Temporaries (including struct-return buffers) never live across a
      * statement boundary, so start each statement from a clean temp space. */
     cg->temp_top = 0;

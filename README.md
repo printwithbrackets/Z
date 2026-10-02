@@ -27,13 +27,17 @@ when its scope ends, and releases the previous value when a slot is overwritten.
 `move` is how a value is handed on rather than shared, and reading a moved-from
 variable is a compile error with a note pointing at the move.
 
+A temporary string, meaning one that is computed and never stored into anything,
+is released when the statement that made it ends, so `print(a + b)` inside a loop
+is bounded rather than one leak per iteration.
+
 **Everything else still leaks, and that is stated rather than hidden.** A class
-object from `new C()`, a heap array from `new T[n]`, a closure cell, and a string
-that is *computed but never stored* (so `print(a + b)`) are all still live at
-exit. Nothing double-frees and nothing is freed while still reachable: the whole
-171-test suite runs clean under AddressSanitizer with no use-after-free, no double
-free and no overflow. Leaks are the safe direction to be wrong in, which is why
-the frees are wired up per type rather than all at once.
+object from `new C()`, a heap array from `new T[n]`, a closure cell, and anything
+reachable only through one of those, are all still live at exit. Nothing
+double-frees and nothing is freed while still reachable: the whole 172-test suite
+runs clean under AddressSanitizer with no use-after-free, no double free and no
+overflow. Leaks are the safe direction to be wrong in, which is why the frees are
+wired up per type rather than all at once.
 
 **Destructors are half-built, and one half is a live footgun.** A `~Type()`
 method runs when a value's scope ends, in reverse declaration order. It works on
@@ -540,6 +544,20 @@ Recorded because each was invisible at the default optimization level, and
   then read f's own frame: it compiled and printed 0. Name lookup now stops at a
   function body's outermost scope, which is also what makes a nested function
   non-capturing by construction.
+- **A string temporary was released once per loop iteration instead of once.**
+  `print("ab" + "cd")` in a loop allocates a concatenation no variable ever names,
+  and with the collector gone it had no owner at all. Spilling it to a frame slot
+  and releasing it at the end of the statement fixed the leak and introduced three
+  ways to free the wrong thing, each of which is a crash rather than a wrong
+  answer. A slot on the temp stack is reclaimed by every assignment and call, so
+  the slot holding the pointer was reused by the next expression in the same
+  statement and the release read an integer: those slots are now *pinned*, and
+  `temp_alloc` steps over them. An assignment's value belongs to the slot it wrote,
+  not to the statement, so `buf = str_buf_new(0)` was freeing the buffer it had just
+  stored. And an expression that may not run -- the untaken arm of a ternary, the
+  right operand of a short-circuited `&&` -- is still *emitted*, so recording a
+  temporary there left the slot holding the previous statement's pointer. Each of
+  those was found by ASan on the same program, and `temporaries` is the test.
 - **The ninth queued function replaced the first eight with garbage.**
   `add_pending` grew its array by allocating a new block and never copying the
   old contents, so a program with eight lambdas worked and one with nine crashed

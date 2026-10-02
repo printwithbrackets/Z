@@ -78,6 +78,13 @@ typedef enum {
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 
+/* Does this expression name string bytes that something else owns? Defined in the
+ * parser, where the ownership rules live, and read by the code generator when it
+ * decides whether a value has to be released as a temporary. Declared here rather
+ * than duplicated, because two copies of this answer that disagree would show up
+ * as a use-after-free rather than as anything a compiler could complain about. */
+int expr_is_borrowed_string(const Expr *e);
+
 /* One arm of a `match`: binds the variant's payload fields then runs body. */
 typedef struct {
     VariantDef *variant; /* matched variant (NULL for a `_` wildcard) */
@@ -105,6 +112,10 @@ struct Expr {
      * stops being owned by anyone. Set by the parser alongside the copy, so both
      * halves of "a string slot owns exactly one value" live in one decision. */
     int frees_old;
+    /* Set on a fresh string value that a store or a `return` has taken over, so
+     * the code generator does not also release it as a temporary. The two are the
+     * same value and it has exactly one owner: the slot, or the caller. */
+    int str_result_owned;
     int is_extern; /* E_CALL to an `extern` function: symbol used verbatim */
     /* E_BINARY/E_UNARY: nonzero once loop-invariant code motion has hoisted
      * this expression, holding the frame slot its value was computed into.

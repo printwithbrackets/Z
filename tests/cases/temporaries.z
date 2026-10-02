@@ -1,0 +1,87 @@
+// A string that is computed but never stored into anything is a temporary, and a
+// temporary has to be released when the statement that made it ends. Without
+// that, `print(a + b)` leaks once per call and a loop of them leaks once per
+// iteration, which is the difference between a bounded amount of memory and none.
+
+string twice(string s) { return s + s; }
+
+// Takes a string and gives it back, so the round trip has to be a copy at both
+// ends rather than two names for one allocation.
+string roundTrip(string s) { return s; }
+
+int main() {
+    // A concatenation used only as an argument. There is no variable naming this
+    // value at all, so nothing else could ever release it.
+    for (var i = 0; i < 50; i++) {
+        print("ab" + "cd");
+    }
+
+    // A call result used only as an argument, including one that takes the
+    // previous answer and doubles it.
+    for (var j = 0; j < 50; j++) {
+        print(twice("x"));
+    }
+
+    // Two temporaries in one statement: the call's result and the concatenation
+    // built from it. Both are released, and in the right order, because the
+    // concatenation is the outer one.
+    print(twice(twice("y")));
+
+    // A temporary whose value is stored is not a temporary any more: the slot
+    // owns it and the scope releases it. Storing and then computing must not
+    // release the stored value.
+    var kept = twice("keep");
+    print(kept);
+    print(len(kept));
+
+    // A borrowed string stored in a variable, so the store copies and both the
+    // copy and the original are released exactly once.
+    var original = "orig" + "inal";
+    var copy = original;
+    print(copy);
+    print(original);
+    print(copy == original);
+
+    // The same through a parameter, which is a borrow and is never released by
+    // the callee.
+    print(roundTrip(copy));
+
+    // Inside a loop body, which is the case that accumulates rather than
+    // happening once.
+    var acc = "";
+    for (var k = 0; k < 200; k++) {
+        acc = acc + "z";
+        print(twice("q"));
+    }
+    print(acc.length);   // 200
+
+    // A conditional whose branches are both temporaries: the one that is taken
+    // is the one that has to be released.
+    var n = 7;
+    print(n > 0 ? twice("pos") : twice("neg"));
+    print(n < 0 ? twice("pos") : twice("neg"));
+
+    // A branch that does not run. Both arms of a conditional are emitted, and both
+    // operands of a short-circuited operator are, so the one that is skipped must
+    // not leave a slot behind holding the previous statement's pointer. That is a
+    // double free rather than a wrong answer, and it only shows up once two
+    // statements in a row each build a string.
+    var flag = false;
+    if (flag && ("a" + "b") == "ab") { print("skipped"); }
+    if (!flag && ("c" + "d") == "cd") { print("taken"); }
+    if (flag || ("e" + "f") == "ef") { print("taken2"); }
+    if (!flag || ("g" + "h") == "gh") { print("taken3"); }
+    print(flag ? twice("yes") : twice("no"));
+    print(flag ? twice("never") : twice("also"));
+
+    // An assignment yields the value it stored, and that value belongs to the
+    // slot. Releasing it again at the end of the statement would free the very
+    // string the assignment had just written, which is the bug this test exists
+    // to keep fixed.
+    var buf = str_buf_new(0);
+    buf = str_buf_append(buf, "abc");
+    print(len(buf));
+    buf = str_buf_append(buf, "def");
+    print(buf);
+    return 0;
+}

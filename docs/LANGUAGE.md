@@ -273,11 +273,15 @@ done, and the rest of the slice is waiting on them.
   reading the source a diagnostic naming the move. It is what `StringBuilder.take`
   uses to stay a handover rather than an alias, and what `return move local;` is
   for.
-  **Not yet: a string that is computed but never stored leaks.** `print(a + b)`
-  allocates a value nothing owns and nothing releases, because releasing a
-  temporary is a per-statement analysis that has not been written. Class objects,
-  heap arrays and closure cells leak for the same reason and are the rest of this
-  slice.
+  A string computed but never stored is a **temporary**, and it is released when
+  the statement that made it ends, so a loop of `print(a + b)` is bounded rather
+  than one leak per iteration. The value is spilled to a pinned frame slot and
+  released after the statement, and an expression that may not run (a ternary's
+  untaken arm, the right operand of a short-circuited `&&`) records nothing,
+  because both are emitted and the skipped one would leave a slot holding the
+  previous statement's pointer.
+  **Not yet: class objects, heap arrays and closure cells still leak**, along with
+  anything reachable only through them. Those are the rest of this slice.
 - **`Vec<T>`** stops being a `class` and becomes a `{data, len, cap}` struct
   with a destructor. It is no longer an aliasing trap: `var b = a` is either a
   copy or an error, never a surprise.
@@ -1124,7 +1128,7 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 171 tests in all — 90 golden, 73 diagnostic, and 8 runtime, interop, warning
+- 172 tests in all — 91 golden, 73 diagnostic, and 8 runtime, interop, warning
   and module tests — with `make test-all` green across four `-O` levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into
@@ -1148,10 +1152,11 @@ What does not work yet, and so does **not** satisfy the rest of section 2:
 - `break` and `continue` out of a scope skip its teardown
 - a type with no destructor of its own does not destroy its owning fields; the
   recursive default teardown of this section is not implemented
-- `string` is owned, copied deeply and released. Class objects, heap arrays,
-  closure cells and any string that is computed but never stored are still live
-  at exit: those frees need the same treatment `string` got, one type at a time,
-  and a leak is the safe direction to be wrong in
+- `string` is owned, copied deeply, released at scope end, released on overwrite,
+  and a temporary is released at the end of the statement that made it. Class
+  objects, heap arrays and closure cells are still live at exit: those frees need
+  the same treatment `string` got, one type at a time, and a leak is the safe
+  direction to be wrong in
 - there is no move semantics for class pointers or heap arrays yet, so a plain
   copy of one is still a silent alias. `move` exists and is checked, and it
   clears the source for `string`; the other types are not wired to it

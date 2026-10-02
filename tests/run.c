@@ -98,6 +98,7 @@ int main(int argc, char **argv) {
         "tern",
         "ownership",
         "strings_owned",
+        "temporaries",
         "enum_match",
         "constfold",
         "regalloc",

@@ -4770,7 +4770,7 @@ static TokenKind base_op(TokenKind k) {
  * copy on return below, which is what makes that true); a string concatenation
  * or slice, both of which build new bytes; and a `move`, which hands the value
  * over on purpose. */
-static int expr_is_borrowed_string(Expr *e) {
+int expr_is_borrowed_string(const Expr *e) {
     if (e == NULL)
         return 0;
     switch (e->kind) {
@@ -4817,6 +4817,16 @@ static Expr *own_string_copy(Parser *p, Expr *e) {
     return d;
 }
 
+/* Records that a store or a `return` has taken over a fresh string value, so the
+ * code generator releases it once rather than treating it as a temporary as well.
+ * Two owners for one value is the bug this whole stage is about, so the claim is
+ * made in one place next to the copy rather than in each of the three sites. */
+static Expr *claim_string_value(Expr *e) {
+    if (e != NULL && is_kind(e->type, TK_STRING) && !expr_is_borrowed_string(e))
+        e->str_result_owned = 1;
+    return e;
+}
+
 static Expr *parse_expr(Parser *p) {
     Expr *lhs = parse_binary(p, 1);
     TokenKind k = cur(p)->kind;
@@ -4846,6 +4856,7 @@ static Expr *parse_expr(Parser *p) {
          * fresh. */
         if (!compound) {
             e->rhs = own_string_copy(p, rhs);
+            e->rhs = claim_string_value(e->rhs);
             /* Releasing the destination's old value is only right when the new
              * value is a different allocation. `str_buf_append` is the one
              * builtin that hands back its first argument unchanged whenever the
@@ -5217,6 +5228,7 @@ static Stmt *parse_var_decl(Parser *p) {
         if (!infer && is_kind(t, TK_IFACE))
             init = to_iface(p, init, t, start);
         init = own_string_copy(p, init);
+        init = claim_string_value(init);
         if (t == NULL)
             /* A bare `null` carries no type, but `var p = null` is a pointer
              * declaration in every other language; default to int* so the
@@ -7888,6 +7900,7 @@ static Stmt *parse_stmt(Parser *p) {
              * optional, and it is what lets the caller's side treat every call
              * result as fresh. */
             s->expr = own_string_copy(p, s->expr);
+            s->expr = claim_string_value(s->expr);
             if (!is_unk(s->expr->type) && !is_unk(p->cur_ret) &&
                 !type_equals(s->expr->type, p->cur_ret)) {
                 diag_error(start, "cannot return '%s' from function returning '%s'",
