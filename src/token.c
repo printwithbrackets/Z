@@ -84,6 +84,8 @@ const char *token_kind_name(TokenKind kind) {
         return "'return'";
     case T_KW_IMPORT:
         return "import";
+    case T_KW_MOVE:
+        return "move";
     case T_KW_METHOD:
         return "method";
     case T_KW_FN:

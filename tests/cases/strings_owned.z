@@ -1,0 +1,89 @@
+// A string owns its bytes, and `move` is how a value is handed on rather than
+// shared. The compiler copies a borrowed string on every store and releases it
+// when the scope ends or the slot is overwritten, so what this test can observe
+// is the *values*, and the fact that a program doing all of this still prints
+// what it should rather than crashing or freeing twice.
+
+class Held {
+    string label;
+    Held(string s) { this.label = s; }
+    /* Reads the field without taking it, which is what a getter is: the caller
+     * gets a copy, so printing this releases nothing the object still holds. */
+    string get() { return this.label; }
+}
+
+string borrow(string s) {
+    /* A parameter is the caller's value, lent rather than copied, so this reads
+     * it. The copy on return is what makes the result safe to store. */
+    return s + "!";
+}
+
+string twice(string s) { return borrow(borrow(s)); }
+
+int main() {
+    // A literal is owned by nobody: storing one copies no bytes and releasing it
+    // frees nothing, so the same literal can be held in any number of values.
+    var lit = "shared";
+    var alsoLit = lit;
+    print(lit);
+    print(alsoLit);
+
+    // A built string is owned by the variable holding it.
+    var built = "a" + "b";
+    print(built);
+    print(len(built));
+
+    // Assignment overwrites, so the previous value is released rather than
+    // dropped on the floor. The new value is still correct, which is all a
+    // program can see.
+    built = built + "c";
+    print(built);
+
+    // Storing a borrowed string copies it, so the two are independent values.
+    built = built + "d";
+    print(built);
+
+    // `move` hands the value on: the source is emptied, so the source's own
+    // teardown releases nothing and the destination's releases the bytes.
+    var handed = move built;
+    print(handed);
+    print(len(handed));
+
+    // A parameter is a borrow, so passing a value does not copy it.
+    print(borrow(handed));
+    print(twice(handed));
+
+    // A field is a borrow too, and reading it copies.
+    var h = new Held("in an object");
+    print(h.get());
+    print(h.label);
+
+    // A copy stored into a field is the object's own, so releasing the local
+    // leaves the object readable.
+    var text = "owned by the field";
+    var h2 = new Held(text);
+    print(h2.get());
+
+    // Concatenation in a loop, which is the case a per-store release has to get
+    // right: every intermediate is released as it is overwritten.
+    var acc = "";
+    var i = 0;
+    while (i < 300) {
+        acc = acc + "ab";
+        i = i + 1;
+    }
+    print(acc.length);   // 600
+    print(acc[0]);
+    print(acc[599]);
+
+    // An empty string is a real string, and releasing it is a no-op rather than
+    // a free of nothing.
+    var nothing = "";
+    print(len(nothing));
+    print(nothing == "");
+
+    // A string that is never stored is a temporary, and its bytes live until the
+    // program exits. Nothing here observes that; the print does.
+    print("temporary" + "!");
+    return 0;
+}

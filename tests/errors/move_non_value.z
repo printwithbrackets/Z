@@ -1,0 +1,10 @@
+// `move` takes a value *out of* a storage location. Applied to a call or a
+// literal there is nothing to take out, and the reader wrote `move` expecting it
+// to mean something, so it is said rather than quietly ignored.
+string g(string s) { return s; }
+
+int main() {
+    print(move g("a"));
+    print(move "b");
+    return 0;
+}

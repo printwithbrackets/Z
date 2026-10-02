@@ -408,6 +408,17 @@ StructMethod *struct_find_dtor(StructDef *sd) {
 int type_needs_drop(Type *t) {
     if (t == NULL)
         return 0;
+    if (t->kind == TK_STRING) {
+        /* A string owns its bytes unless it is a literal, and a literal says so
+         * in its header (cap == 0), so `z_str_free` can skip it without the
+         * compiler having to know which of the two it is holding.
+         *
+         * This is the one owning type that needed no move semantics to become
+         * sound, because a copy of a string is a copy of the bytes rather than a
+         * second name for them: the parser turns every store of a borrowed
+         * string into a `str_dup`, so two values never name one allocation. */
+        return 1;
+    }
     if (t->kind == TK_PTR) {
         /* A pointer to a *class* is a handle on a heap object, and a handle owns
          * what it points at -- that is the difference between a class and a

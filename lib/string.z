@@ -84,10 +84,15 @@ class StringBuilder {
      * by taking a new one, so nothing can still reach the old bytes and the
      * in-place append that made this builder cheap is safe to have been used.
      * For the common tail of "build a string, pass it on, do not need it again"
-     * this is the version that does not copy. */
+     * this is the version that does not copy.
+     *
+     * `move` is what keeps it a handover rather than an alias. Both halves need
+     * it: the buffer leaves the object, so the field is cleared rather than left
+     * holding bytes the caller now owns, and the local leaves too, so the scope
+     * teardown does not release bytes the caller is about to read. */
     string take() {
-        var out = buf;
+        string out = move buf;
         buf = str_buf_new(0);
-        return out;
+        return move out;
     }
 }

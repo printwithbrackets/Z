@@ -48,6 +48,7 @@ typedef enum {
     T_KW_CLOSURE,
     T_KW_METHOD,
     T_KW_IMPORT,
+    T_KW_MOVE,
 
     /* Punctuation */
     T_LPAREN,

@@ -270,6 +270,7 @@ static const Keyword KEYWORDS[] = {
     {"closure", T_KW_CLOSURE},
     {"method", T_KW_METHOD},
     {"import", T_KW_IMPORT},
+    {"move", T_KW_MOVE},
     {"false", T_KW_FALSE},
     {"class", T_KW_CLASS},
     {"interface", T_KW_INTERFACE},

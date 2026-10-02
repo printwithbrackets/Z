@@ -34,6 +34,12 @@ typedef struct Var {
     int is_synth;   /* compiler-generated, or in a body we never see: not warnable */
     Span decl_span; /* where the name was written, for diagnostics */
     int needs_drop; /* the type owns something, so the scope must destroy it */
+    /* Set once `move` has taken this variable's value. Reading it afterwards is
+     * a diagnostic rather than a read of whatever the slot holds now, because
+     * "use after move" and "read a null" are the same bug with two very
+     * different amounts of help. */
+    int is_moved;
+    Span move_span; /* where the move was written, for the note */
     struct Var *next;
 } Var;
 
@@ -798,7 +804,8 @@ static void scope_push(Parser *p) {
     /* Tracked so a `return` or a `?` can reach every scope it is leaving. A
      * scope beyond the limit is still pushed, so parsing continues and the
      * program gets its other diagnostics rather than nothing. */
-    if (p->nopen < MAX_DROP_SCOPES) p->open_scopes[p->nopen++] = s;
+    if (p->nopen < MAX_DROP_SCOPES)
+        p->open_scopes[p->nopen++] = s;
     else
         diag_error(cur(p)->span, "blocks nested more than %d deep", MAX_DROP_SCOPES);
 }
@@ -820,7 +827,8 @@ static void scope_pop(Parser *p) {
         return;
     s->warn_next = p->popped_scopes;
     p->popped_scopes = s;
-    if (p->nopen > 0 && p->open_scopes[p->nopen - 1] == s) p->nopen--;
+    if (p->nopen > 0 && p->open_scopes[p->nopen - 1] == s)
+        p->nopen--;
     p->scope = s->parent;
 }
 
@@ -4489,6 +4497,16 @@ static Expr *parse_primary(Parser *p) {
         e->slot = v->offset;
         e->type = v->type;
         e->agg_param = v->agg_param;
+        /* Reading a value that `move` already took. The slot itself is null by
+         * now, so this would otherwise be a read of null that surfaces as a
+         * crash somewhere else entirely. */
+        if (v->is_moved) {
+            /* Notes are queued and claimed by the next error, so they go first. */
+            diag_note_at(v->move_span, "'%s' was moved here", name);
+            diag_note_at(span, "assign into '%s' instead, or write 'move %s' to hand it on again",
+                         name, name);
+            diag_error_code(span, "use_after_move", "'%s' has been moved from", name);
+        }
         return parse_postfix(p, e);
     }
     case T_KW_NEW: {
@@ -4540,6 +4558,41 @@ static Expr *parse_primary(Parser *p) {
 
 static Expr *parse_unary(Parser *p) {
     Token *t = cur(p);
+    /* `move x` hands the value on rather than sharing it. It takes a unary
+     * operand, like `!x` and `-x` do, so `move a + b` moves `a` and then adds,
+     * and `f(move x)` moves into the argument. */
+    if (t->kind == T_KW_MOVE) {
+        advance(p);
+        Expr *operand = parse_unary(p);
+        Expr *e = new_expr(p, E_MOVE, t->span);
+        e->lhs = operand;
+        e->type = operand->type;
+        /* Only a storage location can be given up. `move f()` has nothing to
+         * give up, because the call already produced a value nothing else holds,
+         * and `move 3` is not a location at all. Both are diagnosed rather than
+         * quietly accepted, because the reader wrote `move` expecting it to mean
+         * something.
+         *
+         * A field or an element counts, and clearing it is what makes that
+         * sound: `StringBuilder.take()` moves its buffer out of the object, so
+         * the object has to stop holding it rather than keep a claim the caller
+         * is now acting on. */
+        if (operand->kind == E_VAR && operand->name != NULL) {
+            Var *v = lookup_var(p, operand->name);
+            if (v != NULL) {
+                v->is_moved = 1;
+                v->move_span = t->span;
+            }
+        } else if (operand->kind != E_FIELD && operand->kind != E_INDEX && !is_unk(operand->type)) {
+            diag_note_at(
+                operand->span,
+                "'move' takes the value *out of* a variable, so it cannot be applied "
+                "to a call or a literal: those already produce a value nothing else holds");
+            diag_error_code(t->span, "move_non_value",
+                            "'move' needs a variable to take the value from");
+        }
+        return e;
+    }
     if (t->kind == T_MINUS || t->kind == T_NOT || t->kind == T_TILDE) {
         advance(p);
         Expr *operand = parse_unary(p);
@@ -4701,6 +4754,69 @@ static TokenKind base_op(TokenKind k) {
     }
 }
 
+/* Does this expression name bytes that something else owns?
+ *
+ * The answer decides whether storing the value copies it. A string is the one
+ * owning type that can be made sound without `move` everywhere, because a copy
+ * of a string is a copy of the bytes rather than a second name for them, so
+ * every store of a borrowed string has to become a `str_dup`. Get this wrong in
+ * one direction and two values name one allocation, which frees twice; get it
+ * wrong in the other and an allocation is copied and the original is dropped on
+ * the floor. Only the second is safe, so anything this does not recognize counts
+ * as fresh.
+ *
+ * Fresh means: a literal, which is static and owned by nobody; a call, because
+ * every `return` in the language produces a value nothing else holds (see the
+ * copy on return below, which is what makes that true); a string concatenation
+ * or slice, both of which build new bytes; and a `move`, which hands the value
+ * over on purpose. */
+static int expr_is_borrowed_string(Expr *e) {
+    if (e == NULL)
+        return 0;
+    switch (e->kind) {
+    case E_VAR:   /* a local, a parameter, or a captured cell */
+    case E_FIELD: /* a field of a struct or class */
+    case E_INDEX: /* an element */
+    case E_DEREF: /* through a pointer */
+    case E_TRY:   /* the Ok payload, which is a field of the Result union */
+    case E_MATCH: /* a bound payload, same shape */
+    case E_IFACE:
+        return 1;
+    case E_UNARY:
+        return expr_is_borrowed_string(e->lhs);
+    case E_TERNARY:
+        return expr_is_borrowed_string(e->rhs) ||
+               (e->args != NULL && e->nargs > 0 ? expr_is_borrowed_string(e->args[0]) : 0);
+    case E_BINARY:
+        /* `+` on two strings builds new bytes. Anything else that type-checks to
+         * a string would be the concatenation anyway. */
+        return e->op != T_PLUS;
+    default:
+        return 0;
+    }
+}
+
+/* The value to store into a `string` slot: `str_dup(e)` when `e` names bytes
+ * someone else owns, and `e` itself when it does not.
+ *
+ * This is the whole of string ownership, and it is a rewrite rather than a
+ * change to code generation because it can be expressed in the language: a dup
+ * is an ordinary call to an ordinary builtin, so it is type-checked, it inlines,
+ * and it needs no path through the register allocator. */
+static Expr *own_string_copy(Parser *p, Expr *e) {
+    if (!is_kind(e->type, TK_STRING) || !expr_is_borrowed_string(e))
+        return e;
+    Expr **args = arena_alloc_array(p->arena, 1, sizeof(Expr *));
+    args[0] = e;
+    Expr *d = new_expr(p, E_CALL, e->span);
+    d->name = arena_strdup(p->arena, "z_str_dup");
+    d->is_extern = 1;
+    d->args = args;
+    d->nargs = 1;
+    d->type = type_string(p->ty);
+    return d;
+}
+
 static Expr *parse_expr(Parser *p) {
     Expr *lhs = parse_binary(p, 1);
     TokenKind k = cur(p)->kind;
@@ -4722,6 +4838,30 @@ static Expr *parse_expr(Parser *p) {
         e->compound = compound;
         e->lhs = lhs;
         e->rhs = rhs;
+        /* Storing into a string slot copies borrowed bytes. Covers every
+         * assignment target there is, because a local, a field and an element
+         * store are all one E_ASSIGN whose left side carries the type. A
+         * compound assignment is not one: `s += x` runs the operator and the
+         * result is a new string, which the plain case already treats as
+         * fresh. */
+        if (!compound) {
+            e->rhs = own_string_copy(p, rhs);
+            /* Releasing the destination's old value is only right when the new
+             * value is a different allocation. `str_buf_append` is the one
+             * builtin that hands back its first argument unchanged whenever the
+             * buffer had room, so this is a transfer and not a replacement: it
+             * frees the very buffer the new value names, and the next append
+             * reads freed memory. That is the in-place growth the runtime's own
+             * comment describes, so the fact belongs to the call rather than to
+             * every caller. Both spellings, because the call has already been
+             * resolved to its runtime symbol by the time the assignment is
+             * built: the arguments had to be type-checked first. */
+            int transfers = rhs->kind == E_CALL && rhs->name != NULL &&
+                            (strcmp(rhs->name, "str_buf_append") == 0 ||
+                             strcmp(rhs->name, "z_str_buf_append") == 0);
+            if (is_kind(lhs->type, TK_STRING) && !transfers)
+                e->frees_old = 1;
+        }
         if (compound) {
             /* A compound assignment runs the operator and stores back into the
              * left operand, so the right side is promoted to the left's type
@@ -5076,6 +5216,7 @@ static Stmt *parse_var_decl(Parser *p) {
             t = init->type;
         if (!infer && is_kind(t, TK_IFACE))
             init = to_iface(p, init, t, start);
+        init = own_string_copy(p, init);
         if (t == NULL)
             /* A bare `null` carries no type, but `var p = null` is a pointer
              * declaration in every other language; default to int* so the
@@ -5116,8 +5257,6 @@ static int stmt_terminates(Stmt *s) {
         return 0;
     }
 }
-
-
 
 /* ---- the destructor pass ----
  *
@@ -5161,6 +5300,34 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
         Type *st = v->type;
         if (is_kind(st, TK_PTR) && is_kind(st->base, TK_STRUCT))
             st = st->base;
+        /* A string has no user destructor and still owns its bytes, so its drop
+         * is a call to the runtime rather than to a method the program wrote.
+         * It goes in the same list and in the same order, which is the point of
+         * computing the drop list from the type rather than from a flag. */
+        if (is_kind(v->type, TK_STRING)) {
+            Expr *slot = new_expr(p, E_VAR, v->decl_span);
+            slot->name = arena_strdup(p->arena, v->name);
+            slot->slot = v->offset;
+            slot->type = v->type;
+            Expr **sargs = arena_alloc_array(p->arena, 1, sizeof(Expr *));
+            sargs[0] = slot;
+            Expr *scall = new_expr(p, E_CALL, v->decl_span);
+            /* The runtime symbol, called verbatim, which is the same shape a
+             * call to the `str_free` builtin takes once the parser has resolved
+             * it. The drop is generated after type checking has finished, so
+             * there is no argument to check here: the argument is the variable's
+             * own slot, which `type_needs_drop` has already decided is a
+             * string. */
+            scall->name = arena_strdup(p->arena, "z_str_free");
+            scall->is_extern = 1;
+            scall->args = sargs;
+            scall->nargs = 1;
+            scall->type = type_void(p->ty);
+            Stmt *ss = new_stmt(p, S_EXPR, v->decl_span);
+            ss->expr = scall;
+            items[k++] = ss;
+            continue;
+        }
         if (!is_kind(st, TK_STRUCT) || st->sdef == NULL)
             continue;
         StructDef *sd = st->sdef;
@@ -7714,6 +7881,13 @@ static Stmt *parse_stmt(Parser *p) {
             p->expect_result = saved_expect;
             if (is_kind(p->cur_ret, TK_IFACE))
                 s->expr = to_iface(p, s->expr, p->cur_ret, start);
+            /* A returned string is handed to the caller, so it has to be a value
+             * nothing else holds. Returning a local's bytes directly would alias
+             * them, and the local's own teardown would then free what the caller
+             * is reading. This is the one place a copy is required rather than
+             * optional, and it is what lets the caller's side treat every call
+             * result as fresh. */
+            s->expr = own_string_copy(p, s->expr);
             if (!is_unk(s->expr->type) && !is_unk(p->cur_ret) &&
                 !type_equals(s->expr->type, p->cur_ret)) {
                 diag_error(start, "cannot return '%s' from function returning '%s'",

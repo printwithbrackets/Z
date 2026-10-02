@@ -1,0 +1,10 @@
+// Reading a value that `move` already took is a diagnostic, not a read of
+// whatever the slot holds now. The slot is null by then, so the alternative is a
+// crash somewhere else with no mention of the move that caused it.
+int main() {
+    var a = "hello";
+    var b = move a;
+    print(b);
+    print(a);
+    return 0;
+}

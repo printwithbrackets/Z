@@ -2093,6 +2093,46 @@ static void gen_expr(CG *cg, Expr *e) {
         }
         break;
     }
+    case E_MOVE: {
+        /* Read the value, then take the source's claim to it away.
+         *
+         * Poisoning the slot rather than leaving it is what makes a second read
+         * a crash instead of a silently correct answer: the parser already
+         * rejects the read where it can see it, so this is the backstop for the
+         * cases it cannot, such as a move through a closure's box. Null is the
+         * poison because every free path here already skips it, so a value that
+         * was moved rather than destroyed costs nothing to skip. */
+        if (e->lhs != NULL && e->lhs->kind == E_VAR && !e->lhs->agg_param && !e->lhs->boxed &&
+            !is_aggregate(e->type)) {
+            /* A register-allocated local does not live in its frame slot, so
+             * poisoning the slot would leave the register holding the value and
+             * the move would read as a move of whatever the slot happens to
+             * contain. The register is the one to take the value from *and* the
+             * one to clear, which also makes this two instructions. */
+            const char *mreg = local_reg(cg, e->lhs->slot);
+            if (mreg != NULL) {
+                buf_printf(cg->out, "  mov rax, %s\n", mreg);
+                buf_printf(cg->out, "  xor %s, %s\n", mreg, mreg);
+                break;
+            }
+            buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->lhs->slot);
+            buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], 0\n", e->lhs->slot);
+            break;
+        }
+        gen_expr(cg, e->lhs);
+        if (e->lhs != NULL && !is_aggregate(e->type)) {
+            int t = temp_alloc(cg);
+            if (is_kind(e->type, TK_F64))
+                store_temp_x(cg, t);
+            else
+                store_temp(cg, t);
+            gen_addr(cg, e->lhs);
+            buf_printf(cg->out, "  mov QWORD PTR [rax], 0\n");
+            load_temp(cg, t, "rax");
+            cg->temp_top = t;
+        }
+        break;
+    }
     case E_POSTINC: {
         /* The two orders, which is the entire point of the node: read the old
          * value, write the new one, and yield the old. A register-resident local
@@ -2573,6 +2613,26 @@ static void gen_expr(CG *cg, Expr *e) {
         break;
     }
     case E_ASSIGN: {
+        /* A string slot owns exactly one value, so a plain assignment releases
+         * the one it had. The value is captured first and released after the
+         * store, because `s = s + "x"` reads the destination, and because the
+         * release is a call and a call clobbers the register the new value is
+         * sitting in. */
+        int t_old = -1;
+        if (e->frees_old) {
+            t_old = temp_alloc(cg);
+            if (e->lhs != NULL && e->lhs->kind == E_VAR && !e->lhs->agg_param && !e->lhs->boxed) {
+                const char *oreg = local_reg(cg, e->lhs->slot);
+                if (oreg != NULL)
+                    buf_printf(cg->out, "  mov %s, %s\n", "rax", oreg);
+                else
+                    buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->lhs->slot);
+            } else {
+                gen_addr(cg, e->lhs);
+                buf_printf(cg->out, "  mov rax, QWORD PTR [rax]\n");
+            }
+            store_temp(cg, t_old);
+        }
         /* A captured variable lives in a heap cell, because the closure that
          * reads it may outlive the frame that declared it. Its slot therefore
          * holds a pointer to that cell and every access goes through it. Both
@@ -2593,7 +2653,7 @@ static void gen_expr(CG *cg, Expr *e) {
                 load_temp(cg, tb, "rdi");
                 emit_memcpy(cg, type_size(e->type));
                 cg->temp_top = tb;
-                break;
+                goto assign_done;
             } else {
                 store_temp(cg, tr);
             }
@@ -2606,7 +2666,7 @@ static void gen_expr(CG *cg, Expr *e) {
                 buf_printf(cg->out, "  mov QWORD PTR [r11], rax\n");
             }
             cg->temp_top = tb;
-            break;
+            goto assign_done;
         }
         /* A float assignment stores with movsd from xmm0, not mov from rax, and
          * the in-place forms above all reason in terms of rax -- so floats take
@@ -2640,7 +2700,7 @@ static void gen_expr(CG *cg, Expr *e) {
                 buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
             }
             cg->temp_top = ta;
-            break;
+            goto assign_done;
         }
         /* A scalar LHS that lives in a register is written in place; no
          * address is materialized. */
@@ -2672,7 +2732,7 @@ static void gen_expr(CG *cg, Expr *e) {
                     buf_printf(cg->out, "  mov %s, rax\n", lreg);
                 }
             }
-            break;
+            goto assign_done;
         }
         int tA = temp_alloc(cg);
         gen_addr(cg, e->lhs);
@@ -2701,6 +2761,13 @@ static void gen_expr(CG *cg, Expr *e) {
             }
         }
         cg->temp_top = tA;
+    assign_done:
+        /* The old value, released after the store so that the right-hand
+         * side of `s = s + "x"` could read the slot it replaces. */
+        if (t_old >= 0) {
+            load_temp(cg, t_old, "rdi");
+            buf_printf(cg->out, "  call z_str_free\n");
+        }
         break;
     }
     case E_CLOSURE: {

@@ -71,7 +71,15 @@
  * amortized O(1). A builder written in Z is a class holding one of these, which
  * keeps the growth policy next to the allocation -- the one thing Z cannot do
  * itself, because a string is opaque bytes and there is no way to write past a
- * string's length from Z. */
+ * string's length from Z.
+ *
+ * str_free is the other half of that: it releases a string's bytes, and skips a
+ * literal because a literal's header carries no capacity. It is declared here,
+ * rather than emitted as a bare symbol by the destructor pass, so that the call
+ * the compiler generates is type-checked like any other call and a wrong arity
+ * is an ordinary argument error rather than an undefined symbol at link time.
+ * str_dup is its counterpart and is the copy the compiler inserts when a
+ * borrowed string is stored. */
 #define Z_BUILTIN_LIST(X)                                                                          \
     X("len", "z_strlen", 'i', "s")                                                                 \
     X("sub", "z_sub", 's', "sii")                                                                  \
@@ -111,6 +119,7 @@
      * opaque bytes and there is no way to write past a string's length from Z. */                 \
     X("str_buf_new", "z_str_buf_new", 's', "i")                                                    \
     X("str_buf_append", "z_str_buf_append", 's', "ss")                                             \
+    X("str_free", "z_str_free", 'i', "s")                                                          \
     X("str_dup", "z_str_dup", 's', "s")
 
 #endif /* Z_LIMITS_H */

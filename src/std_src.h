@@ -46,9 +46,13 @@ static const char std_src_0[] =
     "*is* just the buffer: the builder gives up its claim\012     * by taking a new one, so "
     "nothing can still reach the old bytes and the\012     * in-place append that made this "
     "builder cheap is safe to have been used.\012     * For the common tail of \"build a string, "
-    "pass it on, do not need it again\"\012     * this is the version that does not copy. */\012   "
-    " string take() {\012        var out = buf;\012        buf = str_buf_new(0);\012        return "
-    "out;\012    }\012}\012";
+    "pass it on, do not need it again\"\012     * this is the version that does not copy.\012     "
+    "*\012     * `move` is what keeps it a handover rather than an alias. Both halves need\012     "
+    "* it: the buffer leaves the object, so the field is cleared rather than left\012     * "
+    "holding bytes the caller now owns, and the local leaves too, so the scope\012     * teardown "
+    "does not release bytes the caller is about to read. */\012    string take() {\012        "
+    "string out = move buf;\012        buf = str_buf_new(0);\012        return move out;\012    "
+    "}\012}\012";
 static const char std_src_1[] =
     "/* Collections: Vec<T>, Map<K,V>, Set<T>.\012 *\012 * Written in Z and embedded in the "
     "compiler, so they are checked by the same\012 * front end as the code that uses them. A bug "

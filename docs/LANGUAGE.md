@@ -263,11 +263,21 @@ done, and the rest of the slice is waiting on them.
   stored immediately *before* the payload, and both allocators were writing
   them at `ptr - 16`, which was only in bounds because the collector's own
   24-byte block header left room for them. They are stored inside the block now.
-- **`string`** keeps its `{len, cap}` header — that decision was made for the C
-  boundary and is still right — and gains a destructor. Copies become deep.
-  `cap == 0` is what distinguishes a literal from a heap string, so a literal
-  can be stored and copied anywhere without anything trying to free it, and every
-  heap string allocates at least one byte so the two can never be confused.
+- **done — `string`** keeps its `{len, cap}` header, that decision was made for
+  the C boundary and is still right, and has a destructor. Copies are deep: the
+  parser rewrites every store of a borrowed string into a `str_dup`, a plain
+  assignment releases the value it overwrote, and the scope teardown calls
+  `z_str_free`. A literal is owned by nobody and says so with `cap == 0`, so
+  storing one copies no bytes and releasing one frees nothing.
+  `move x` hands a value on instead of sharing it, clears the source, and makes
+  reading the source a diagnostic naming the move. It is what `StringBuilder.take`
+  uses to stay a handover rather than an alias, and what `return move local;` is
+  for.
+  **Not yet: a string that is computed but never stored leaks.** `print(a + b)`
+  allocates a value nothing owns and nothing releases, because releasing a
+  temporary is a per-statement analysis that has not been written. Class objects,
+  heap arrays and closure cells leak for the same reason and are the rest of this
+  slice.
 - **`Vec<T>`** stops being a `class` and becomes a `{data, len, cap}` struct
   with a destructor. It is no longer an aliasing trap: `var b = a` is either a
   copy or an error, never a surprise.
@@ -367,7 +377,8 @@ print(format("n = {}, sq = {}", n, n * n));    // n = 3, sq = 9
 ```
 
 **[new]** Keywords added: `auto`, `move`, `clone`, `namespace`, `pub`,
-`unsafe`, `thread`, `send`, `recv`, `Chan`, `Rc`, `Arc`, `Box`. **[now]** Kept:
+`unsafe`, `thread`, `send`, `recv`, `Chan`, `Rc`, `Arc`, `Box`. `auto` and `move`
+are in the compiler now, the rest are not. **[now]** Kept:
 `int bool string float void var const new struct enum class match this if else
 while for foreach in return break continue true false null extern export virtual
 override fn method import`.
@@ -1113,7 +1124,7 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 168 tests in all — 88 golden, 71 diagnostic, and 9 runtime, interop, warning
+- 171 tests in all — 90 golden, 73 diagnostic, and 8 runtime, interop, warning
   and module tests — with `make test-all` green across four `-O` levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into
@@ -1137,14 +1148,16 @@ What does not work yet, and so does **not** satisfy the rest of section 2:
 - `break` and `continue` out of a scope skip its teardown
 - a type with no destructor of its own does not destroy its owning fields; the
   recursive default teardown of this section is not implemented
-- a destructor still cannot release memory. `z_free`, `z_str_free` and
-  `z_array_free` all exist and are correct, but the compiler does not call them,
-  so **every allocation a program makes is live until the program exits**. The
-  frees cannot be wired up before move semantics, because a copy of an owning
-  value is currently a silent alias and freeing both copies is a double free
-- there is no move semantics, so `return` of an owned local destroys the value
-  before the caller can use it, and the caller's own drop then runs a second
-  time. Move semantics are what make this correct, and they are not built
+- `string` is owned, copied deeply and released. Class objects, heap arrays,
+  closure cells and any string that is computed but never stored are still live
+  at exit: those frees need the same treatment `string` got, one type at a time,
+  and a leak is the safe direction to be wrong in
+- there is no move semantics for class pointers or heap arrays yet, so a plain
+  copy of one is still a silent alias. `move` exists and is checked, and it
+  clears the source for `string`; the other types are not wired to it
+- there is no move semantics for a class pointer or a heap array, so returning
+  one of those as a local still destroys the value before the caller can use it.
+  `move` fixes it for `string` and is not yet wired to the others
 
 Read [LANGUAGE-v1.md](LANGUAGE-v1.md) for the v1 specification in full, including
 the sections this document does not repeat: optimization passes in detail,

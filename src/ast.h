@@ -65,6 +65,14 @@ typedef enum {
      * `impl` is the implementing type and `idef` the interface, which together
      * name the itab the code generator has to emit. */
     E_IFACE,
+    /* `move x`: yields x's value and gives up the source's claim to it.
+     *
+     * The source is poisoned at the point of the move, so a later read of it is
+     * a diagnostic at compile time where the parser can see it, and a null at
+     * run time where it cannot. That is the whole point of spelling the transfer
+     * out: without it, two variables name one allocation and one of them frees
+     * it. */
+    E_MOVE,
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -91,8 +99,13 @@ struct Expr {
     int field_off;    /* E_FIELD: byte offset of the field */
     int vtable_index; /* E_VCALL: slot index into the receiver's vtable */
     TokenKind op;     /* E_UNARY, E_BINARY; base op for compound E_ASSIGN */
-    int compound;     /* E_ASSIGN: nonzero for += -= *= /= %= */
-    int is_extern;    /* E_CALL to an `extern` function: symbol used verbatim */
+    int compound;     /* E_ASSIGN: nonzero for += -= *= %= */
+    /* E_ASSIGN storing a string: the destination's previous value has to be
+     * released, because overwriting the slot is the only other way a string
+     * stops being owned by anyone. Set by the parser alongside the copy, so both
+     * halves of "a string slot owns exactly one value" live in one decision. */
+    int frees_old;
+    int is_extern; /* E_CALL to an `extern` function: symbol used verbatim */
     /* E_BINARY/E_UNARY: nonzero once loop-invariant code motion has hoisted
      * this expression, holding the frame slot its value was computed into.
      * Zero means "not hoisted", which is safe because slot numbers start at 8. */

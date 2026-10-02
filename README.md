@@ -19,15 +19,21 @@ slice 2, each replaced by a diagnostic that says to use an `interface` instead.
 `class`, `virtual` and the vtable stay, because a class stored in an interface
 is still dispatched through one.
 
-**The collector is gone, and nothing is freed yet.** Slice 3 deleted
-`z_gc_init` and the whole mark-sweep collector, and replaced `gc_alloc` with a
-plain `z_alloc` over `malloc` plus a `z_free` to match it. Memory now has an
-owner that the compiler can see and nothing has claimed it yet, so **every
-allocation a program makes is still live until the program exits**. `z_str_free`
-and `z_array_free` exist and are correct, but the compiler does not call them
-yet, because a destructor that freed unconditionally would double-free every
-value a program copied. Wiring them up is the next step of slice 3, and it needs
-the move semantics first.
+**The collector is gone, and `string` is the first type it freed.** Slice 3
+deleted `z_gc_init` and the whole mark-sweep collector and replaced `gc_alloc`
+with a plain `z_alloc` over `malloc` plus a `z_free` to match it. A `string` now
+owns its bytes: the compiler copies a borrowed string on every store, releases it
+when its scope ends, and releases the previous value when a slot is overwritten.
+`move` is how a value is handed on rather than shared, and reading a moved-from
+variable is a compile error with a note pointing at the move.
+
+**Everything else still leaks, and that is stated rather than hidden.** A class
+object from `new C()`, a heap array from `new T[n]`, a closure cell, and a string
+that is *computed but never stored* (so `print(a + b)`) are all still live at
+exit. Nothing double-frees and nothing is freed while still reachable: the whole
+171-test suite runs clean under AddressSanitizer with no use-after-free, no double
+free and no overflow. Leaks are the safe direction to be wrong in, which is why
+the frees are wired up per type rather than all at once.
 
 **Destructors are half-built, and one half is a live footgun.** A `~Type()`
 method runs when a value's scope ends, in reverse declaration order. It works on
@@ -38,8 +44,9 @@ of a type with no destructor of its own.
 
 **Do not return a local that owns something.** `R* f() { var mine = new R(5);
 return mine; }` destroys `mine` on the way out, so the caller reads freed memory
-and then drops it a second time. Slice 3's move semantics are what fix this;
-until they land, return a fresh allocation instead of a named local.
+and then drops it a second time. `move` fixes this for a `string` today
+(`return move mine;`), and the class and array cases come with the rest of slice
+3.
 
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no
