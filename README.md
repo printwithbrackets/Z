@@ -569,14 +569,14 @@ Recorded because each was invisible at the default optimization level, and
   right operand of a short-circuited `&&` -- is still *emitted*, so recording a
   temporary there left the slot holding the previous statement's pointer. Each of
   those was found by ASan on the same program, and `temporaries` is the test.
-- **A string temporary in a loop's condition or step leaks once per iteration.**
-  Both are generated once inside the loop but run every pass, and the release is
+- **A string temporary in a loop's condition or step leaked once per iteration.**
+  Both are generated once inside the loop but run every pass, and the release was
   emitted after the loop rather than after each iteration, so every value but the
-  last is overwritten in its slot and never freed. Measured: 29 allocations of 541
-  bytes for a 29-iteration `for (var i = 0; i < 50; i = i + len(int_to_string(i)))`,
-  which is a leak and not a wrong free. It is not reachable from a golden test,
-  because the program's output is the same either way and the harness does not
-  measure leaks, so it needs an AddressSanitizer run to see. Not fixed.
+  last was overwritten in its slot and never freed: 29 allocations of 541 bytes for
+  a 29-iteration `for (var i = 0; i < 50; i = i + len(int_to_string(i)))`. A leak
+  rather than a wrong free, and not reachable from a golden test, because the
+  program's output is the same either way and the harness does not measure leaks,
+  so it took an AddressSanitizer run to see at all.
 - **A `match` arm that did not run freed a string pointer from the arm that
   did.** Both arms are emitted and one is skipped, so the skipped one left its
   frame slot holding whatever the previous statement had put there, and the

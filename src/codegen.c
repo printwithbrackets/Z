@@ -3284,6 +3284,8 @@ static int unroll_factor(CG *cg, Stmt *body, Expr *cond) {
  * loop.
  *
  * At a factor of 1 this emits exactly what the rolled form did. */
+static void release_str_temps(CG *cg, int saved);
+
 static void gen_loop(CG *cg, Stmt *body, Expr *cond, Expr *step, int unroll) {
     int lstart = next_label(cg);
     int lend = next_label(cg);
@@ -3292,14 +3294,29 @@ static void gen_loop(CG *cg, Stmt *body, Expr *cond, Expr *step, int unroll) {
         int last = u == unroll - 1;
         int lnext = last ? lstart : next_label(cg);
         int lcont = next_label(cg);
-        if (cond != NULL)
+        /* The condition and the step are generated once but run every pass, so
+         * their string temporaries have to be released here rather than at the end
+         * of the enclosing statement. The enclosing statement's release is emitted
+         * after the whole loop, which means every iteration but the last overwrote
+         * the slot and never freed what was in it: a leak of one string per
+         * iteration, measured at 29 allocations for a 29-iteration step.
+         *
+         * The body releases its own through `gen_stmt`, so what is left pinned
+         * across that call is exactly what the condition recorded. */
+        if (cond != NULL) {
+            int before = cg->npinned;
             gen_cond_branch(cg, cond, last ? lend : lnext);
+            release_str_temps(cg, before);
+        }
         loop_push(cg, lend, lcont);
         gen_stmt(cg, body);
         loop_pop(cg);
         buf_printf(cg->out, ".L%d:\n", lcont);
-        if (step != NULL)
+        if (step != NULL) {
+            int before = cg->npinned;
             gen_void_expr(cg, step);
+            release_str_temps(cg, before);
+        }
         buf_printf(cg->out, "  jmp .L%d\n", lnext);
         if (!last)
             buf_printf(cg->out, ".L%d:\n", lnext);
@@ -3609,16 +3626,21 @@ static void licm_hoist(CG *cg, Stmt *body, Expr *step, int emit) {
  * statement ends, not when the function does. Loops go through here once per
  * iteration, which is what makes `for (...) { print(a + b); }` release per
  * iteration rather than accumulating. */
-static void gen_stmt(CG *cg, Stmt *s) {
-    int saved = cg->npinned;
-    gen_stmt_body(cg, s);
+/* Releases every string temporary recorded since `saved`, and unpins the slots so
+ * they go back to the pool. The frame keeps its high-water mark, which is what
+ * temp_high is for. */
+static void release_str_temps(CG *cg, int saved) {
     for (int i = saved; i < cg->npinned; i++) {
         load_temp(cg, cg->pinned[i], "rdi");
         buf_printf(cg->out, "  call z_str_free\n");
     }
-    /* Unpinned, so the slots go back to the pool for the next statement. The
-     * frame keeps its high-water mark, which is what temp_high is for. */
     cg->npinned = saved;
+}
+
+static void gen_stmt(CG *cg, Stmt *s) {
+    int saved = cg->npinned;
+    gen_stmt_body(cg, s);
+    release_str_temps(cg, saved);
 }
 
 static void gen_stmt_body(CG *cg, Stmt *s) {
