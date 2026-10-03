@@ -68,6 +68,7 @@ int main() {
     print(match first("nope") { Ok(_) => 0, Err(_) => 1 } + 0);
     print(match first("42") { Ok(v) => v.x, Err(_) => -1 });
 
+    resultMethods();
     return 0;
 }
 
@@ -82,4 +83,68 @@ Result<Pt*, string> first(string s) {
     var pt = new Pt(n, 0);
     var p = &pt;
     return Ok(p);
+}
+
+/* A method returning a Result, with parameters.
+ *
+ * This is the shape the file API is made of, and it did not work: the parameter
+ * types a caller is checked against were read one slot to the left, so the
+ * receiver was reported as the first parameter. `argument 1 of 'w' expects 'F*'
+ * but got 'int'` for a method taking an int.
+ *
+ * The cause was the hidden result buffer. Anything returned through memory gets
+ * one pushed in front of the parameters, and the offset was computed by asking
+ * whether the return type is a struct. `Result` is a two-variant union, so the
+ * answer was no and the offset was one short. A Result-returning method with *no*
+ * parameters was unaffected, which is why it went unnoticed: with nothing to
+ * misalign, there was nothing to report. */
+class Source {
+    string text;
+    Source(string t) { this.text = t; }
+
+    /* Result, one parameter. */
+    Result<int, string> count() {
+        return Ok(len(this.text));
+    }
+
+    /* Result, two parameters of different types, so a shifted table cannot
+     * accidentally line up. */
+    Result<string, string> slice(int start, int count) {
+        if (start + count > len(this.text)) {
+            return Err("out of range");
+        }
+        return Ok(this.text[start..start + count]);
+    }
+
+    /* A plain int return alongside them, because the fix must not have changed
+     * the shape that already worked. */
+    int size() { return len(this.text); }
+
+    /* A method returning a struct, which is the other sret case. */
+    Boxed boxed(int n) { return new Boxed(n, "b"); }
+}
+
+struct Boxed { int n; string tag; }
+
+/* Driven from the file's own main. */
+void resultMethods() {
+    var s = new Source("hello world");
+
+    match (s.count()) {
+        Ok(n) => print(int_to_string(n)),
+        Err(e) => print("err " + e),
+    };
+    match (s.slice(0, 5)) {
+        Ok(part) => print(part),
+        Err(e) => print("err " + e),
+    };
+    match (s.slice(8, 99)) {
+        Ok(part) => print(part),
+        Err(e) => print("err " + e),
+    };
+    print(int_to_string(s.size()));
+
+    var b = s.boxed(7);
+    print(int_to_string(b.n));
+    print(b.tag);
 }

@@ -370,15 +370,17 @@ question is, because picking the wrong answer is the expensive way to find out.
   boundary this language cares about: a `readLine` built on `fgetc` would pull the
   rest of the file into a buffer the program cannot see.
 
-  The `Result<File, IoError>` layer the roadmap asks for is written and does not
-  compile, because of a pre-existing bug: **a method whose return type is a
-  `Result` loses its receiver at the call site.** `f.w(5)` reports
-  "argument 1 of 'w' expects 'F*' but got 'int'" for
-  `Result<int,string*> w(int n)`, while the same shape returning `int` works
-  (`StringBuilder.length` is called throughout the library). It reproduces with an
-  empty `lib/io.z`, so it is not the I/O work. Every fallible operation in the
-  design returns a `Result`, so this blocks the whole error-shaped API and not just
-  one function, and fixing it is the next thing.
+  The `Result<File, IoError>` layer is now written and reaches the runtime, having
+  been blocked by a compiler bug this milestone also fixed: **a method returning a
+  `Result` lost its first declared parameter.** `f.w(5)` reported
+  "argument 1 of 'w' expects 'F*' but got 'int'". Anything returned through memory
+  gets a hidden result buffer pushed in front of the parameters, and the offset was
+  computed by asking whether the return type is a `struct`. `Result` is a
+  two-variant *union*, so the answer was no, the offset was one short, and the
+  receiver was reported as the first parameter. A Result-returning method with no
+  parameters was unaffected, which is why it survived: with nothing to misalign
+  there was nothing to report. `result` is the test, and it fails on the old
+  compiler.
 
   The error type is still the right answer to the roadmap's question, and the
   constraint that shaped it is already known: `Result<T,E>` requires each side to

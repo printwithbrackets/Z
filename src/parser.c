@@ -7209,8 +7209,18 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     if (nexplicit > 0) {
         ptypes = arena_alloc_array(p->arena, (size_t)nexplicit, sizeof(Type *));
         /* params[0] is `this` (or the hidden $ret buffer if sret), so the
-         * i-th explicit parameter is at params[i + 1 + regoff]. */
-        int regoff = is_kind(ret, TK_STRUCT) ? 1 : 0;
+         * i-th explicit parameter is at params[i + 1 + regoff].
+         *
+         * The offset comes from whether the hidden buffer is actually there,
+         * which `vis_start` already worked out, rather than from asking whether
+         * the return type is a struct. Anything returned through memory has that
+         * buffer, and `Result` is a two-variant *union*, so asking about structs
+         * put the offset one short for every Result-returning method: ptypes[0]
+         * read the receiver instead of the first declared parameter, and the call
+         * site then reported "argument 1 expects 'F*' but got 'int'" for a method
+         * taking an int. A Result-returning method with no parameters was fine,
+         * because with nothing to misalign there was nothing to report. */
+        int regoff = fn->vis_start - 1;
         for (int i = 0; i < nexplicit; i++)
             ptypes[i] = params[i + 1 + regoff]->type;
     }
