@@ -1,0 +1,87 @@
+// Files, at the level the runtime provides them: a descriptor, and the four
+// operations on one. The `Result` wrapper the roadmap asks for lives in lib/io.z
+// and is layered on top of exactly this, so this case is the floor underneath it.
+//
+// Nothing here asserts on a file's contents beyond what it wrote, because a test
+// that depends on leftover state is a test that fails for the wrong reason. Every
+// path it touches is under a directory the harness owns.
+
+int main() {
+    var path = "/tmp/z_test_io.txt";
+
+    // Write, then read back. The mode argument is what distinguishes the three
+    // cases, and "w" truncates, so this starts from nothing every run.
+    var fd = open(path, "w");
+    print(fd >= 0);
+    print(write_bytes(fd, "line one\n"));
+    print(write_bytes(fd, "line two\n"));
+    print(close(fd));
+
+    // A bad mode fails rather than being handed to the system as a mode string.
+    var bad = open(path, "q");
+    print(bad);
+    print(io_errno() > 0);
+
+    // Reading a file that is not there fails, and says so through errno rather
+    // than by crashing.
+    var missing = open("/tmp/z_test_no_such_file", "r");
+    print(missing);
+
+    fd = open(path, "r");
+    print(fd >= 0);
+
+    // Byte at a time, so the length is counted rather than assumed.
+    var total = 0;
+    var b = read_byte(fd);
+    while (b >= 0) {
+        total = total + 1;
+        b = read_byte(fd);
+    }
+    print(total);              // 18: "line one\n" and "line two\n"
+    print(io_eof());            // the read stopped at the end, not at an error
+
+    // Past the end there is nothing left to read, and it stays that way.
+    print(read_byte(fd));
+    print(io_eof());
+    print(close(fd));
+
+    // Appending rather than truncating, which is the mode that would be wrong if
+    // it behaved like "w".
+    fd = open(path, "a");
+    print(write_bytes(fd, "line three\n"));
+    print(close(fd));
+
+    fd = open(path, "r");
+    total = 0;
+    b = read_byte(fd);
+    while (b >= 0) {
+        total = total + 1;
+        b = read_byte(fd);
+    }
+    print(total);              // 29
+    print(close(fd));
+
+    // An empty file reads as zero bytes and then reports the end, which is the
+    // distinction a line-oriented reader has to get right.
+    var empty = open("/tmp/z_test_empty.txt", "w");
+    print(empty >= 0);
+    print(close(empty));
+    empty = open("/tmp/z_test_empty.txt", "r");
+    print(read_byte(empty));
+    print(io_eof());
+    print(close(empty));
+
+    // A byte written is a byte read back, including one that is not printable,
+    // which is the whole reason the API is bytes rather than strings.
+    var bin = open("/tmp/z_test_bytes.bin", "w");
+    write_bytes(bin, char_str(0) + char_str(255) + char_str(10));
+    print(close(bin));
+    bin = open("/tmp/z_test_bytes.bin", "r");
+    print(read_byte(bin));
+    print(read_byte(bin));
+    print(read_byte(bin));
+    print(read_byte(bin));
+    print(io_eof());
+    print(close(bin));
+    return 0;
+}

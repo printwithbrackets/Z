@@ -8,7 +8,10 @@
  * tracing collector has to guess what is live from a conservative scan of the
  * machine stack, and a wrong guess is silent corruption, while a destructor
  * either runs or does not and the compiler can see which. */
+#include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -499,6 +502,66 @@ char *z_itoa(long v) {
  * digits, so 0.1 + 0.2 prints as 0.3 -- a deliberate trade of exact digits for
  * readable ones, and the same choice every language makes by default. */
 void z_print_f(double v) { printf("%g\n", v); }
+
+/* Whether the last `z_read_byte` hit the end of the file rather than failing. A
+ * separate flag because `read` reports both as -1 and the two mean opposite things
+ * to a loop: one ends, the other needs reporting. */
+static int z_io_last_eof = 0;
+
+/* ---- files ----
+ *
+ * Descriptors, not `FILE *`. A `FILE *` is a pointer the runtime would own and the
+ * program could not close, which is the ownership question this runtime does not
+ * answer yet, and an opaque handle in a struct is a struct field holding a pointer
+ * nobody can account for. An int has neither problem.
+ *
+ * These are the raw syscalls rather than stdio, because stdio buffers on one side
+ * of the boundary this language cares about: a `readLine` that used `fgetc` would
+ * have pulled the rest of the file into a buffer the program cannot see, and a
+ * following `seek` would be wrong in a way nothing in the output would show. One
+ * byte per `read` is slow and it is honest about where the buffering decision has
+ * not been made yet. */
+
+long z_open(const char *path, const char *mode) {
+    /* Only the three modes a program actually asks for, spelled out rather than
+     * passed through, so a mode string is never a format string. */
+    int flags;
+    if (strcmp(mode, "r") == 0)
+        flags = O_RDONLY;
+    else if (strcmp(mode, "w") == 0)
+        flags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (strcmp(mode, "a") == 0)
+        flags = O_WRONLY | O_CREAT | O_APPEND;
+    else {
+        errno = EINVAL;
+        return -1;
+    }
+    return (long)open(path, flags, 0666);
+}
+
+long z_close(long fd) { return (long)close((int)fd); }
+
+/* One byte, or -1 at end of file or on error. `z_io_errno` tells the two apart,
+ * and `z_io_eof` says which happened, because "the read failed" and "the file
+ * ended" are different answers to "keep reading". */
+long z_read_byte(long fd) {
+    unsigned char b = 0;
+    ssize_t n = read((int)fd, &b, 1);
+    if (n == 1)
+        return (long)b;
+    z_io_last_eof = n == 0;
+    return -1;
+}
+
+long z_write(long fd, const char *s) {
+    size_t n = zlen(s);
+    ssize_t w = write((int)fd, s, n);
+    return (long)w;
+}
+
+long z_io_errno(void) { return (long)errno; }
+
+long z_io_eof(void) { return z_io_last_eof; }
 
 /* ---- string library ----
  *

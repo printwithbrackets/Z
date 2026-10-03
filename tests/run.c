@@ -97,6 +97,7 @@ int main(int argc, char **argv) {
         "opoverload",
         "tern",
         "ownership",
+        "files",
         "strings_owned",
         "temporaries",
         "enum_match",

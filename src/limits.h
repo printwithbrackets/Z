@@ -105,6 +105,17 @@
     X("int_to_string", "z_itoa", 's', "i")                                                         \
     X("float_to_string", "z_ftoa", 's', "f")                                                       \
     X("char_str", "z_char_str", 's', "i")                                                          \
+    /* File descriptors, not FILE handles, so nothing on this side of the boundary                 \
+     * owns a buffer the program cannot see. Each returns a plain int: a file open                 \
+     * either gives a descriptor or does not, and lib/io.z turns that into a                       \
+     * Result<_, IoError> where the error can carry errno and the path, which is                   \
+     * the part with any use in it. */                                                             \
+    X("open", "z_open", 'i', "ss")                                                                 \
+    X("close", "z_close", 'i', "i")                                                                \
+    X("read_byte", "z_read_byte", 'i', "i")                                                        \
+    X("write_bytes", "z_write", 'i', "is")                                                         \
+    X("io_errno", "z_io_errno", 'i', "")                                                           \
+    X("io_eof", "z_io_eof", 'i', "")                                                               \
     X("die", "z_die", 'i', "i")                                                                    \
     X("exit", "z_exit", 'i', "i")                                                                  \
     X("to_text", "z_to_text", 's', "a")                                                            \

@@ -363,18 +363,27 @@ question is, because picking the wrong answer is the expensive way to find out.
   nothing about its argument, which is why it is a parameter kind rather than a
   type a program can declare.
 
-- **M11 (planned): file and I/O beyond `print`.** The language can print to
-  stdout and nothing else. A program that cannot read a file cannot do anything
-  worth writing, so this blocks more than its line count suggests.
+- **M11 (raw syscalls done, `Result` API blocked):** the language could print to
+  stdout and nothing else. `open`, `close`, `read_byte`, `write_bytes`, `io_errno`
+  and `io_eof` are builtins over raw file descriptors now, and `files` is the
+  test. Descriptors rather than `FILE *`, because stdio buffers on one side of the
+  boundary this language cares about: a `readLine` built on `fgetc` would pull the
+  rest of the file into a buffer the program cannot see.
 
-  The design question is errors. `open` fails, `read` fails at EOF, a write
-  fails on a full disk, and each of those is a real outcome rather than an
-  exceptional one. `Result<T,E>` (M4) is the right shape, so
-  `Result<File, IoError>` and `?` in a function returning it, with the payload
-  carrying the errno and the path — the error type is where the usefulness is.
-  A line-oriented API (`readLine`) is what most programs want and is also where
-  the buffering decision lives: read whole, or read a chunk and split, and
-  whether a `File` owns a buffer such that copying one is a bug.
+  The `Result<File, IoError>` layer the roadmap asks for is written and does not
+  compile, because of a pre-existing bug: **a method whose return type is a
+  `Result` loses its receiver at the call site.** `f.w(5)` reports
+  "argument 1 of 'w' expects 'F*' but got 'int'" for
+  `Result<int,string*> w(int n)`, while the same shape returning `int` works
+  (`StringBuilder.length` is called throughout the library). It reproduces with an
+  empty `lib/io.z`, so it is not the I/O work. Every fallible operation in the
+  design returns a `Result`, so this blocks the whole error-shaped API and not just
+  one function, and fixing it is the next thing.
+
+  The error type is still the right answer to the roadmap's question, and the
+  constraint that shaped it is already known: `Result<T,E>` requires each side to
+  be one word, so `File` and `IoError` both have to be classes, which is what lets
+  the error carry a formatted message without the `Result` growing.
 
 - **M12 (done): a string type that is not just concatenation.** A `string` is a
   pointer to a `{ len, cap }` header followed by the bytes. Three problems, three
