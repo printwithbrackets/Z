@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
         "strings_owned",
         "temporaries",
         "enum_match",
+        "match_arms",
         "constfold",
         "regalloc",
         "divmod",

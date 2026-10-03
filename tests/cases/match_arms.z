@@ -1,0 +1,70 @@
+// `match` over a Result, where one arm builds a string and the other reads one.
+//
+// Both arms are emitted and only one runs, so an arm must not leave a string
+// temporary behind for the end of the statement to release. The arm that is
+// skipped left its slot holding whatever the previous statement had put there,
+// and on a Result whose Ok payload is an int that meant calling free on a small
+// integer as though it were a heap pointer.
+//
+// The same hole was in a ternary's untaken arm and in the right operand of a
+// short-circuited `&&`, and was fixed there when the temporary release landed.
+// `match` was the one conditional form left out.
+
+Result<int, string> parse(string s) {
+    if (s == "42") { return Ok(42); }
+    return Err("not a number: " + s);
+}
+
+// An arm that concatenates: a fresh string in the arm that runs.
+int showOk(Result<int, string> r) {
+    match (r) {
+        Ok(n) => print("ok " + int_to_string(n)),
+        Err(e) => print("err " + e),
+    };
+    return 0;
+}
+
+// The arms differ in what they build, so the skipped one is not accidentally the
+// right shape.
+int showBoth(Result<int, string> r) {
+    match (r) {
+        Ok(n) => print("value is " + int_to_string(n)),
+        Err(e) => print("failed with " + e + " (" + int_to_string(len(e)) + ")"),
+    };
+    return 0;
+}
+
+// Three arms, so the middle one is skipped as well as the last.
+int showThree(Result<int, string> r) {
+    match (r) {
+        Ok(_) => print("one"),
+        Err(_) => print("two"),
+    };
+    return 0;
+}
+
+// The value of the match itself, rather than a print, so the temporary belongs to
+// an enclosing expression. A ternary stands in for the match here because an arm
+// cannot `return`; it is the same shape of "one of several values is chosen".
+string nameOf(Result<int, string> r) {
+    return match (r) { Ok(_) => "number", Err(_) => "error" };
+}
+
+int main() {
+    showOk(parse("42"));
+    showOk(parse("x"));
+
+    // Repeated, so a stale slot has to survive more than one statement to show up.
+    var i = 0;
+    while (i < 20) {
+        showBoth(parse("42"));
+        showBoth(parse("y"));
+        showThree(parse("z"));
+        i = i + 1;
+    }
+
+    print(nameOf(parse("42")));
+    print(nameOf(parse("q")));
+    print(len(nameOf(parse("42")) + nameOf(parse("42"))));
+    return 0;
+}

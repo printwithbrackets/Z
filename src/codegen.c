@@ -2533,7 +2533,20 @@ static void gen_expr_body(CG *cg, Expr *e) {
                     buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", arm->bind_slots[b]);
                 }
             }
+            /* Both arms are emitted and only one runs, so an arm must not
+             * register a temporary: the arm that is skipped leaves its slot
+             * holding whatever the last statement put there, and the release at
+             * the end of this statement frees that. The match's own value is what
+             * survives and the caller records it once.
+             *
+             * This is the same hole as a ternary's untaken arm, and it was live
+             * for the whole of the temporary-release work: `match (r) { Ok(n) =>
+             * print("ok " + itoa(n)), Err(e) => print("e " + e) }` on a Result
+             * whose Ok payload is an int freed an int as a string pointer. A
+             * match was the one conditional form not covered. */
+            cg->no_str_temp++;
             gen_expr(cg, arm->body);
+            cg->no_str_temp--;
             buf_printf(cg->out, "  jmp .L%d\n", lend);
             buf_printf(cg->out, ".L%d:\n", lnext);
         }

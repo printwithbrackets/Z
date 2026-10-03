@@ -569,6 +569,15 @@ Recorded because each was invisible at the default optimization level, and
   right operand of a short-circuited `&&` -- is still *emitted*, so recording a
   temporary there left the slot holding the previous statement's pointer. Each of
   those was found by ASan on the same program, and `temporaries` is the test.
+- **A `match` arm that did not run freed a string pointer from the arm that
+  did.** Both arms are emitted and one is skipped, so the skipped one left its
+  frame slot holding whatever the previous statement had put there, and the
+  end-of-statement release called `free` on it. On a `Result<int, string>` the Ok
+  payload is an int, so a three-line program freed a small integer as a heap
+  pointer. This is the third instance of one bug: a ternary's untaken arm and the
+  right operand of a short-circuited `&&` were fixed when the temporary release
+  landed, and `match` was the one conditional form left out. `match_arms` is the
+  test, and it crashes on the compiler before this.
 - **The ninth queued function replaced the first eight with garbage.**
   `add_pending` grew its array by allocating a new block and never copying the
   old contents, so a program with eight lambdas worked and one with nine crashed
