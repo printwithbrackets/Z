@@ -85,3 +85,12 @@ clean:
 	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c /tmp/z_test_bin /tmp/z_test_dbg
 
 -include $(DEP)
+
+# Benchmark the generated code.
+#
+# Not part of `test`: nothing here asserts correctness, it measures speed, and a
+# speed number on a machine with a load average above 1 is not comparable to one
+# taken when it was idle. `tools/bench.py` documents what it takes to make the
+# numbers mean something.
+bench: $(BIN)
+	@python3 tools/bench.py

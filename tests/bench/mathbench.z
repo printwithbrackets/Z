@@ -1,10 +1,30 @@
-// Constant-heavy arithmetic - benefits from constant folding.
+// Arithmetic and division - constant folding plus the magic-number paths.
+//
+// This used to be a list of constant expressions evaluated once, which made it
+// not a benchmark at all: the whole program folded to a single `print` of a
+// literal, so 0.01s of process startup was the entire measurement and every
+// optimization level tied. A constant-folding test belongs in the golden suite,
+// and folding is still what the head of this does.
+//
+// The loop is what makes it measurable. `k` comes from the clock, so nothing in
+// the body can be folded away, and the divisors are loop-invariant so the
+// magic-number divide is hoisted out (LICM, -O2) rather than recomputed 20M
+// times -- which is the thing worth watching, since a hoisted expression that
+// the loop varies was exactly the LICM bug `test-all` exists to catch.
 int main() {
     var s = 0;
     s += 2 + 3 * 4 + (5 - 1) * 2;
     s += 100 / 5 + 100 % 7;
     s += 7 * 6 - 2;
     s += 1 + 2 + 3 + 4 + 5;
+
+    var k = 12345;
+    var d = 1000000007;
+    var i = 0;
+    while (i < 20000000) {
+        s = (s + k * 7 + i / 3) % d;
+        i = i + 1;
+    }
     print(s);
     return 0;
 }

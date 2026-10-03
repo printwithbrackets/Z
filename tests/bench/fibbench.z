@@ -1,9 +1,14 @@
 // Recursive fib - call-heavy, benefits from folding constant args.
+//
+// fib(35) runs in 0.02s, which is below the 0.01s resolution of the clock the
+// bench script uses and nowhere near enough repetitions to average out a loaded
+// machine: the spread within one configuration was larger than the gap between
+// configurations. fib(35) is ~32x the work for ~0.6s, which is measurable.
 int fib(int n) {
     if (n < 2) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
 int main() {
-    print(fib(30));
+    print(fib(35));
     return 0;
 }

@@ -1,8 +1,12 @@
 // Loop-carried dependency: sum = sum*31 + i, no closed form, resists
 // vectorization. Both z and C must actually execute the loop.
+//
+// 30M iterations rather than 10M, to get ~0.5s at -O2 instead of ~0.19s. This is
+// the bench that has to survive -O3's unrolling, so it needs to be long enough
+// that a difference in instruction count shows up above the noise.
 int main() {
     var sum = 1; var i = 0;
-    while (i < 10000000) { sum = (sum * 31 + i) % 1000000007; i = i + 1; }
+    while (i < 30000000) { sum = (sum * 31 + i) % 3000000007; i = i + 1; }
     print(sum);
     return 0;
 }
