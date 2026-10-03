@@ -260,14 +260,30 @@ system assembler — we do not write an ELF encoder.
   fully register-resident and ~2× faster end to end, and beat `gcc -O0` on
   modulo-heavy code. Each `for` phase is a separate liveness position, so a loop
   counter can no longer share a register with a local declared in its body.
-  `-O3` adds **loop unrolling**: a loop with a condition and a body of at most 24
-  statements is emitted four times over, testing the condition before each copy
-  so the body still runs exactly as many times as it did rolled. The last copy
-  branches back to the top and the rest fall through, so three-quarters of the
-  loop-back branches go and consecutive iterations sit together for the
-  prefetcher; each copy carries its own continuation label, so `continue` runs
-  the step of the copy it is in and `break` leaves the loop from any of them.
-  `mathbench` is ~3x faster at `-O3` than at `-O2`.
+  `-O3` adds **loop unrolling**: a loop with a condition, a body of at most 24
+  statements, and at least two independent loop-carried recurrences is emitted
+  four times over, testing the condition before each copy so the body still runs
+  exactly as many times as it did rolled. The last copy branches back to the top
+  and the rest fall through; each copy carries its own continuation label, so
+  `continue` runs the step of the copy it is in and `break` leaves the loop from
+  any of them.
+
+  The recurrence requirement is the part that decides whether it is worth doing.
+  A variable the body both reads and writes is a recurrence: its value in
+  iteration *n+1* comes from iteration *n*, so copies touching it serialise
+  against each other exactly as one copy did. With two or more, one copy's chain
+  runs alongside another's. What makes this measurable is that unrolling is
+  *instruction-neutral* here, not a win waiting on the right loop: a rolled
+  iteration costs the body plus three instructions (the condition compare, its
+  branch, the jump back), and an unrolled copy costs the same three, so the
+  dynamic count per iteration is identical either way. Four copies buy three
+  fewer loop-back jumps per four iterations and pay with three extra
+  condition tests and four times the body in cache. Dependence is therefore the
+  only thing that can make the extra code pay for itself, which is why a
+  one-recurrence loop is left alone. On `mathbench` and `mixbench`, which are
+  both `s = (s * 31 + i) % d`, that removed 26% and 11% of the emitted code at
+  `-O3` and moved no timings at all -- which is what an instruction-neutral
+  change is supposed to look like.
   **Function inlining** runs from `-O1` up: a call to a same-file function is
   replaced by its body, as an expression when the body is a single `return` and
   as statements otherwise, following nested calls up to four levels deep. The
@@ -661,6 +677,57 @@ On `loopbench`, Z is at parity with gcc: both delete the loop entirely, Z in
 4 ms and gcc in 3 ms, neither of which executes the 20 million iterations. This loop is deliberately
 unfriendly to vectorization, so the comparison is like for like -- both compilers
 execute all ten million iterations.
+
+### Recursive and call-heavy code
+
+`fibbench` does not improve above `-O1`: 305 instructions and ~0.11 s at every
+level. Two separate things are going on, and it is worth keeping them apart,
+because the obvious one is a dead end.
+
+**The inliner declining recursion is correct, not a gap.** `fib(35)` is a tree of
+2^35 calls, so no bounded inliner can help it; inlining the recursion is not a
+missed speedup, it is an explosion. What gcc does at `-O2` is something else
+entirely: it recognises `fib(n-1) + fib(n-2)` as a linear recurrence in *n* and
+rewrites the recursion into a loop, which is why it goes from 0.07 s to 0.02 s
+there. That is an algebraic transformation of the recursion, in the same family
+as the closed-form loop pass, and it is a much larger piece of work than call
+codegen.
+
+**The cost is per-call overhead, and it is large.** `z$fib` is 27 instructions
+per call, of which only 7 do the recursion. The other 20 are 6 for frame setup
+and teardown, 11 for memory, and 3 jumps and moves, one of which is a dead
+`jmp` to a label emitted immediately after an unconditional jump to the same
+place. Most of the memory traffic is one parameter: it is spilled
+unconditionally (`alloc_regs`) and read back from its slot on every use, so
+`fib`'s `n` costs a store in the prologue and five loads, and a function with one
+parameter and no locals still pays `sub rsp, 48`.
+
+Keeping parameters in the callee-saved register pool was implemented and
+measured, and it is **not** a win: `fib` was unchanged (min 0.11 s and 25th
+percentile 0.11 s both ways, 40 interleaved runs) while the emitted code grew
+from 305 to 319 instructions. The reason is that `fib`'s critical path is the
+call and return sequence and the dependent branch on `n`; the parameter loads
+hit L1 and were never on it, whereas the `push`/`pop` the change adds per call
+are. Removing memory traffic only helps when the loop is stalled on memory, and
+this one is stalled on the call. So the parameter stays in its frame.
+
+The remaining gap to `gcc -O1` (0.11 s against 0.07 s) is not the spill at all.
+gcc keeps no frame pointer, so it spends no instructions on `push rbp` /
+`mov rbp, rsp` / `mov rsp, rbp` / `pop rbp`, and it forms each argument with a
+single `leaq -1(%rbx), %rdi` where Z stores the value to a temporary and reloads
+it. Those are per-call overheads of a different kind from the one measured
+above, and neither has been tried.
+
+One trap worth recording, because it cost this session a wrong answer.
+`mark_addr_taken` used to walk the addressed expression at statement index 0
+rather than the index of the statement containing it, so a local read *inside* an
+addressed expression got its live range recorded at the wrong place. That was
+harmless while every local's range started at its own definition, and it turned
+into a miscompile the moment a parameter's range was seeded at function entry:
+`inner(int* a, int i, int k)` gave its `i` a register, a later local took the
+same register, and `a[i] = t4` stored through the wrong index. `frame_layout`
+caught it as a diff (63 where 48 was expected). Any future work that reasons
+about liveness has to thread the real index through that walk.
 
 ## Design
 
