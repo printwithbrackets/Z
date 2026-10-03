@@ -328,6 +328,28 @@ static void skip_trivia(Lexer *lx) {
     }
 }
 
+/* The multiplier a duration unit letter stands for, or 0 for anything else.
+ *
+ * h, m and s are the whole vocabulary: hours, minutes and seconds. A number with
+ * one of them stuck to it is a duration, and a number with none is not, which is
+ * what keeps `37` and `37s` the same length of time while leaving every other
+ * integer literal exactly as it was. */
+static int duration_unit(int c) {
+    switch (c) {
+    case 'h':
+    case 'H':
+        return 3600;
+    case 'm':
+    case 'M':
+        return 60;
+    case 's':
+    case 'S':
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* Tokenizes the entire source into an arena array. */
 Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings, int *out_count,
                     const char *file) {
@@ -418,16 +440,95 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
             nspan.line = sline;
             nspan.col = scol;
 
+            /* A duration: a number with a unit stuck to it. Several may run
+             * together with nothing between them, as in `2h21m37`, and a trailing
+             * number with no unit of its own is seconds. So `hold(2h21m37)` waits
+             * 8497 seconds, and `37` and `37s` are the same length of time.
+             *
+             * The value is a plain count of seconds, which is what makes the units
+             * worth having. Everything downstream sees an ordinary integer, so there
+             * is no duration type for the parser, the type checker or codegen to
+             * know anything about, and `hold(2h)` is the same call as `hold(7200)`.
+             *
+             * Base 10 only: `0xffh` is not a duration anyone meant. This runs before
+             * the fraction and exponent paths, because `1.5h` is a float followed by
+             * an identifier rather than a duration, and because a unit letter is
+             * exactly the one thing that may follow a digit run without being the
+             * typo the check further down calls it. */
+            int is_duration = 0;
+            if (base == 10 && duration_unit(peek_char(&lx, 0)) > 0) {
+                is_duration = 1;
+                unsigned long long total = 0;
+                int dur_overflow = overflow;
+                long long part = (long long)val;
+                for (;;) {
+                    int mult = duration_unit(peek_char(&lx, 0));
+                    bump(&lx); /* a unit is here on entry, which is what invited us in */
+                    if (!dur_overflow) {
+                        unsigned long long room =
+                            (unsigned long long)Z_INT_MAX / (unsigned long long)mult;
+                        if (total > room || (unsigned long long)part > room - total)
+                            dur_overflow = 1;
+                        else
+                            total += (unsigned long long)part * (unsigned long long)mult;
+                    }
+                    /* Another component only if digits follow. A letter that is not
+                     * a unit ends the literal and is left for the caller to name. */
+                    if (!is_digit(peek_char(&lx, 0)))
+                        break;
+                    unsigned long long v = 0;
+                    int part_overflow = 0, ndv = 0;
+                    while (is_digit(peek_char(&lx, 0)) || peek_char(&lx, 0) == '_') {
+                        if (peek_char(&lx, 0) != '_') {
+                            if (!part_overflow) {
+                                unsigned dv = (unsigned)(peek_char(&lx, 0) - '0');
+                                if (v > ((unsigned long long)Z_INT_MAX - dv) / 10)
+                                    part_overflow = 1;
+                                else
+                                    v = v * 10 + dv;
+                            }
+                            ndv++;
+                        }
+                        bump(&lx);
+                    }
+                    if (part_overflow || ndv == 0)
+                        dur_overflow = 1;
+                    part = (long long)v;
+                    if (duration_unit(peek_char(&lx, 0)) == 0) {
+                        /* A trailing number with no unit is seconds. */
+                        unsigned long long room = (unsigned long long)Z_INT_MAX;
+                        if (!dur_overflow && total > room - (unsigned long long)part)
+                            dur_overflow = 1;
+                        if (!dur_overflow)
+                            total += (unsigned long long)part;
+                        break;
+                    }
+                }
+                nspan = span_at(start, lx.pos - start);
+                nspan.line = sline;
+                nspan.col = scol;
+                if (dur_overflow)
+                    diag_error(nspan, "this duration does not fit in 'int' seconds (max %lld)",
+                               Z_INT_MAX);
+                /* A letter that is not a unit is still the typo it was before. */
+                if (is_alnum(peek_char(&lx, 0)))
+                    diag_error(nspan, "unexpected '%c' after a duration literal",
+                               peek_char(&lx, 0));
+                tk.kind = T_INT;
+                tk.ival = (long long)total;
+            }
+
             /* A '.' begins a fraction only when a digit follows it. That is what
              * keeps `21.Twice()` working: there the '.' is followed by a letter
-             * and belongs to the member access, not to a number. An `e` begins
+             * and belongs to the member access, not to a number. An 'e' begins
              * an exponent, with or without a fraction, so `1e3` is a float too. */
             int is_float = 0;
             /* Seed the value with the integer part first, so a literal with an
              * exponent but no fraction -- `1e3` -- scales from the right number
              * instead of from zero. */
             tk.dval = (double)val;
-            if (base == 10 && peek_char(&lx, 0) == '.' && is_digit(peek_char(&lx, 1))) {
+            if (!is_duration && base == 10 && peek_char(&lx, 0) == '.' &&
+                is_digit(peek_char(&lx, 1))) {
                 bump(&lx);
                 double frac = 0, scale = 0.1;
                 while (is_digit(peek_char(&lx, 0)) || peek_char(&lx, 0) == '_') {
@@ -440,7 +541,8 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                 tk.dval = (double)val + frac;
                 is_float = 1;
             }
-            if (base == 10 && (peek_char(&lx, 0) == 'e' || peek_char(&lx, 0) == 'E')) {
+            if (!is_duration && base == 10 &&
+                (peek_char(&lx, 0) == 'e' || peek_char(&lx, 0) == 'E')) {
                 int esign = 1;
                 bump(&lx);
                 if (peek_char(&lx, 0) == '+') {
@@ -473,7 +575,10 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                     is_float = 1;
                 }
             }
-            if (is_float) {
+            if (is_duration) {
+                /* Already resolved above: the value is a count of seconds, and any
+                 * complaint about it has been made. */
+            } else if (is_float) {
                 /* Not a `break`: this branch sits directly in the lexing loop,
                  * so a break here would end the file rather than the number. */
                 if (ndigits == 0)

@@ -8,9 +8,22 @@
  * tracing collector has to guess what is live from a conservative scan of the
  * machine stack, and a wrong guess is silent corruption, while a destructor
  * either runs or does not and the compiler can see which. */
+
+/* What this file needs from the host, stated rather than inherited.
+ *
+ * `open`, `read`, `write` and `close` are POSIX, and so is `nanosleep`, which
+ * `hold` needs. Under a strict -std=c11 the glibc headers hide nanosleep behind
+ * a feature test that nothing has asked for yet, so an AddressSanitizer build of
+ * this file with the compiler's own flags, which pass a strict -std=c11, failed
+ * on an implicit declaration while the plain `cc` that `z build` shells out to
+ * got it by default. Asking for POSIX 2008 explicitly makes both the same, and
+ * the definition has to come before any header. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -457,6 +470,45 @@ void z_die(long code) {
 }
 
 void z_exit(long code) { z_die(code); }
+
+/* Waits for `seconds` and returns nothing.
+ *
+ * nanosleep rather than sleep, for two reasons that both matter here: sleep
+ * takes an unsigned int, so a wait longer than 49 days is not expressible and a
+ * negative one wraps to an enormous positive one, and sleep cannot be resumed
+ * after a signal.
+ *
+ * The wait is taken in slices for the same overflow reason one size down. tv_sec
+ * is a time_t, which is 32 bits on plenty of targets, and a single nanosleep
+ * whose tv_sec does not fit fails with EINVAL instead of waiting -- so a caller
+ * asking to hold for a year would get an instant return on one of those targets
+ * and no error at all. Slicing keeps every call inside what any time_t can hold.
+ *
+ * A signal does not shorten the wait. nanosleep rewrites the timespec it was
+ * given with the part it did not sleep, so resuming from that is exact rather
+ * than approximate, and it is what a caller means by asking to hold: returning
+ * early would make a retry loop spin instead of waiting.
+ *
+ * A non-positive argument returns at once rather than reporting anything. Zero
+ * is a reasonable thing to compute and pass -- `hold(0)` from an empty queue is
+ * not a mistake -- and a negative one has no meaning to report, since there is
+ * nothing the caller could do differently with the answer. */
+void z_hold(long seconds) {
+    if (seconds <= 0)
+        return;
+    long left = seconds;
+    while (left > 0) {
+        long slice = left > 3600 ? 3600 : left;
+        left -= slice;
+        struct timespec ts;
+        ts.tv_sec = (time_t)slice;
+        ts.tv_nsec = 0;
+        while (nanosleep(&ts, &ts) != 0) {
+            if (errno != EINTR)
+                break; /* nothing useful to do, and spinning would be worse */
+        }
+    }
+}
 
 char *z_char_str(long b) {
     char *out = zstr_alloc_impl(1);

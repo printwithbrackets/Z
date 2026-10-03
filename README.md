@@ -170,6 +170,12 @@ print(21.Twice());               // 42
 bool ok = 3 > 2 && !false;
 print(ok);                            // true
 print("count = " + 42);               // count = 42
+
+// Durations: a number with a unit stuck to it — h, m, s. They run together,
+// and a bare trailing number is seconds.
+hold(2h21m37);                        // wait for 2h 21m 37s
+hold(37);                             // same as hold(37s)
+print(2h + 21m + 37);                 // 8497 — a duration is an int of seconds
 ```
 
 ## How it works

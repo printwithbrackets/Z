@@ -1,0 +1,7 @@
+// The wait is a count of seconds, so it has to be an int. A string is not a
+// number of seconds however it is spelled, and a float is not one either: the
+// duration literal is an integer, so there is no sub-second hold to ask for.
+int main() {
+    hold("2h");
+    return 0;
+}

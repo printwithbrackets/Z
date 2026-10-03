@@ -1,0 +1,64 @@
+// Duration literals, and the `hold` builtin that waits for one.
+//
+// A duration is a number with a unit stuck to it: h for hours, m for minutes, s
+// for seconds. Several can run together with nothing between them, and a trailing
+// number with no unit of its own is seconds. So the three ways of writing the same
+// wait are `37`, `37s` and `0h0m37`, and `hold(2h21m37)` is `hold(8497)`.
+//
+// That is the whole design: the literal is an ordinary integer count of seconds,
+// so there is no duration type for the parser or the code generator to know about,
+// and a duration composes in arithmetic like anything else. Printing one shows the
+// seconds, which is deliberate -- it is what makes `hold(2h)` and `hold(7200)`
+// visibly the same call.
+//
+// This test prints every spelling rather than waiting for it. The waits are all
+// zero except for a single `hold(1)`, because a golden case that slept for real
+// would add its duration to every run of the suite at every optimization level,
+// and the literals are the part with the interesting edges. The one second is
+// here so that the runtime call is exercised end to end rather than only its
+// argument checking.
+
+int main() {
+    // The units on their own.
+    print(2h);      // 7200
+    print(21m);     // 1260
+    print(37s);     // 37
+    print(37);      // 37: a bare number is seconds, and still the integer 37
+
+    // Run together, which is the spelling the builtin exists for.
+    print(2h21m37); // 7200 + 1260 + 37
+    print(1h30m);   // 5400
+    print(59s);     // 59
+    print(60m);     // 3600, not 60: the unit decides
+    print(24h);     // 86400
+    print(1h0m0s);  // 3600, and every part of it is written out
+    print(0h0m0);   // 0
+
+    // Upper case is accepted, since `0X` and `1E3` are.
+    print(1H);
+    print(1M);
+    print(1S);
+
+    // Underscores separate digits inside a component, as they do in any number.
+    print(1_000s);
+    print(2h1_0m);
+
+    // A duration is an integer, so it is an ordinary operand.
+    print(2h + 1);
+    print(1h / 1m);   // 60
+    var d = 2h21m37;
+    print(d);
+
+    // Zero waits return at once, in every spelling.
+    hold(0);
+    hold(0s);
+    hold(0h0m0);
+    hold(0h0m0s);
+    print("held zero");
+
+    // One real second, so the runtime call itself is covered. It is the only
+    // thing in this file that takes any time.
+    hold(1);
+    print("held one second");
+    return 0;
+}

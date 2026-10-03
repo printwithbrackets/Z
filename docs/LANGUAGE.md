@@ -373,6 +373,30 @@ an optional `.` and fraction, an optional `e`/`E` exponent with a sign. A `.`
 begins a fraction only when a **digit** follows it, so `21.Twice()` is a member
 access. A float literal too large to represent saturates rather than erroring.
 
+**[now]** Duration literals: a decimal number with a unit stuck to it, where the
+unit is `h` for hours, `m` for minutes and `s` for seconds (either case).
+Components run together with nothing between them, and a trailing number with no
+unit of its own is seconds. So `2h21m37`, `37s`, `37` and `0h0m37` are all
+durations, and the first is 8497 seconds.
+
+```
+hold(2h21m37);    // wait for 2 hours, 21 minutes and 37 seconds
+hold(37);         // the same as hold(37s): a bare number is seconds
+```
+
+The value is an ordinary integer count of seconds, which is the whole design.
+Everything downstream — the parser, the type checker, the code generator — sees an
+`int`, so there is no duration type anywhere and `hold(2h)` is visibly the same
+call as `hold(7200)`. The cost is that `print(2h)` prints `7200` rather than
+`2h`, and that there is no sub-second duration: a duration literal is an integer,
+so `1.5h` is a float followed by an identifier, and `hold` takes an `int`.
+
+Only decimal literals may carry a unit, since `0xffh` is not a duration anyone
+meant. This is also the one place a digit may be followed by a letter without it
+being a typo, and it is checked before the fraction and exponent paths, so `1e3`
+is still a float. A digit run into any other letter remains an error, as does a
+duration too large to fit in an `int` count of seconds.
+
 **[now]** String literals: `"..."` with `\n \t \r \0 \\ \"`, `\xNN`, and
 `\uXXXX` encoded as UTF-8. An unrecognized escape is an error. `[new]` Raw
 strings, `r"..."`, for a path or a regex, so escaping stops being a puzzle.
@@ -803,6 +827,25 @@ conversion by hand.
 **[now]** `print` is a builtin: `print(int)`, `print(bool)`, `print(float)`,
 `print(string)`. A float prints with `%g`, so `1.5` is `1.5` and `100.0` is
 `100`. This is the same formatting `format` uses, so the two never disagree.
+
+**[now]** `hold(seconds)` is a builtin, and the reason it reads well is the
+duration literal rather than the function: `hold(2h21m37)` says what it means,
+and the argument is an ordinary `int` of seconds, so `hold(8497)` is the same
+call and there is no duration type to carry around.
+
+```
+hold(2h);        // two hours
+hold(1m30s);     // ninety seconds
+hold(0);         // returns at once
+```
+
+It waits in slices of at most an hour and resumes across a signal, because
+`tv_sec` is a `time_t` and one long `nanosleep` would fail rather than wait on a
+target with a 32-bit one. A signal does not shorten the wait: a caller asking to
+hold means hold, and returning early would make a retry loop spin. A
+non-positive argument returns immediately rather than reporting anything, since
+zero is a reasonable thing to compute and pass and a negative wait has no answer
+worth giving.
 
 **[cut]** `+` string concatenation. **[new]** `format(fmt, args...)` and
 `format_int(n)`, `format_float(f)`, `format_bool(b)`. A `string` is a value and

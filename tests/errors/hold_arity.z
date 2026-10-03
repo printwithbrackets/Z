@@ -1,0 +1,5 @@
+// hold takes exactly one argument: the number of seconds to wait for.
+int main() {
+    hold();
+    return 0;
+}

@@ -79,7 +79,14 @@
  * the compiler generates is type-checked like any other call and a wrong arity
  * is an ordinary argument error rather than an undefined symbol at link time.
  * str_dup is its counterpart and is the copy the compiler inserts when a
- * borrowed string is stored. */
+ * borrowed string is stored.
+ *
+ * hold is the odd one out, because its argument is usually not written as a
+ * number. A duration literal is an ordinary integer count of seconds to
+ * everything downstream -- `2h21m37` is 8497 -- so `hold(2h21m37)` and
+ * `hold(8497)` are the same call and no duration type is needed anywhere. It is
+ * here rather than a language form because a program that writes `hold(...)`
+ * wants a call, and a call is what this lowers to. */
 #define Z_BUILTIN_LIST(X)                                                                          \
     X("len", "z_strlen", 'i', "s")                                                                 \
     X("sub", "z_sub", 's', "sii")                                                                  \
@@ -116,6 +123,7 @@
     X("write_bytes", "z_write", 'i', "is")                                                         \
     X("io_errno", "z_io_errno", 'i', "")                                                           \
     X("io_eof", "z_io_eof", 'i', "")                                                               \
+    X("hold", "z_hold", 'v', "i")                                                                  \
     X("die", "z_die", 'i', "i")                                                                    \
     X("exit", "z_exit", 'i', "i")                                                                  \
     X("to_text", "z_to_text", 's', "a")                                                            \
