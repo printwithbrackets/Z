@@ -2397,10 +2397,23 @@ static void gen_expr_body(CG *cg, Expr *e) {
         load_temp(cg, t, "r11");
         buf_printf(cg->out, "  cmp DWORD PTR [r11], %d\n", err_tag);
         buf_printf(cg->out, "  jne .L%d\n", lcont);
-        /* The error path: hand the value back and leave the function. */
+        /* The error path: hand the value back and leave the function.
+         *
+         * Copy first, then destroy, then jump. The copy is of a temp and the
+         * destructors are of locals, so the order is not what makes it sound --
+         * what makes it sound is that the value is already in the caller's slot
+         * before any destructor runs, so a destructor that itself fails, prints,
+         * or re-enters cannot find the result half-written. The jump is last
+         * because everything before it runs exactly once, on the one path that
+         * takes it. */
         buf_printf(cg->out, "  mov rsi, QWORD PTR [rbp - %d]\n", temp_off(cg, t));
         buf_printf(cg->out, "  mov rdi, QWORD PTR [rbp - %d]\n", cg->cur_ret_slot);
         emit_memcpy(cg, tsz);
+        /* The scopes the `?` leaves. Without this the early return skips the
+         * teardown the normal `return` gets, and a function that owns a value
+         * leaks it every time the error arm is taken. */
+        if (e->try_drops != NULL)
+            gen_stmt_body(cg, e->try_drops);
         buf_printf(cg->out, "  jmp .Lret_%s\n", cg->cur_sym);
         buf_printf(cg->out, ".L%d:\n", lcont);
         /* The Ok path: the payload word, left in rax as the expression's value. */

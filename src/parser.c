@@ -378,6 +378,7 @@ static void mark_boxed_stmt(Parser *p, Stmt *s) {
 /* Forward declarations. */
 static Expr *parse_expr(Parser *p);
 static Stmt *parse_stmt(Parser *p);
+static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span);
 static void close_form_stmts(Parser *p, Stmt **items, int n);
 static void inline_program(Parser *p, Stmt *program);
 static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_index);
@@ -3471,6 +3472,20 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 continue;
             }
             t->type = type_result_ok(rt);
+            /* The early return this `?` may take is an exit from the function like
+             * any other, so the values the scopes it leaves own have to go with it.
+             *
+             * Built *here*, and not in the destructor pass with the rest of them,
+             * because the pass sees every local in the scope while the `?` must
+             * see only the ones that exist at this point:
+             *
+             *     var a = mayFail()?;   // a not yet declared
+             *     var b = new T();
+             *
+             * A `?` on the first line returns before `b` is ever initialised, so a
+             * drop list that included `b` would run its destructor on whatever the
+             * slot happened to hold. Built here, the list stops at `a`. */
+            t->try_drops = build_drops_chain(p, p->scope, span);
             e = t;
             continue;
         }
@@ -5431,6 +5446,7 @@ static Stmt *build_drops_to(Parser *p, Scope *inner, Scope *stop, Span span) {
     return b;
 }
 
+/* The `?` case, at the `?`. */
 static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span) {
     if (inner == NULL)
         return NULL;

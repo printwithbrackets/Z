@@ -122,6 +122,9 @@ struct Expr {
      * Zero means "not hoisted", which is safe because slot numbers start at 8. */
     int hoisted_slot;
     Expr *lhs;
+    /* E_TRY: the destructors for every scope between the `?` and the function
+     * that `?` propagates out of, built where the `?` was written. */
+    Stmt *try_drops;
     Expr *rhs;
     Expr *env; /* E_CLOSURE: the captured environment */
     /* E_IFACE: the type satisfying the interface, and the interface required. */

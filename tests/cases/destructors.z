@@ -75,6 +75,7 @@ int main() {
 
     print("end of main");
     jumpUser();
+    tryUser();
     return 0;
 }
 
@@ -122,5 +123,65 @@ int jumpUser() {
     jumps(1);
     print("after continue");
     return 0;
-    jumpUser();
+}
+
+/* `?` unwinds too.
+ *
+ * The early return a `?` takes on an Err jumps straight to the epilogue, so
+ * without this it skipped the teardown a `return` gets, and a function that owns
+ * a value leaked it every time the error arm was taken -- not once per run, but
+ * once per failure, which is the shape that hides longest.
+ *
+ * The drop list is built where the `?` is written rather than in the destructor
+ * pass, and the third case below is why. `late` is declared *after* the `?`, so on
+ * the path the `?` takes it has never been initialised; a list built by the pass
+ * would include it and run its destructor on an uninitialised slot. This case is
+ * the only thing that catches that, and it catches it as a crash rather than a
+ * diff.
+ */
+/* Not a constant Err on purpose: a `tryFail` that always failed makes the compiler
+ * prove every `?` below unreachable, and then the dead `print`s are reported as
+ * warnings and the locals they were keeping alive go unused. */
+Result<int, string> tryFail(bool fail) {
+    var inner = new Tracked(400);
+    if (fail) { return Err("no"); }
+    return Ok(7);
+}
+
+string describeTry(Result<int, string> r) {
+    return match (r) {
+        Ok(v) => "ok " + int_to_string(v),
+        Err(e) => "err " + e,
+    };
+}
+
+Result<int, string> tryOwner() {
+    var owned = new Tracked(401);
+    var v = tryFail(true)?;
+    print("unreachable " + int_to_string(v));
+    return Ok(v);
+}
+
+Result<int, string> tryOwnerNested() {
+    var outer = new Tracked(402);
+    if (true) {
+        var inner = new Tracked(403);
+        var v = tryFail(true)?;
+        print("unreachable " + int_to_string(v));
+    }
+    return Ok(0);
+}
+
+Result<int, string> tryLaterLocal() {
+    var v = tryFail(true)?;
+    var late = new Tracked(404);
+    print("unreachable " + int_to_string(v));
+    return Ok(v);
+}
+
+int tryUser() {
+    print("try " + describeTry(tryOwner()));
+    print("try " + describeTry(tryOwnerNested()));
+    print("try " + describeTry(tryLaterLocal()));
+    return 0;
 }
