@@ -143,6 +143,7 @@ int main(int argc, char **argv) {
         "local_types",
         "unroll",
         "unroll_dep",
+        "onearg_call",
         "closedform",
         "licm_bigframe",
         "inliner",

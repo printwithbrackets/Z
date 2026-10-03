@@ -1,0 +1,51 @@
+// A call with one integer argument passes it straight from rax into rdi, rather
+// than staging it in a frame temporary and reading it back. That is two
+// instructions and two memory operations saved per call, and it is on the
+// argument path of every call in the language, so it is worth its own test.
+//
+// What this file is really about is the frame slot the argument no longer uses.
+// The staging area is still reserved before the argument is evaluated even though
+// nothing is written there, because an argument that needs frame slots of its own
+// is a struct or union literal, and its payload has to land above the staging
+// area. Drop the reservation and the payload lands where the statement has pinned
+// a string temporary, and the release at the end of the statement hands
+// `z_str_free` an integer. That is a crash, not a wrong answer, and it took the
+// whole of `integration` to surface it, so the shapes are pinned here directly:
+// a union literal passed by reference, a struct literal passed by reference, both
+// interleaved with string concatenation in a single statement.
+
+enum Op { Add(int a, int b), Mul(int a, int b), Neg(int a) }
+
+int apply(Op o) => match o { Add(x, y) => x + y, Mul(m, n) => m * n, Neg(z) => 0 - z };
+
+// The five-part concatenation is the shape that broke: three calls by reference,
+// two literals, one statement, and four string temporaries pinned along the way.
+string unionChain() {
+    return apply(Add(2, 3)) + " " + apply(Mul(4, 5)) + " " + apply(Neg(7));
+}
+
+struct Pt { int x; int y; }
+
+int sumPt(Pt p) { return p.x + p.y; }
+
+// The same with a struct, and with the concatenation on both sides of it so the
+// payload is allocated after a pinned string rather than before one.
+string structChain() {
+    return sumPt(new Pt(9, 1)) + "," + sumPt(new Pt(4, 2));
+}
+
+// A union payload whose field is itself a call, so the payload slots are handed
+// out after the argument has already allocated some of its own.
+string nestedChain() {
+    return apply(Neg(sumPt(new Pt(5, 0)))) + "/" + apply(Add(sumPt(new Pt(1, 0)), 6));
+}
+
+int main() {
+    print(unionChain());
+    print(structChain());
+    print(nestedChain());
+    // A single-argument call on its own, and one nested inside another, so the
+    // value cannot be sitting in a temporary the outer call then overwrites.
+    print(apply(Neg(1)) + apply(Neg(2)));
+    return 0;
+}

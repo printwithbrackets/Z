@@ -1697,6 +1697,35 @@ static void gen_call(CG *cg, Expr *e) {
     cg->temp_top += e->nargs;
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
+
+    /* One integer argument goes straight from rax into rdi.
+     *
+     * Every other shape stages its arguments in frame temps, because evaluating
+     * one argument can clobber the register an earlier one is already sitting in,
+     * and the staged copy is what survives that. With a single argument there is
+     * nothing to protect it from: the value is computed last, into rax, and the
+     * next instruction moves it to rdi, so the store and the reload are both
+     * pure overhead.
+     *
+     * Everything else about the temporaries is left exactly as it is below,
+     * including the reservation above, which happens before the argument is
+     * evaluated. That reservation is load-bearing even though this path never
+     * writes the slot: an argument that needs frame slots of its own is a struct
+     * or union literal, and those slots have to land above the staging area or
+     * they land where the statement has pinned a string. Sharing this code path's
+     * bookkeeping is what keeps that true, so the saving here is only the two
+     * instructions and not the frame slot.
+     *
+     * A float is excluded because it is computed into the vector accumulator
+     * rather than rax, and a struct-returning call because the hidden buffer has
+     * already taken rdi. */
+    if (e->nargs == 1 && !sret && !is_kind(e->args[0]->type, TK_F64)) {
+        gen_expr(cg, e->args[0]);
+        buf_printf(cg->out, "  mov %s, rax\n", ARG_REGS[0]);
+        buf_printf(cg->out, "  call %s\n", e->is_extern ? e->name : z_sym(cg, e->name));
+        cg->temp_top = base;
+        return;
+    }
     for (int i = 0; i < e->nargs; i++) {
         if (is_kind(e->args[i]->type, TK_F64)) {
             gen_float(cg, e->args[i]);
