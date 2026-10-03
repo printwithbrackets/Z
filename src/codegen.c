@@ -1093,9 +1093,19 @@ static void alloc_regs(CG *cg, Stmt *fn) {
     int idx = 0;
     walk_alloc_block(cg, fn->fbody, &idx);
 
-    /* Greedy colouring in order of first definition. A local initialized to a
-     * constant and never reassigned anywhere is propagated as an immediate
-     * (no storage, no register). */
+    /* Which locals are compile-time constants is a property of the source rather
+     * than of the optimizer, and the load and store paths use it at every level,
+     * so it is settled here for all of them.
+     *
+     * Handing out *registers* is level-dependent, and -O0 must not do it: there
+     * `local_reg` refuses to name one, so the prologue would save rbx..r15 and the
+     * epilogue restore them with nothing in between ever reading them. It costs
+     * twice over, because a local holding a register is taken to have no address,
+     * so the debug info pass leaves it out -- and at -O0 it does have an address,
+     * and a debugger watching a -O0 build could not see the variable at all.
+     *
+     * The walk above still runs, because the debug info pass needs the slot list
+     * it builds whether or not anything ends up in a register. */
     for (int i = 0; i < cg->nlocals; i++) {
         LocalInfo *li = &cg->locals[i];
         li->assigned = -1;
@@ -1103,6 +1113,14 @@ static void alloc_regs(CG *cg, Stmt *fn) {
          * AND its address is never taken (else it can change through a
          * pointer behind our back) and it is a plain scalar. */
         li->is_const = li->const_cand && !li->reassigned && li->eligible;
+    }
+    if (!opt_on(cg))
+        return;
+
+    /* Greedy colouring in order of first definition, skipping the locals already
+     * settled as constants: they need no storage and no register. */
+    for (int i = 0; i < cg->nlocals; i++) {
+        LocalInfo *li = &cg->locals[i];
         if (li->is_const)
             continue;
         if (!li->eligible || li->d < 0 || li->u < li->d)

@@ -5,7 +5,13 @@ int scale(int v, int factor) {
 }
 
 int combine(int a, int b, int c) {
-    return a + b + c;
+    // Locals, so that a -O0 build has something a debugger should be able to
+    // name. At -O0 every local lives in its frame slot and has an address, so
+    // both of these belong in the debug info; above -O0 they are promoted to
+    // registers and have none, which is a separate gap.
+    var sum = a + b;
+    var total = sum + c;
+    return total;
 }
 
 float twice(float v) { return v * 2.0; }
