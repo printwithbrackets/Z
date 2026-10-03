@@ -1,0 +1,20 @@
+// An extern call can write through any pointer it was handed, so after one runs
+// the read and written sets say nothing reliable about this body. Rather than
+// guess, the body is left rolled. `s` and `t` would otherwise be two clean
+// independent chains, so this probe fails if the opaque case is ignored. Left
+// rolled.
+extern int cstep(int x);
+
+int main() {
+    var s = 0;
+    var t = 0;
+    var i = 0;
+    while (i < 100) {
+        s = cstep(s);
+        t = cstep(t);
+        i = i + 1;
+    }
+    print(s);
+    print(t);
+    return 0;
+}

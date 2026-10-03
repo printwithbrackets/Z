@@ -1,5 +1,10 @@
-// Loop unrolling, which -O3 applies to every loop that has a condition and a
-// body small enough to copy.
+// Loop unrolling, for the bodies that -O3 leaves rolled.
+//
+// Every loop here has one loop-carried recurrence, so the -O3 dependence gate
+// leaves all of them rolled -- see tests/cases/unroll_dep.z for the same shapes
+// rebuilt to be unrolled. That makes this file the test for the half of the
+// unroll machinery that runs everywhere else: at -O0 through -O2, and at -O3 for
+// every loop the gate declines.
 //
 // The condition is tested before each copy rather than once per pass, so the
 // body runs exactly as many times as it did rolled. What the test catches is the

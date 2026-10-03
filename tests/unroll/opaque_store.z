@@ -1,0 +1,18 @@
+// The same conservatism for a store whose target is not a plain local: `v` is
+// reached through an index, so the write could land anywhere the analysis
+// cannot name. Left rolled, even though `s` and `t` are two clean chains.
+int main() {
+    var s = 0;
+    var t = 0;
+    var v = new int[4];
+    var i = 0;
+    while (i < 100) {
+        v[i % 4] = i;
+        s = s + 1;
+        t = t + 2;
+        i = i + 1;
+    }
+    print(s);
+    print(t);
+    return 0;
+}

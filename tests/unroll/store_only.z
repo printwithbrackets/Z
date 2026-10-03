@@ -1,0 +1,14 @@
+// `s` is written every iteration and never read, so nothing carries a value
+// across the iteration boundary and there is no chain to overlap. An assignment
+// target is a write, not a read, and counting it as both would make a body of
+// plain stores look like a chain per store. Left rolled.
+int main() {
+    var s = 0;
+    var i = 0;
+    while (i < 100) {
+        s = i * 3;
+        i = i + 1;
+    }
+    print(s);
+    return 0;
+}

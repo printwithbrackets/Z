@@ -1,0 +1,27 @@
+// Four independent loop-carried chains: a, b, c, d. This is the case unrolling
+// exists for, and the reason the pass cannot simply be turned off.
+//
+// math and mix are both one serial chain -- `s = (s * 31 + i) % d` needs the
+// previous iteration's multiply -- so four copies of the body serialise against
+// each other exactly as one copy did, and unrolling only adds three more
+// compare/branch pairs. Here each of a, b, c, d has its own recurrence, so the
+// four updates fill each other's multiply latency and the body gets wider than
+// any single chain is long. That is the whole difference between the two shapes,
+// and it is a dependence difference, not a size difference: this body is 5
+// statements and math's is 2.
+//
+// The printed sum is not checked against anything here. bench.py only times
+// these; the correctness companion is tests/cases/unroll_dep.z.
+int main() {
+    var a = 1; var b = 2; var c = 3; var d = 4;
+    var i = 0;
+    while (i < 50000000) {
+        a = a * 3 + 1;
+        b = b + 2;
+        c = c + 3;
+        d = d + 4;
+        i = i + 1;
+    }
+    print(a + b + c + d);
+    return 0;
+}

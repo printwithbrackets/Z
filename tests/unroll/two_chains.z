@@ -1,0 +1,16 @@
+// Two independent recurrences, `a` and `b`, so the copies of one can run
+// alongside the copies of the other. This is the shape unrolling is for, and
+// the shape tests/bench/ilpbench.z measures. Unrolled.
+int main() {
+    var a = 1;
+    var b = 2;
+    var i = 0;
+    while (i < 100) {
+        a = a * 3 + 1;
+        b = b + 2;
+        i = i + 1;
+    }
+    print(a);
+    print(b);
+    return 0;
+}

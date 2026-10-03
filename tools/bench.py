@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 
-BENCHES = ["fib", "loop", "math", "mix"]
+BENCHES = ["fib", "loop", "math", "mix", "ilp"]
 # Pinning the child to one core keeps a scheduler migration from landing the
 # whole run on a core sharing its L2 with something else. This box runs at a load
 # average above 1, which is what made the first two "regressions" here vanish on
@@ -99,9 +99,13 @@ def main():
     ap.add_argument("benches", nargs="*", default=None)
     ap.add_argument("--reps", type=int, default=9)
     ap.add_argument("--z", default=os.path.join(ROOT, "z"))
-    args = ap.parse_args()
+    # parse_known_args, because `-O2` is a documented argument that argparse would
+    # otherwise reject as an unknown option: it looks like a flag, so the level
+    # filter never ran and `tools/bench.py -O2 -O3` -- the invocation in this
+    # file's own docstring -- died with a usage error.
+    args, rest = ap.parse_known_args()
     benches = args.benches or BENCHES
-    levels = [a for a in sys.argv[1:] if a.startswith("-O")]
+    levels = [a for a in rest if a.startswith("-O")]
     if not levels:
         levels = LEVELS
 

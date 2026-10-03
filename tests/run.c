@@ -14,6 +14,12 @@
 
 static char buf[1 << 20];
 
+/* `z asm` output for one file. The standard library is spliced into every
+ * compilation unit, so this is much larger than a diagnostic would be. File
+ * scope because a megabyte on the stack is not something to add to main's
+ * frame. */
+static char asm_buf[1 << 20];
+
 static int slurp(const char *path, char *out, int cap) {
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -136,6 +142,7 @@ int main(int argc, char **argv) {
         "typed_locals",
         "local_types",
         "unroll",
+        "unroll_dep",
         "closedform",
         "licm_bigframe",
         "inliner",
@@ -626,6 +633,84 @@ int main(int argc, char **argv) {
         }
         printf("ok   %s (modules)\n", modules[i]);
         pass++;
+    }
+
+    /* The -O3 unroll gate.
+     *
+     * The gate decides which loops get four copies of their body, and no golden
+     * output can see that decision: a loop that unrolls has to produce exactly
+     * the same answer as one that does not, which is the property the `unroll`
+     * and `unroll_dep` cases check. So this reads the emitted assembly instead
+     * and compares the instruction count at -O2 against -O3. A body the gate
+     * leaves rolled emits the same instructions at both levels; a body it
+     * unrolls emits three more copies of itself. Counting instructions rather
+     * than comparing text is what makes this robust to label renumbering, and
+     * unlike a timing check it cannot flake.
+     *
+     * Each sibling <name>.expected holds the word `rolled` or `unrolled`. */
+    {
+        const char *gate_dir = "tests/unroll";
+        char expected[1 << 16];
+        char *save = NULL;
+        static const char *gates[] = {
+            "one_chain",    "induction_is_not_a_chain",
+            "two_chains",   "three_chains",
+            "store_only",   "opaque_call",
+            "opaque_store", "big_body",
+            "no_condition", "nested_loop_is_opaque",
+        };
+        for (size_t i = 0; i < sizeof gates / sizeof(*gates); i++) {
+            snprintf(path, sizeof path, "%s/%s.z", gate_dir, gates[i]);
+            snprintf(exp_path, sizeof exp_path, "%s/%s.expected", gate_dir, gates[i]);
+            if (!slurp(exp_path, expected, sizeof expected)) {
+                fprintf(stderr, "FAIL unrollgate %s (missing .expected)\n", gates[i]);
+                fail++;
+                continue;
+            }
+            expected[strcspn(expected, "\n")] = 0;
+            /* Always -O2 against -O3, and never the level the suite is running
+             * at. The gate only exists at -O3, so its decisions are the same at
+             * every rung of the ladder: comparing -O0 against -O2 here would call
+             * every probe unrolled, because -O0 emits more instructions for
+             * reasons that have nothing to do with this pass. */
+            static const char *levels[2] = {"-O2", "-O3"};
+            int insns[2] = {-1, -1};
+            for (int lvl = 0; lvl < 2; lvl++) {
+                snprintf(cmd, sizeof cmd, "%s asm %s %s 2>&1", zc, path, levels[lvl]);
+                if (run_cmd_capture(cmd, asm_buf, sizeof asm_buf) != 0) {
+                    fprintf(stderr, "FAIL unrollgate %s (asm failed)\n%s\n", gates[i], asm_buf);
+                    insns[0] = insns[1] = -1;
+                    break;
+                }
+                int n = 0;
+                /* The rule tools/bench.py counts by: a directive or a label is
+                 * not an instruction. */
+                for (char *line = strtok_r(asm_buf, "\n", &save); line;
+                     line = strtok_r(NULL, "\n", &save)) {
+                    char *t = line;
+                    while (*t == ' ' || *t == '\t')
+                        t++;
+                    size_t len = strlen(t);
+                    if (len == 0 || t[0] == '.' || t[len - 1] == ':' || t[0] == '#')
+                        continue;
+                    n++;
+                }
+                insns[lvl] = n;
+            }
+            if (insns[0] < 0 || insns[1] < 0)
+                continue;
+            int got = insns[1] > insns[0];
+            int want = strcmp(expected, "unrolled") == 0;
+            if (got != want) {
+                fprintf(stderr, "FAIL unrollgate %s (expected %s, -O2=%d -O3=%d insns)\n", gates[i],
+                        expected, insns[0], insns[1]);
+                fail++;
+            } else {
+                printf("ok   unrollgate %s (%s, %d insns)\n", gates[i], expected,
+                       got ? insns[1] : insns[0]);
+                pass++;
+            }
+        }
     }
 
     printf("\n%d passed, %d failed\n", pass, fail);

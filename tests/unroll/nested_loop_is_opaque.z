@@ -1,0 +1,25 @@
+// A nested loop is a separate iteration space, so the outer body has no
+// dependence answer the analysis can use.
+//
+// `s` is the only chain that actually crosses the outer iteration. `j` is read
+// by the inner condition and by the `if` below, and written by the inner step, so
+// a walk of the outer body sees it read and written -- but it is reset to 0 by
+// the inner `for` header on every outer pass, so it carries nothing between outer
+// iterations. Counting it would make this look like two independent chains and
+// unroll it. Left rolled.
+//
+// The `break` is what makes this probe load-bearing: without it the inner loop
+// folds away and the shape rolls either way, so removing the rule would not fail
+// anything. tests/cases/unroll_dep.z checks that the inner loop of a parallel
+// shape still unrolls on its own account.
+int main() {
+    var s = 0;
+    for (var i = 0; i < 4; i = i + 1) {
+        for (var j = 0; j < 10; j = j + 1) {
+            if (j == 2) { break; }
+            s = s + 1;
+        }
+    }
+    print(s);
+    return 0;
+}

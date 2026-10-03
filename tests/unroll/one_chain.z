@@ -1,0 +1,15 @@
+// One loop-carried recurrence: `s` in `s = (s * 31 + i) % d` cannot start
+// iteration n+1 until iteration n's multiply and divide have retired, so four
+// copies of this body queue up behind the same chain exactly as one copy did.
+// This is the shape of tests/bench/mixbench.z and mathbench.z, and the shape
+// unrolling cannot help. Left rolled.
+int main() {
+    var s = 0;
+    var i = 0;
+    while (i < 100) {
+        s = (s * 31 + i) % 1000000007;
+        i = i + 1;
+    }
+    print(s);
+    return 0;
+}
