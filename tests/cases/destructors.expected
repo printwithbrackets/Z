@@ -32,7 +32,25 @@ drop
 loop done
 drop
 201
+drop
+202
 break done
 end of main
+before
+kept 300
+drop
+300
+drop
+301
+after break
+kept 300
+drop
+300
+drop
+301
+kept 302
+drop
+302
+after continue
 drop
 7

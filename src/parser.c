@@ -166,6 +166,11 @@ typedef struct {
     Type *cur_ret; /* return type of the function being parsed */
     int foreach_counter;
     int loop_depth; /* break/continue must sit inside a loop */
+    /* `p->nopen` when each enclosing loop's body was entered, innermost last. A
+     * `break` destroys the scopes from where it was written up to the loop's own
+     * body scope, and this is where "the loop's own body scope" is recorded. */
+    int loop_top[MAX_DROP_SCOPES];
+    int nloops;
     /* Set while parsing the operand of `&`, so a `.name` on a class receiver
      * builds a bound method pointer instead of reporting a missing field. */
     int take_method_addr;
@@ -5394,6 +5399,38 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
  * the function's outermost block. A `return` inside a nested block has to
  * destroy that block's values as well as the function's, and it is the
  * *innermost* scope's values that are destroyed first. */
+/* The drops for the scopes between `inner` and a floor, exclusive.
+ *
+ * `build_drops_chain` walks up to the function's parameter scope because a return
+ * leaves the whole function. A `break` leaves less: the scopes between where it
+ * was written and the loop body, and the parameter scope is nowhere near. So this
+ * takes the floor as a count of open scopes rather than a Scope pointer, and stops
+ * there. */
+static Stmt *build_drops_to(Parser *p, Scope *inner, Scope *stop, Span span) {
+    if (inner == NULL)
+        return NULL;
+    int cap = 0;
+    for (Scope *sc = inner; sc != NULL && sc != stop; sc = sc->parent)
+        cap += sc->ndrops;
+    if (cap == 0)
+        return NULL;
+    Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
+    int k = 0;
+    for (Scope *sc = inner; sc != NULL && sc != stop; sc = sc->parent) {
+        Stmt *d = build_drops(p, sc, span);
+        if (d == NULL)
+            continue;
+        for (int j = 0; j < d->nitems; j++)
+            items[k++] = d->items[j];
+    }
+    if (k == 0)
+        return NULL;
+    Stmt *b = new_stmt(p, S_BLOCK, span);
+    b->items = items;
+    b->nitems = k;
+    return b;
+}
+
 static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span) {
     if (inner == NULL)
         return NULL;
@@ -5469,6 +5506,30 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
             if (d != NULL) {
                 /* The body scope is recorded on the return, so this statement is
                  * a block after the rewrite: the drops and the return. */
+                Stmt **out = arena_alloc_array(p->arena, (size_t)(d->nitems + 1), sizeof(Stmt *));
+                for (int j = 0; j < d->nitems; j++)
+                    out[j] = d->items[j];
+                out[d->nitems] = s;
+                Stmt *b = new_stmt(p, S_BLOCK, s->span);
+                b->items = out;
+                b->nitems = d->nitems + 1;
+                items[i] = b;
+                emitted += d->nitems;
+            }
+            continue;
+        }
+        if (s->kind == S_BREAK || s->kind == S_CONTINUE) {
+            /* The scopes a jump leaves, innermost first, ending at the loop's own
+             * body scope -- which is not left, because `break` jumps out of the
+             * loop and `continue` jumps to its step, and in both cases the loop's
+             * body scope is torn down when the loop itself ends.
+             *
+             * The drops go *before* the jump in the same item list, which is why
+             * this needs nothing from the code generator: the jump is the last
+             * statement of the block the pass builds, so it cannot run before the
+             * drops above it. */
+            Stmt *d = build_drops_to(p, s->ret_scope, s->jump_floor, s->span);
+            if (d != NULL) {
                 Stmt **out = arena_alloc_array(p->arena, (size_t)(d->nitems + 1), sizeof(Stmt *));
                 for (int j = 0; j < d->nitems; j++)
                     out[j] = d->items[j];
@@ -7835,7 +7896,11 @@ static Stmt *parse_stmt(Parser *p) {
         Stmt *s = new_stmt(p, S_WHILE, start);
         s->cond = cond;
         p->loop_depth++;
+        if (p->nloops < MAX_DROP_SCOPES)
+            p->loop_top[p->nloops++] = p->nopen;
         s->body = parse_stmt(p);
+        if (p->nloops > 0)
+            p->nloops--;
         p->loop_depth--;
         return s;
     }
@@ -7882,7 +7947,11 @@ static Stmt *parse_stmt(Parser *p) {
         s->cond = cond;
         s->for_step = step;
         p->loop_depth++;
+        if (p->nloops < MAX_DROP_SCOPES)
+            p->loop_top[p->nloops++] = p->nopen;
         s->body = parse_stmt(p);
+        if (p->nloops > 0)
+            p->nloops--;
         p->loop_depth--;
         return s;
     }
@@ -7962,7 +8031,17 @@ static Stmt *parse_stmt(Parser *p) {
         expect_semi(p);
         if (p->loop_depth == 0)
             diag_error(bs, "'break' is only valid inside a loop");
-        return new_stmt(p, S_BREAK, bs);
+        Stmt *b = new_stmt(p, S_BREAK, bs);
+        b->ret_scope = p->scope;
+        /* Resolved here, not in the destructor pass: the pass runs once the whole
+         * unit is parsed, by which time every scope has been popped and
+         * `p->open_scopes` is empty. A floor read then is always "none", the walk
+         * runs to the top of the function, and the jump destroys the caller's
+         * locals -- which is how `drop 202` came out followed by a second, wrong
+         * `drop 7`. */
+        int fl = p->nloops > 0 ? p->loop_top[p->nloops - 1] : 0;
+        b->jump_floor = fl > 0 ? p->open_scopes[fl - 1] : NULL;
+        return b;
     }
     case T_KW_CONTINUE: {
         Span cs = t->span;
@@ -7970,7 +8049,11 @@ static Stmt *parse_stmt(Parser *p) {
         expect_semi(p);
         if (p->loop_depth == 0)
             diag_error(cs, "'continue' is only valid inside a loop");
-        return new_stmt(p, S_CONTINUE, cs);
+        Stmt *c = new_stmt(p, S_CONTINUE, cs);
+        c->ret_scope = p->scope;
+        int fl = p->nloops > 0 ? p->loop_top[p->nloops - 1] : 0;
+        c->jump_floor = fl > 0 ? p->open_scopes[fl - 1] : NULL;
+        return c;
     }
     default:
         break;

@@ -191,6 +191,11 @@ struct Stmt {
      * is leaving. Its locals die first; the pass then walks up the parent chain
      * for the rest, stopping at the function's parameter scope. */
     struct Scope *ret_scope;
+    /* S_BREAK/S_CONTINUE: the scope the jump must not destroy, which is the one
+     * enclosing the loop. Everything from where the jump was written up to *but
+     * not including* this goes, so the loop's own body scope is included -- a
+     * `break` does leave it -- and whatever the loop was written inside survives. */
+    struct Scope *jump_floor;
     /* S_BLOCK: when nonzero, codegen emits this label after the block's items,
      * and it is what an S_LEAVE inside the block jumps to. Zero on every block
      * that is not an inlined body. */

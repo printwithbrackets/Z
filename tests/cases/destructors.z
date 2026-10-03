@@ -74,6 +74,7 @@ int main() {
     print("break done");
 
     print("end of main");
+    jumpUser();
     return 0;
 }
 
@@ -88,4 +89,38 @@ int early(int v) {
         var inner = new Tracked(v + 1);
     }
     return v + 100;
+}
+
+/* `break` and `continue` destroy what the iteration owns.
+ *
+ * A jump out of a scope is an exit from it like any other, and the values that
+ * scope owns have to go with it. This used to be a diagnostic that said `?`,
+ * `break` and `continue` did not unwind; they do now.
+ *
+ * The loop's own body scope is destroyed by the jump, because a break does leave
+ * it. Whatever the loop was written *inside* survives, which is the part that was
+ * easy to get wrong: the floor for the walk is the scope enclosing the loop, and
+ * resolving it after the fact rather than where the jump was written makes the
+ * walk run to the top of the function and destroys the caller's locals too.
+ */
+int jumps(int which) {
+    for (var i = 0; i < 3; i = i + 1) {
+        var owned = new Tracked(300 + i);
+        if (i == 1) {
+            if (which == 0) { break; }
+            continue;
+        }
+        print("kept " + int_to_string(owned.id));
+    }
+    return 0;
+}
+
+int jumpUser() {
+    print("before");
+    jumps(0);
+    print("after break");
+    jumps(1);
+    print("after continue");
+    return 0;
+    jumpUser();
 }

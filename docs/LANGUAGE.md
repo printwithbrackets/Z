@@ -290,8 +290,13 @@ done, and the rest of the slice is waiting on them.
   its captures to live as long as it does, which is `Rc` — the same cell, with a
   count. This is a small change to the runtime and the reason the counter
   example in [Closures](#closures) still works.
-- **Every exit path runs destructors**, including `?`. This is the analysis
-  named in decision 2 and it is where the time goes.
+- **partly done — Every exit path runs destructors.** `break` and `continue`
+  destroy what the iteration owns, and so does the jump's own scope. The floor for
+  that walk is the scope *enclosing* the loop, resolved where the jump is written:
+  resolved after the fact, the open-scope stack has already been unwound, the walk
+  runs to the top of the function, and the jump destroys the caller's locals too.
+  `?` still does not unwind -- its early return jumps straight to the epilogue --
+  so a `?` in a function that owns a value leaks it.
 - **`lib/string.z`'s `StringBuilder`** becomes a `struct` owning a `Vec<byte>`,
   which removes the `str_buf_append` special case in the runtime entirely.
 
@@ -1149,7 +1154,6 @@ calls at the end of a scope. What works, and is tested:
 What does not work yet, and so does **not** satisfy the rest of section 2:
 
 - `?` propagating out of a function that owns a value leaks it, silently
-- `break` and `continue` out of a scope skip its teardown
 - a type with no destructor of its own does not destroy its owning fields; the
   recursive default teardown of this section is not implemented
 - `string` is owned, copied deeply, released at scope end, released on overwrite,
