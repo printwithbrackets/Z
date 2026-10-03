@@ -1,0 +1,66 @@
+// Parameters past the sixth integer argument arrive on the stack, and a callee
+// reads them at an offset from its own frame pointer.
+//
+// That offset is not 16. Between the caller's stack and rbp there is, in order,
+// the return address, the callee's saved frame pointer, and one slot for every
+// callee-saved register the callee chose to save -- so the first stack argument is
+// at [rbp + 16 + 8*saved_registers]. The term was missing, and a function with
+// more than six integer parameters that also saved a register read its trailing
+// arguments out of its own saved rbx instead of the caller's stack, returning
+// whatever number happened to be in it.
+//
+// `manyargs` could not catch this: it has eight parameters and no locals, so it
+// never saves a register and the missing term is zero. Every function here has
+// enough live locals to be given one, which is what turns the offset wrong.
+
+// Seven parameters: exactly one on the stack.
+int seven(int a, int b, int c, int d, int e, int f, int g) {
+    var p = a + 1;
+    var q = b + 2;
+    var r = c + 3;
+    var t = d + 4;
+    return p + q + r + t + e + f + g;
+}
+
+// Ten: four on the stack, so a wrong offset shifts all of them.
+int ten(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {
+    var p = a * 2;
+    var q = b * 3;
+    var r = c * 4;
+    return p + q + r + d + e + f + g + h + i + j;
+}
+
+// Mixed magnitudes, so a register read instead of a stack slot cannot land on a
+// plausible answer.
+int scatter(int a, int b, int c, int d, int e, int f, int g, int h) {
+    var s1 = a + 1000000;
+    var s2 = b + 2000000;
+    var s3 = c + 3000000;
+    var s4 = s1 + s2;
+    return s4 + s3 + d + e + f + g + h;
+}
+
+// A callee with no locals saves nothing, so its offset is the plain 16. Called
+// from a function that does save registers, to keep the two directions honest.
+int plain(int a, int b, int c, int d, int e, int f, int g, int h) {
+    return a + b + c + d + e + f + g + h;
+}
+
+int main() {
+    print(seven(1, 2, 3, 4, 5, 6, 7));
+    print(seven(10, 20, 30, 40, 50, 60, 70));
+    print(ten(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    print(ten(9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+    print(scatter(1, 2, 3, 4, 5, 6, 7, 8));
+    print(scatter(8, 7, 6, 5, 4, 3, 2, 1));
+
+    // Through a caller that keeps several values live in registers across the
+    // call, so the caller's own frame shape is in play too.
+    var x = 1;
+    var y = 2;
+    var z = 3;
+    var w = 4;
+    print(plain(x, y, z, w, 5, 6, 7, 8) + plain(8, 7, 6, 5, w, z, y, x));
+    print(seven(x, y, z, w, 5, 6, 7));
+    return 0;
+}

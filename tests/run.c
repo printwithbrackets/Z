@@ -145,6 +145,7 @@ int main(int argc, char **argv) {
         "unroll_dep",
         "onearg_call",
         "durations",
+        "stackargs",
         "closedform",
         "licm_bigframe",
         "inliner",

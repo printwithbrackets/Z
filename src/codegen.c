@@ -3861,6 +3861,34 @@ static void release_str_temps(CG *cg, int saved) {
     cg->npinned = saved;
 }
 
+/* True when control cannot fall out of the bottom of `s`, because its last
+ * statement transfers control somewhere else: a return, a break, a continue, or
+ * the end of an inlined body. A loop does not count, since it falls through once
+ * its condition fails, and an `if` does not count unless both arms leave, which
+ * is not worth tracking -- being wrong here would only cost the jump it removes.
+ *
+ * This is what lets the `if` below drop the jump that would follow such a branch.
+ * That jump is not merely useless, it sits in the middle of the path: a `return`
+ * inside the branch emits its own jump, and an unconditional jump after an
+ * unconditional jump is one the front end still has to fetch, decode and predict
+ * on every pass. In a recursive function with a base case, that is the path half
+ * the calls take. */
+static int stmt_leaves(CG *cg, Stmt *s) {
+    if (s == NULL)
+        return 0;
+    switch (s->kind) {
+    case S_RETURN:
+    case S_BREAK:
+    case S_CONTINUE:
+    case S_LEAVE:
+        return 1;
+    case S_BLOCK:
+        return s->nitems > 0 && stmt_leaves(cg, s->items[s->nitems - 1]);
+    default:
+        return 0;
+    }
+}
+
 static void gen_stmt(CG *cg, Stmt *s) {
     int saved = cg->npinned;
     gen_stmt_body(cg, s);
@@ -3965,7 +3993,13 @@ static void gen_stmt_body(CG *cg, Stmt *s) {
         int lend = next_label(cg);
         gen_cond_branch(cg, s->cond, lelse);
         gen_stmt(cg, s->body);
-        buf_printf(cg->out, "  jmp .L%d\n.L%d:\n", lend, lelse);
+        /* Skipped when the branch leaves, since nothing can arrive at the end
+         * label from there. The else label is emitted either way: it is where the
+         * condition lands, and with no else-arm it is also where the statement
+         * after the `if` begins. */
+        if (!stmt_leaves(cg, s->body))
+            buf_printf(cg->out, "  jmp .L%d\n", lend);
+        buf_printf(cg->out, ".L%d:\n", lelse);
         if (s->orelse != NULL)
             gen_stmt(cg, s->orelse);
         buf_printf(cg->out, ".L%d:\n", lend);
@@ -4690,16 +4724,26 @@ static void emit_function(CG *cg, Stmt *fn) {
         buf_printf(cg->out, "%s:\n", dbg_begin);
     }
     buf_printf(cg->out, "%s:\n", sym);
-    buf_printf(cg->out, "  push rbp\n  mov rbp, rsp\n");
+    /* The pool registers are saved *before* the frame pointer is established,
+     * which is the usual shape and here is also the correct one. It leaves rbp
+     * pointing at the top of this function's own frame, so a local at [rbp - k]
+     * cannot collide with a saved register, and an incoming stack argument really
+     * is at [rbp + 16 + soff] the way the ABI says it is.
+     *
+     * Saving rbp first and the pool registers after it needs rbp rebased below
+     * them with a `lea`, to keep the two regions from overlapping -- and once it
+     * is rebased, [rbp + 16] is a saved register rather than the caller's first
+     * stack argument. Every parameter past the sixth was then read out of the
+     * wrong slot, in any function that had both, at every optimization level
+     * including -O0. `manyargs` is eight parameters and no locals, which is why
+     * it passed: nothing there ever took a register.
+     *
+     * Dropping the `lea` also keeps this frame the shape a reader expects, which
+     * is the form a frame-pointer-omitting pass would have to preserve. */
     for (int r = 0; r < NPOOL; r++)
         if (cg->pool_mask & (1 << r))
             buf_printf(cg->out, "  push %s\n", POOL_REGS[r]);
-    /* Local and temporary slots are numbered from rbp-8 downwards, which is
-     * exactly where the pool registers just landed. Rebase rbp below them so
-     * the two regions cannot overlap; the saved registers are then reachable
-     * as [rbp+8] .. [rbp+8*N] and the epilogue's pops line up again. */
-    if (npool_used > 0)
-        buf_printf(cg->out, "  lea rbp, [rbp - %d]\n", 8 * npool_used);
+    buf_printf(cg->out, "  push rbp\n  mov rbp, rsp\n");
     if (frame > 0)
         buf_printf(cg->out, "  sub rsp, %d\n", frame);
     /* Spill the parameters into their frame slots.
@@ -4714,9 +4758,18 @@ static void emit_function(CG *cg, Stmt *fn) {
      * parameter from a different register depending on how it was called.
      *
      * An argument past its register cap is read from the caller's stack, one
-     * eight-byte slot per argument in order. The frame is anchored at rbp, so the
-     * first one is at [rbp+16]: the saved frame pointer and the return address
-     * sit below it. */
+     * eight-byte slot per argument in order, and that offset is measured from rbp,
+     * which means it has to account for everything this prologue pushed. Between
+     * the caller's stack and rbp there is, in order, the return address, this
+     * function's saved frame pointer, and one slot per pool register it saved --
+     * so the first stack argument is at [rbp + 16 + 8*npool], not [rbp + 16].
+     *
+     * That term was missing, and every parameter past the sixth was read out of a
+     * saved callee-saved register instead of the caller's stack, so a function with
+     * more than six integer parameters returned whatever happened to be in rbx. It
+     * is a constant offset per function, which is why nothing about the call site
+     * is wrong and why `manyargs` passes: it has eight parameters and no locals, so
+     * it never saves a pool register and the term is zero. */
     if (fn->nparams > 0) {
         Type **ptypes = arena_alloc_array(cg->arena, (size_t)fn->nparams, sizeof(Type *));
         for (int i = 0; i < fn->nparams; i++)
@@ -4728,7 +4781,8 @@ static void emit_function(CG *cg, Stmt *fn) {
                 buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot,
                            aa.reg[i]);
             } else if (aa.reg[i] == NULL) {
-                buf_printf(cg->out, "  mov r11, QWORD PTR [rbp + %d]\n", 16 + aa.soff[i]);
+                buf_printf(cg->out, "  mov r11, QWORD PTR [rbp + %d]\n",
+                           16 + 8 * npool_used + aa.soff[i]);
                 buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], r11\n", fn->params[i]->slot);
             } else if (fn->params[i]->boxed) {
                 /* A captured parameter: the slot must hold the box, not the
@@ -4748,11 +4802,14 @@ static void emit_function(CG *cg, Stmt *fn) {
     /* rsp is already at the deepest saved pool register once rbp is rebased,
      * so pop them in reverse push order and then rbp. The return value stays
      * in rax. */
+    /* The pool registers were pushed before rbp, so they come off after it. The
+     * return value stays in rax, which neither of these touches. */
     buf_printf(cg->out, ".Lret_%s:\n  mov rsp, rbp\n", sym);
+    buf_printf(cg->out, "  pop rbp\n", sym);
     for (int r = NPOOL - 1; r >= 0; r--)
         if (cg->pool_mask & (1 << r))
             buf_printf(cg->out, "  pop %s\n", POOL_REGS[r]);
-    buf_printf(cg->out, "  pop rbp\n  ret\n", sym);
+    buf_printf(cg->out, "  ret\n", sym);
     if (have_dbg)
         buf_printf(cg->out, "%s:\n", dbg_end);
 }
