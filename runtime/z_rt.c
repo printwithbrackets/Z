@@ -679,6 +679,81 @@ long z_io_errno(void) { return (long)errno; }
 
 long z_io_eof(void) { return z_io_last_eof; }
 
+/* Set after a '\r' has ended a line, so that the '\n' of a CRLF pair is consumed
+ * rather than read back as an empty line. Static because it has to survive across
+ * calls: the two halves of a terminator are two reads. */
+static int z_io_skip_lf = 0;
+
+/* ---- reading a line ----
+ *
+ * Raw `read` a byte at a time, for the reason the rest of this section is raw:
+ * stdio buffers on one side of the boundary, so a line reader built on `fgetc`
+ * would have pulled the rest of the descriptor into a buffer the program cannot
+ * see, and a following `seek` would be wrong in a way nothing in the output
+ * would show. One syscall per byte is slow, and it is the trade `z_read_byte`
+ * already makes rather than a new one. */
+char *z_read_line(long fd) {
+    /* Grown the way a StringBuilder grows, for the same reason: a line has no
+     * length known in advance, and this buffer belongs to this call alone. */
+    char *buf = zstr_alloc_impl(64);
+    for (;;) {
+        long b = z_read_byte(fd);
+        if (b < 0) {
+            z_io_skip_lf = 0;
+            break; /* end of file, or an error `io_errno` still describes */
+        }
+        /* A CRLF is one terminator, not two. Stopping at the CR alone would
+         * leave the LF in the stream, and the next call would read it as a line
+         * of its own -- so a file written on Windows would come back with an
+         * empty line between every pair. Anything other than LF after a CR is
+         * the next line's first byte, and falls through to be appended. */
+        if (z_io_skip_lf) {
+            z_io_skip_lf = 0;
+            if (b == 10)
+                continue;
+        }
+        /* '\r' ends the line as well as '\n', because a lone CR is the old-Mac
+         * line ending, which is a line ending as much as LF is. */
+        if (b == 13) {
+            z_io_skip_lf = 1;
+            break;
+        }
+        if (b == 10)
+            break;
+        ZStrHdr *h = ZH(buf);
+        if (h->cap - h->len < 1) {
+            long cap = h->cap + h->cap / 2;
+            if (cap < 8)
+                cap = 8;
+            char *out = zstr_alloc_impl(cap);
+            memcpy(out, buf, (size_t)h->len);
+            ZH(out)->len = h->len;
+            z_free((char *)buf - sizeof(ZStrHdr));
+            buf = out;
+            h = ZH(buf);
+        }
+        buf[h->len++] = (char)b;
+        buf[h->len] = '\0';
+    }
+    return buf;
+}
+
+/* A line from stdin, which is descriptor 0. The no-argument form, because
+ * reading a program's own input is the case actually wanted, and the number of
+ * the descriptor is not something a program should have to know. */
+char *z_read_string(void) { return z_read_line(0); }
+
+/* A prompt, then a line. The prompt goes out through stdio like `Console.WriteLog` does, so
+ * it interleaves with the program's own output, and it is flushed rather than
+ * left in the buffer: stdout is block-buffered when it is a pipe, so an
+ * unflushed prompt leaves the reader looking at a program that has already
+ * stopped to wait for them. */
+char *z_input(const char *prompt) {
+    printf("%s", prompt);
+    fflush(stdout);
+    return z_read_line(0);
+}
+
 /* ---- string library ----
  *
  * Every function here takes a Z string -- a pointer to the bytes, with the

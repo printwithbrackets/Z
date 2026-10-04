@@ -184,6 +184,7 @@ int main(int argc, char **argv) {
         "rangefor",
         "addrof_field",
         "destructors",
+        "stdin",
         "surface",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
@@ -219,7 +220,18 @@ int main(int argc, char **argv) {
             continue;
         }
         char actual[1 << 16];
-        int prc = run_cmd_capture("/tmp/z_test_bin", actual, sizeof actual);
+        /* A case whose program reads stdin gets it from a sibling <name>.stdin,
+         * since popen hands the child whatever this process has and there is no
+         * terminal here to be typed at. A case with no such sibling runs as
+         * before, so nothing else changes. */
+        char stdin_path[512];
+        snprintf(stdin_path, sizeof stdin_path, "%s/%s.stdin", case_dir, cases[i]);
+        char run_cmd[1024];
+        if (access(stdin_path, R_OK) == 0)
+            snprintf(run_cmd, sizeof run_cmd, "/tmp/z_test_bin < %s", stdin_path);
+        else
+            snprintf(run_cmd, sizeof run_cmd, "/tmp/z_test_bin");
+        int prc = run_cmd_capture(run_cmd, actual, sizeof actual);
         (void)prc; /* the program's own exit code is not part of golden output */
         if (strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",

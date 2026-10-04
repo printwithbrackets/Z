@@ -1,0 +1,51 @@
+// Reading input: `input` prompts and reads a line, `read_string` reads a line
+// with no prompt, and `read_line` is the same reader from a descriptor.
+//
+// All three stop *at* the terminator and do not include it, and all three return
+// "" at end of file rather than failing -- so a program that runs off the end of
+// its input gets empty answers instead of a trap. The harness feeds stdin from
+// the sibling `.stdin` file, since there is no terminal here to type at.
+
+int main() {
+    // The prompt goes out with no newline after it, and is flushed before the
+    // read: stdout is block-buffered when it is a pipe, so an unflushed prompt
+    // would leave the reader looking at a program that has already stopped.
+    var name = input("name? ");
+    Console.WriteLog("[" + name + "]");
+    Console.WriteLog("[" + read_string() + "]");
+    Console.WriteLog("[" + read_string() + "]");   // the empty line in the middle
+    Console.WriteLog(len(read_string()));           // end of file
+    Console.WriteLog("[" + read_string() + "]");    // and still empty, not an error
+
+    // The same reader from a descriptor, over bytes this program wrote. A CRLF
+    // pair is one terminator rather than two, so it does not leave an empty line
+    // behind -- which is the whole reason '\r' ends a line as much as '\n' does.
+    var path = "/tmp/z_test_stdin.txt";
+    var fd = open(path, "w");
+    write_bytes(fd, "alpha\r\nbeta\r\n\r\ngamma");
+    close(fd);
+
+    fd = open(path, "r");
+    Console.WriteLog("[" + read_line(fd) + "]");
+    Console.WriteLog("[" + read_line(fd) + "]");
+    Console.WriteLog("[" + read_line(fd) + "]");
+    Console.WriteLog("[" + read_line(fd) + "]");
+    Console.WriteLog("[" + read_line(fd) + "]");     // end of file
+    Console.WriteLog(len(read_line(fd)));
+    close(fd);
+
+    // A line far longer than the reader's first buffer, so the growth path runs
+    // rather than being dead code the small cases never reach.
+    var big = "";
+    for (var i = 0; i < 500; i++) {
+        big = big + "0123456789";
+    }
+    fd = open(path, "w");
+    write_bytes(fd, big + "\n");
+    close(fd);
+    fd = open(path, "r");
+    Console.WriteLog(len(read_line(fd)));
+    Console.WriteLog(contains(read_line(fd), "x"));
+    close(fd);
+    return 0;
+}
