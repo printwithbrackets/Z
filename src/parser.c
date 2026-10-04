@@ -5668,16 +5668,14 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
         if (s->kind == S_RETURN) {
             Stmt *d = build_drops_chain(p, s->ret_scope, s->span);
             if (d != NULL) {
-                /* The body scope is recorded on the return, so this statement is
-                 * a block after the rewrite: the drops and the return. */
-                Stmt **out = arena_alloc_array(p->arena, (size_t)(d->nitems + 1), sizeof(Stmt *));
-                for (int j = 0; j < d->nitems; j++)
-                    out[j] = d->items[j];
-                out[d->nitems] = s;
-                Stmt *b = new_stmt(p, S_BLOCK, s->span);
-                b->items = out;
-                b->nitems = d->nitems + 1;
-                items[i] = b;
+                /* Handed to the return rather than spliced in ahead of it. A
+                 * returned local is one of the values these destructors destroy,
+                 * and the copy the return already wraps it in reads it -- so
+                 * drops-then-return freed the bytes the copy was about to read,
+                 * and the caller got a `str_dup` of freed memory. The code
+                 * generator emits them after the value is computed and copied,
+                 * which is the order `?` already uses for `try_drops`. */
+                s->ret_drops = d;
                 emitted += d->nitems;
             }
             continue;

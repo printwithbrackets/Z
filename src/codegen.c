@@ -2147,6 +2147,25 @@ static int iface_note_itab(CG *cg, StructDef *impl, IfaceDef *idef) {
 static void gen_expr_body(CG *cg, Expr *e);
 static void gen_stmt_body(CG *cg, Stmt *s);
 
+/* Records a temp slot as holding a live string that must not be handed out again
+ * before the current statement ends. Split out of `note_str_temp` so the return
+ * path can pin the value it spills across the destructors it runs: those are
+ * generated as statements, and every statement resets the temp space, so an
+ * unpinned slot would be handed straight back out to them. */
+static void pin_temp(CG *cg, int t) {
+    if (cg->npinned == cg->pin_cap) {
+        int ncap = cg->pin_cap == 0 ? 8 : cg->pin_cap * 2;
+        int *nd = realloc(cg->pinned, (size_t)ncap * sizeof(int));
+        if (nd == NULL) {
+            fprintf(stderr, "z: out of memory\n");
+            exit(1);
+        }
+        cg->pinned = nd;
+        cg->pin_cap = ncap;
+    }
+    cg->pinned[cg->npinned++] = t;
+}
+
 /* A fresh string value that nothing has taken over is a temporary, and a
  * temporary has to be released rather than left for the collector that no longer
  * exists.
@@ -2189,17 +2208,7 @@ static void note_str_temp(CG *cg, Expr *e) {
         return;
     int t = temp_alloc(cg);
     store_temp(cg, t);
-    if (cg->npinned == cg->pin_cap) {
-        int ncap = cg->pin_cap == 0 ? 8 : cg->pin_cap * 2;
-        int *nd = realloc(cg->pinned, (size_t)ncap * sizeof(int));
-        if (nd == NULL) {
-            fprintf(stderr, "z: out of memory\n");
-            exit(1);
-        }
-        cg->pinned = nd;
-        cg->pin_cap = ncap;
-    }
-    cg->pinned[cg->npinned++] = t;
+    pin_temp(cg, t);
 }
 
 static void gen_expr(CG *cg, Expr *e) {
@@ -4030,17 +4039,51 @@ static void gen_stmt_body(CG *cg, Stmt *s) {
         if (s->expr != NULL)
             gen_void_expr(cg, s->expr);
         break;
-    case S_RETURN:
-        if (s->expr != NULL)
+    case S_RETURN: {
+        /* The destructors for every scope this `return` leaves.
+         *
+         * They run *after* the returned value has been computed, never before
+         * it. A returned local is one of the values those destructors destroy,
+         * and the copy the parser wraps a borrowed return in is what reads it --
+         * so drops-then-value freed the bytes the copy was about to read, and the
+         * caller received a `str_dup` of freed memory. It showed up as a `return`
+         * of a local built by a `+` reporting a length in the hundreds of
+         * thousands, because `str_dup` reads the length out of the header of
+         * memory the collector had already been handed. `?` orders its
+         * `try_drops` this way already, for the same reason.
+         *
+         * The value is spilled across them because a destructor is a call and a
+         * call clobbers rax, which is where the value is. The slot is pinned so
+         * the destructors, generated as their own statements, are not handed it. */
+        int tret = -1;
+        int saved_pins = cg->npinned;
+        if (s->expr != NULL) {
             gen_expr(cg, s->expr);
+            /* A struct return is already in the caller's buffer by then, so only
+             * a value still in rax needs somewhere to survive the calls. */
+            if (s->ret_drops != NULL && !cg->cur_ret_struct) {
+                tret = temp_alloc(cg);
+                store_temp(cg, tret);
+                pin_temp(cg, tret);
+            }
+        }
         if (cg->cur_ret_struct && s->expr != NULL && is_aggregate(s->expr->type)) {
             /* Copy the returned struct into the caller's hidden buffer. */
             buf_printf(cg->out, "  mov rsi, rax\n");
             buf_printf(cg->out, "  mov rdi, QWORD PTR [rbp - %d]\n", cg->cur_ret_slot);
             emit_memcpy(cg, type_size(s->expr->type));
         }
+        if (s->ret_drops != NULL) {
+            gen_stmt(cg, s->ret_drops);
+            /* Unpin rather than leave it: this is the value being handed back, so
+             * the statement's own release pass must not free it. */
+            cg->npinned = saved_pins;
+            if (tret >= 0)
+                load_temp(cg, tret, "rax");
+        }
         buf_printf(cg->out, "  jmp .Lret_%s\n", cg->cur_sym);
         break;
+    }
     case S_IF: {
         int lelse = next_label(cg);
         int lend = next_label(cg);

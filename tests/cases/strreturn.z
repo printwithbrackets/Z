@@ -1,0 +1,108 @@
+// Returning a string local.
+//
+// A `return` of a local is wrapped in a copy, because the caller takes the value
+// over and the local's own teardown frees it. That makes the order the whole
+// thing: the copy has to read the local before any destructor runs. Emitting the
+// destructors first freed the bytes the copy was about to read, so the caller got
+// a `str_dup` of memory the runtime had already released -- a length read out of a
+// header nobody owned, which is how this showed up: hundreds of thousands where
+// the answer was nine, or a segfault when the freed header said so.
+//
+// Every function here returns a local built by something that allocates. A local
+// holding a literal is not a test: literals are static data, nothing owns them,
+// and the runtime's free is a no-op on them, which is what hid the bug.
+
+string fromConcat(string n) {
+    var s = "hello " + n;
+    return s;
+}
+
+string fromInterp(string n) {
+    var s = $"hi {n}!";
+    return s;
+}
+
+// A builtin that allocates its result. These were the two that crashed outright,
+// because their result is a bare allocation with no length already in the source
+// text for the copy to find.
+string fromUpper(string n) {
+    var s = upper(n);
+    return s;
+}
+
+string fromItoa(int v) {
+    var s = int_to_string(v);
+    return s;
+}
+
+string fromBuilder() {
+    var b = new StringBuilder();
+    b.append("ab");
+    b.appendInt(42);
+    var s = b.toString();
+    return s;
+}
+
+// Two locals. The teardown runs in reverse declaration order, and neither may be
+// released before the value has been copied -- including the one the value was
+// built from.
+string twoLocals(string n) {
+    var first = n + "!";
+    var second = first + "?";
+    return second;
+}
+
+// A local in a block the `return` also leaves, so the destructor chain runs the
+// inner scope first and the function body second.
+string nestedScopes(string n) {
+    var outer = "[" + n;
+    {
+        var inner = n + "]";
+        return inner;
+    }
+}
+
+// A method, where the receiver's own slot is in the frame as well.
+struct Tag {
+    string name;
+    string Label() {
+        var s = this.name + ":";
+        return s;
+    }
+}
+
+// Reassignment before the return: the slot's previous value is released by the
+// assignment, so this distinguishes the copy from the value it replaced.
+string reassigned(string n) {
+    var s = "discarded";
+    s = n + "!";
+    var out = s;
+    return out;
+}
+
+string viaLoop(int n) {
+    var acc = "";
+    for (var i = 0; i < n; i++) {
+        acc = acc + "x";
+    }
+    var s = acc;
+    return s;
+}
+
+int main() {
+    Console.WriteLog(fromConcat("bob"));     // hello bob
+    Console.WriteLog(fromInterp("bob"));     // hi bob!
+    Console.WriteLog(fromUpper("bob"));      // BOB
+    Console.WriteLog(fromItoa(12345));       // 12345
+    Console.WriteLog(fromBuilder());         // ab42
+    Console.WriteLog(twoLocals("hi"));       // hi!?
+    Console.WriteLog(nestedScopes("x"));     // x]
+    Console.WriteLog(new Tag("tag").Label()); // tag:
+    Console.WriteLog(reassigned("kept"));    // kept!
+    Console.WriteLog(viaLoop(4));            // xxxx
+
+    // Length is the load that read the clobbered header, so ask for it too.
+    Console.WriteLog(len(fromConcat("bob")));   // 9
+    Console.WriteLog(len(fromItoa(12345)));     // 5
+    return 0;
+}

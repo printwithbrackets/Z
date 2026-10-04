@@ -184,6 +184,7 @@ int main(int argc, char **argv) {
         "rangefor",
         "addrof_field",
         "destructors",
+        "strreturn",
         "stdin",
         "surface",
     };
