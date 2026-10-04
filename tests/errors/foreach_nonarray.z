@@ -1,4 +1,4 @@
 var b = 5;
 foreach (var x in b) {
-    print(x);
+    Console.WriteLog(x);
 }

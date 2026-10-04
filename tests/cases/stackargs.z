@@ -47,12 +47,12 @@ int plain(int a, int b, int c, int d, int e, int f, int g, int h) {
 }
 
 int main() {
-    print(seven(1, 2, 3, 4, 5, 6, 7));
-    print(seven(10, 20, 30, 40, 50, 60, 70));
-    print(ten(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
-    print(ten(9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
-    print(scatter(1, 2, 3, 4, 5, 6, 7, 8));
-    print(scatter(8, 7, 6, 5, 4, 3, 2, 1));
+    Console.WriteLog(seven(1, 2, 3, 4, 5, 6, 7));
+    Console.WriteLog(seven(10, 20, 30, 40, 50, 60, 70));
+    Console.WriteLog(ten(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    Console.WriteLog(ten(9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+    Console.WriteLog(scatter(1, 2, 3, 4, 5, 6, 7, 8));
+    Console.WriteLog(scatter(8, 7, 6, 5, 4, 3, 2, 1));
 
     // Through a caller that keeps several values live in registers across the
     // call, so the caller's own frame shape is in play too.
@@ -60,7 +60,7 @@ int main() {
     var y = 2;
     var z = 3;
     var w = 4;
-    print(plain(x, y, z, w, 5, 6, 7, 8) + plain(8, 7, 6, 5, w, z, y, x));
-    print(seven(x, y, z, w, 5, 6, 7));
+    Console.WriteLog(plain(x, y, z, w, 5, 6, 7, 8) + plain(8, 7, 6, 5, w, z, y, x));
+    Console.WriteLog(seven(x, y, z, w, 5, 6, 7));
     return 0;
 }

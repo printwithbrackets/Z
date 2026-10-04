@@ -1,8 +1,8 @@
-print("hello");
-print("tab\there");
-print("newline\nend");
+Console.WriteLog("hello");
+Console.WriteLog("tab\there");
+Console.WriteLog("newline\nend");
 var s = "stored";
-print(s);
-print("quote:\"ok");
-print("back\\slash");
-print("");
+Console.WriteLog(s);
+Console.WriteLog("quote:\"ok");
+Console.WriteLog("back\\slash");
+Console.WriteLog("");

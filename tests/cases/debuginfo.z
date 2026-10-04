@@ -17,9 +17,9 @@ int combine(int a, int b, int c) {
 float twice(float v) { return v * 2.0; }
 
 int main() {
-    print(scale(6, 7));
-    print(combine(1, 2, 3));
-    print(twice(1.5));
-    print("debug info: ok");
+    Console.WriteLog(scale(6, 7));
+    Console.WriteLog(combine(1, 2, 3));
+    Console.WriteLog(twice(1.5));
+    Console.WriteLog("debug info: ok");
     return 0;
 }

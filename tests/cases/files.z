@@ -12,23 +12,23 @@ int main() {
     // Write, then read back. The mode argument is what distinguishes the three
     // cases, and "w" truncates, so this starts from nothing every run.
     var fd = open(path, "w");
-    print(fd >= 0);
-    print(write_bytes(fd, "line one\n"));
-    print(write_bytes(fd, "line two\n"));
-    print(close(fd));
+    Console.WriteLog(fd >= 0);
+    Console.WriteLog(write_bytes(fd, "line one\n"));
+    Console.WriteLog(write_bytes(fd, "line two\n"));
+    Console.WriteLog(close(fd));
 
     // A bad mode fails rather than being handed to the system as a mode string.
     var bad = open(path, "q");
-    print(bad);
-    print(io_errno() > 0);
+    Console.WriteLog(bad);
+    Console.WriteLog(io_errno() > 0);
 
     // Reading a file that is not there fails, and says so through errno rather
     // than by crashing.
     var missing = open("/tmp/z_test_no_such_file", "r");
-    print(missing);
+    Console.WriteLog(missing);
 
     fd = open(path, "r");
-    print(fd >= 0);
+    Console.WriteLog(fd >= 0);
 
     // Byte at a time, so the length is counted rather than assumed.
     var total = 0;
@@ -37,19 +37,19 @@ int main() {
         total = total + 1;
         b = read_byte(fd);
     }
-    print(total);              // 18: "line one\n" and "line two\n"
-    print(io_eof());            // the read stopped at the end, not at an error
+    Console.WriteLog(total);              // 18: "line one\n" and "line two\n"
+    Console.WriteLog(io_eof());            // the read stopped at the end, not at an error
 
     // Past the end there is nothing left to read, and it stays that way.
-    print(read_byte(fd));
-    print(io_eof());
-    print(close(fd));
+    Console.WriteLog(read_byte(fd));
+    Console.WriteLog(io_eof());
+    Console.WriteLog(close(fd));
 
     // Appending rather than truncating, which is the mode that would be wrong if
     // it behaved like "w".
     fd = open(path, "a");
-    print(write_bytes(fd, "line three\n"));
-    print(close(fd));
+    Console.WriteLog(write_bytes(fd, "line three\n"));
+    Console.WriteLog(close(fd));
 
     fd = open(path, "r");
     total = 0;
@@ -58,30 +58,30 @@ int main() {
         total = total + 1;
         b = read_byte(fd);
     }
-    print(total);              // 29
-    print(close(fd));
+    Console.WriteLog(total);              // 29
+    Console.WriteLog(close(fd));
 
     // An empty file reads as zero bytes and then reports the end, which is the
     // distinction a line-oriented reader has to get right.
     var empty = open("/tmp/z_test_empty.txt", "w");
-    print(empty >= 0);
-    print(close(empty));
+    Console.WriteLog(empty >= 0);
+    Console.WriteLog(close(empty));
     empty = open("/tmp/z_test_empty.txt", "r");
-    print(read_byte(empty));
-    print(io_eof());
-    print(close(empty));
+    Console.WriteLog(read_byte(empty));
+    Console.WriteLog(io_eof());
+    Console.WriteLog(close(empty));
 
     // A byte written is a byte read back, including one that is not printable,
     // which is the whole reason the API is bytes rather than strings.
     var bin = open("/tmp/z_test_bytes.bin", "w");
     write_bytes(bin, char_str(0) + char_str(255) + char_str(10));
-    print(close(bin));
+    Console.WriteLog(close(bin));
     bin = open("/tmp/z_test_bytes.bin", "r");
-    print(read_byte(bin));
-    print(read_byte(bin));
-    print(read_byte(bin));
-    print(read_byte(bin));
-    print(io_eof());
-    print(close(bin));
+    Console.WriteLog(read_byte(bin));
+    Console.WriteLog(read_byte(bin));
+    Console.WriteLog(read_byte(bin));
+    Console.WriteLog(read_byte(bin));
+    Console.WriteLog(io_eof());
+    Console.WriteLog(close(bin));
     return 0;
 }

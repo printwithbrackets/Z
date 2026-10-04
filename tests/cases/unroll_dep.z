@@ -172,22 +172,22 @@ int unrolledFloatLoop() {
 }
 
 int main() {
-    print(rolledPartial(7));
-    print(unrolledPartial(7));     // 0+1..6 = 21
-    print(rolledPartial(16));
-    print(unrolledPartial(16));    // 0..15 = 120
-    print(rolledZeroTrip());
-    print(unrolledZeroTrip());     // 0
-    print(rolledBreaksOut());
-    print(unrolledBreaksOut());    // 6 iterations, m = 18
-    print(rolledContinuesOn());
-    print(unrolledContinuesOn());  // 1+3+5+7+9 = 25 over 5 iterations
-    print(rolledNested());
-    print(unrolledNested());       // 15
-    print(rolledNestedBreak());
-    print(unrolledNestedBreak());  // 4 * 2 = 8
-    print(overSizeCap());          // 3 * 12 = 36 each
-    print(rolledFloatLoop());
-    print(unrolledFloatLoop());    // 3.5 * 2 and 1.75 * 4
+    Console.WriteLog(rolledPartial(7));
+    Console.WriteLog(unrolledPartial(7));     // 0+1..6 = 21
+    Console.WriteLog(rolledPartial(16));
+    Console.WriteLog(unrolledPartial(16));    // 0..15 = 120
+    Console.WriteLog(rolledZeroTrip());
+    Console.WriteLog(unrolledZeroTrip());     // 0
+    Console.WriteLog(rolledBreaksOut());
+    Console.WriteLog(unrolledBreaksOut());    // 6 iterations, m = 18
+    Console.WriteLog(rolledContinuesOn());
+    Console.WriteLog(unrolledContinuesOn());  // 1+3+5+7+9 = 25 over 5 iterations
+    Console.WriteLog(rolledNested());
+    Console.WriteLog(unrolledNested());       // 15
+    Console.WriteLog(rolledNestedBreak());
+    Console.WriteLog(unrolledNestedBreak());  // 4 * 2 = 8
+    Console.WriteLog(overSizeCap());          // 3 * 12 = 36 each
+    Console.WriteLog(rolledFloatLoop());
+    Console.WriteLog(unrolledFloatLoop());    // 3.5 * 2 and 1.75 * 4
     return 0;
 }

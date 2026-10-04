@@ -27,57 +27,57 @@
 
 int main() {
     // The units on their own.
-    print(2h);      // 7200
-    print(21m);     // 1260
-    print(37s);     // 37
-    print(37);      // 37: a bare number is seconds, and still the integer 37
+    Console.WriteLog(2h);      // 7200
+    Console.WriteLog(21m);     // 1260
+    Console.WriteLog(37s);     // 37
+    Console.WriteLog(37);      // 37: a bare number is seconds, and still the integer 37
 
     // Run together, which is the spelling the builtin exists for.
-    print(2h21m37); // 7200 + 1260 + 37
-    print(1h30m);   // 5400
-    print(59s);     // 59
-    print(60m);     // 3600, not 60: the unit decides
-    print(24h);     // 86400
-    print(1h0m0s);  // 3600, and every part of it is written out
-    print(0h0m0);   // 0
+    Console.WriteLog(2h21m37); // 7200 + 1260 + 37
+    Console.WriteLog(1h30m);   // 5400
+    Console.WriteLog(59s);     // 59
+    Console.WriteLog(60m);     // 3600, not 60: the unit decides
+    Console.WriteLog(24h);     // 86400
+    Console.WriteLog(1h0m0s);  // 3600, and every part of it is written out
+    Console.WriteLog(0h0m0);   // 0
 
     // Upper case is accepted, since `0X` and `1E3` are.
-    print(1H);
-    print(1M);
-    print(1S);
+    Console.WriteLog(1H);
+    Console.WriteLog(1M);
+    Console.WriteLog(1S);
 
     // Underscores separate digits inside a component, as they do in any number.
-    print(1_000s);
-    print(2h1_0m);
+    Console.WriteLog(1_000s);
+    Console.WriteLog(2h1_0m);
 
     // A duration of whole seconds is an integer, so it is an ordinary operand.
-    print(2h + 1);
-    print(1h / 1m);   // 60
+    Console.WriteLog(2h + 1);
+    Console.WriteLog(1h / 1m);   // 60
     var d = 2h21m37;
-    print(d);
+    Console.WriteLog(d);
 
     // The sub-second units. These are the only literals that are not integers,
     // and they print as the float of seconds they are.
-    print(500ms);     // 0.5
-    print(1500ms);    // 1.5
-    print(1000ms);    // 1 -- a whole second, reached from below
-    print(250us);     // 0.00025
-    print(0ms);       // 0
+    Console.WriteLog(500ms);     // 0.5
+    Console.WriteLog(1500ms);    // 1.5
+    Console.WriteLog(1000ms);    // 1 -- a whole second, reached from below
+    Console.WriteLog(250us);     // 0.00025
+    Console.WriteLog(0ms);       // 0
 
     // A sub-second part runs together with the whole ones the same way.
-    print(1m500ms);   // 60.5
-    print(0h0m0s250ms);
+    Console.WriteLog(1m500ms);   // 60.5
+    Console.WriteLog(0h0m0s250ms);
 
     // Upper case and underscores work here too.
-    print(500MS);
-    print(250US);
-    print(1_500ms);
+    Console.WriteLog(500MS);
+    Console.WriteLog(250US);
+    Console.WriteLog(1_500ms);
 
     // And it is an ordinary operand in the same way, so a fractional wait can be
     // computed rather than only spelled.
-    print(500ms + 1);   // 1.5
-    print(1ms * 1000);  // 1
-    print(500ms / 2);   // 0.25
+    Console.WriteLog(500ms + 1);   // 1.5
+    Console.WriteLog(1ms * 1000);  // 1
+    Console.WriteLog(500ms / 2);   // 0.25
 
     // Zero waits return at once, in every spelling.
     hold(0);
@@ -85,7 +85,7 @@ int main() {
     hold(0h0m0);
     hold(0h0m0s);
     hold(0ms);
-    print("held zero");
+    Console.WriteLog("held zero");
 
     // So do the values that are not a length of time at all. A NaN and an
     // infinity are both what dividing by a zero that was not meant to be one
@@ -95,16 +95,16 @@ int main() {
     hold(zero / zero);
     hold(1.0 / zero);
     hold(-1.5);
-    print("held nothing");
+    Console.WriteLog("held nothing");
 
     // Sub-second waits, which take the floating-point entry point.
     hold(1ms);
     hold(250us);
-    print("held under a second");
+    Console.WriteLog("held under a second");
 
     // One real second, so the whole-second runtime call itself is covered too. It
     // is the only thing in this file that takes any real time.
     hold(1);
-    print("held one second");
+    Console.WriteLog("held one second");
     return 0;
 }

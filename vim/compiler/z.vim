@@ -24,8 +24,11 @@ endif
 "
 " --color=never because the quickfix list is not the terminal, and escape codes
 " in a message are literal characters in it.
-execute "setlocal makeprg=" .. escape(s:z, " ")
-      \ .. " build\ %:S --error-format=gcc --color=never"
+" Every space in the value needs escaping, not just the ones inside the path:
+" :setlocal splits an unescaped space into a new option, and "build" is not an
+" option, so a bare separator hands it to :setlocal as one and it errors out.
+execute "setlocal makeprg="
+      \ .. escape(s:z .. " build %:S --error-format=gcc --color=never", " \t")
 
 setlocal errorformat=%f:%l:%c:\ %t%*[^:]:\ %m
 

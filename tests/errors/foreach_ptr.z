@@ -7,5 +7,5 @@ a[2] = 3;
 var p = &a[0];
 
 foreach (var x in p) {
-    print(x);
+    Console.WriteLog(x);
 }

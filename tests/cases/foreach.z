@@ -4,14 +4,14 @@ a[1] = 6;
 a[2] = 7;
 a[3] = 8;
 foreach (var x in a) {
-    print(x);
+    Console.WriteLog(x);
 }
 var sum = 0;
 foreach (int v in a) {
     sum += v;
 }
-print(sum);
+Console.WriteLog(sum);
 // bare loop variable (no type annotation) must infer the element type
 foreach (v in a) {
-    print(v + 100);
+    Console.WriteLog(v + 100);
 }

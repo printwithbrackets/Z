@@ -18,43 +18,43 @@ T firstOf<T>(T a, T b) {
 int main() {
     // ---- a named struct local ----
     var r = new P(3, 4);
-    print(r.x);
-    print(r.y);
+    Console.WriteLog(r.x);
+    Console.WriteLog(r.y);
 
     // ---- by pointer ----
     var q = &r;
-    print(q.x);
+    Console.WriteLog(q.x);
 
     // ---- a struct local initializes from a struct literal, and copies by value
     P copy = r;
     copy.x = 99;
-    print(r.x);
-    print(copy.x);
+    Console.WriteLog(r.x);
+    Console.WriteLog(copy.x);
 
     // ---- zero, then assign ----
     P z = new P(0, 0);
     z.x = 7;
     z.y = 8;
-    print(z.x + z.y);
+    Console.WriteLog(z.x + z.y);
 
     // ---- an array of a named type ----
     P[] arr = new P[2];
     arr[0] = new P(1, 2);
-    print(arr[0].x + arr[0].y);
-    print(arr.length);
+    Console.WriteLog(arr[0].x + arr[0].y);
+    Console.WriteLog(arr.length);
 
     // ---- a named struct as a parameter type, and a pointer parameter ----
     int sum(P s) { return s.x + s.y; }
     int bumpFirst(P* s) { s.x = s.x + 100; return s.x; }
-    print(sum(r));
-    print(bumpFirst(&r));
-    print(sum(r));
+    Console.WriteLog(sum(r));
+    Console.WriteLog(bumpFirst(&r));
+    Console.WriteLog(sum(r));
 
     // ---- a type parameter in a local declaration ----
-    print(firstOf(42, 7));
+    Console.WriteLog(firstOf(42, 7));
 
     // ---- a pointer to a named struct, initialized to null ----
     P* nothing = null;
-    if (nothing == null) { print(-1); }
+    if (nothing == null) { Console.WriteLog(-1); }
     return 0;
 }

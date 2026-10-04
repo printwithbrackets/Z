@@ -4,11 +4,11 @@ int classify(int n) {
         var a = n + 2;
         {
             int a = n + 3;
-            print(a);
+            Console.WriteLog(a);
         }
-        print(a);
+        Console.WriteLog(a);
     }
-    print(a);
+    Console.WriteLog(a);
     return a;
 }
-print(classify(10));
+Console.WriteLog(classify(10));

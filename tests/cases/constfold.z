@@ -1,15 +1,15 @@
 int main() {
     // constant expressions fold at compile time; results must be correct
-    print(2 + 3 * 4);
-    print((5 - 1) * 2);
-    print(100 / 5 + 100 % 7);
-    print(-7 + 2);
-    print(!(true && false));
-    print(3 < 4);
-    print(10 > 20);
+    Console.WriteLog(2 + 3 * 4);
+    Console.WriteLog((5 - 1) * 2);
+    Console.WriteLog(100 / 5 + 100 % 7);
+    Console.WriteLog(-7 + 2);
+    Console.WriteLog(!(true && false));
+    Console.WriteLog(3 < 4);
+    Console.WriteLog(10 > 20);
     var s = 0;
     s += 2 + 3 * 4;
     s += (1 < 2) ? 1 : 0;
-    print(s);
+    Console.WriteLog(s);
     return 0;
 }

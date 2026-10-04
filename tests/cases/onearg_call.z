@@ -41,11 +41,11 @@ string nestedChain() {
 }
 
 int main() {
-    print(unionChain());
-    print(structChain());
-    print(nestedChain());
+    Console.WriteLog(unionChain());
+    Console.WriteLog(structChain());
+    Console.WriteLog(nestedChain());
     // A single-argument call on its own, and one nested inside another, so the
     // value cannot be sitting in a temporary the outer call then overwrites.
-    print(apply(Neg(1)) + apply(Neg(2)));
+    Console.WriteLog(apply(Neg(1)) + apply(Neg(2)));
     return 0;
 }

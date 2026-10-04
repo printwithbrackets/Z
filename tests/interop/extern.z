@@ -10,32 +10,32 @@ extern int c_zprint(string s);
 extern int c_fill(int* out, int n);
 
 int main() {
-    print(c_add(2, 3));                        // 5
-    print(c_scale(7, 6));                      // 42
-    print(c_strlen("abcdefg"));                // 7
+    Console.WriteLog(c_add(2, 3));                        // 5
+    Console.WriteLog(c_scale(7, 6));                      // 42
+    Console.WriteLog(c_strlen("abcdefg"));                // 7
     c_print("a line from C\n");
-    print(c_add(c_scale(2, 3), c_add(1, 1)));  // 8
+    Console.WriteLog(c_add(c_scale(2, 3), c_add(1, 1)));  // 8
 
     /* Z's int is 64 bits, and the C side sees a long */
-    print(c_add(4294967296, 1));                // 4294967297
-    print(0 - c_add(0, 0 - 9223372036854775807)); // 9223372036854775807
+    Console.WriteLog(c_add(4294967296, 1));                // 4294967297
+    Console.WriteLog(0 - c_add(0, 0 - 9223372036854775807)); // 9223372036854775807
 
     /* a pointer parameter, filled from C and read back in Z */
     var buf = new int[4];
-    print(c_fill(&buf[0], 4));                 // 4
-    print(buf[0] + buf[1] + buf[2] + buf[3]);  // 0+1+4+9 = 14
+    Console.WriteLog(c_fill(&buf[0], 4));                 // 4
+    Console.WriteLog(buf[0] + buf[1] + buf[2] + buf[3]);  // 0+1+4+9 = 14
 
     /* A Z string is a valid C string: the bytes are NUL-terminated, so a C
      * function taking `const char *` needs no conversion. */
-    print(c_zlen("hello"));                 // 5
-    print(c_zlen(""));                      // 0
+    Console.WriteLog(c_zlen("hello"));                 // 5
+    Console.WriteLog(c_zlen(""));                      // 0
 
     /* ...and a string with an embedded zero is *not* a valid C string, because
      * C has no way to say how long it is. Read the length out of the header and
      * the whole string crosses; use strlen and you get "a". */
-    print(c_zlen("a\0bc"));                 // 4
-    print(c_strlen("a\0bc"));               // 1 -- C stops at the zero
-    print(c_zprint("a\0bc"));               // 4, and all four bytes arrive
+    Console.WriteLog(c_zlen("a\0bc"));                 // 4
+    Console.WriteLog(c_strlen("a\0bc"));               // 1 -- C stops at the zero
+    Console.WriteLog(c_zprint("a\0bc"));               // 4, and all four bytes arrive
 
     /* Note: struct-by-value across the boundary is NOT supported. Z returns
      * every aggregate through a hidden result pointer, while the C ABI returns

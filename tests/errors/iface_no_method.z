@@ -6,6 +6,6 @@ struct Thing { int n; int Scale(int k) { return n * k; } }
 int main() {
     var t = new Thing(0);
     Sized s = t;
-    print(s.Missing(1));
+    Console.WriteLog(s.Missing(1));
     return 0;
 }

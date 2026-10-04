@@ -1,11 +1,11 @@
 var x = 10;
 x += 5;
-print(x);
+Console.WriteLog(x);
 x -= 3;
-print(x);
+Console.WriteLog(x);
 x *= 2;
-print(x);
+Console.WriteLog(x);
 x /= 3;
-print(x);
+Console.WriteLog(x);
 x %= 5;
-print(x);
+Console.WriteLog(x);

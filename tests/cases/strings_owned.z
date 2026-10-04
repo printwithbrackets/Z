@@ -25,44 +25,44 @@ int main() {
     // frees nothing, so the same literal can be held in any number of values.
     var lit = "shared";
     var alsoLit = lit;
-    print(lit);
-    print(alsoLit);
+    Console.WriteLog(lit);
+    Console.WriteLog(alsoLit);
 
     // A built string is owned by the variable holding it.
     var built = "a" + "b";
-    print(built);
-    print(len(built));
+    Console.WriteLog(built);
+    Console.WriteLog(len(built));
 
     // Assignment overwrites, so the previous value is released rather than
     // dropped on the floor. The new value is still correct, which is all a
     // program can see.
     built = built + "c";
-    print(built);
+    Console.WriteLog(built);
 
     // Storing a borrowed string copies it, so the two are independent values.
     built = built + "d";
-    print(built);
+    Console.WriteLog(built);
 
     // `move` hands the value on: the source is emptied, so the source's own
     // teardown releases nothing and the destination's releases the bytes.
     var handed = move built;
-    print(handed);
-    print(len(handed));
+    Console.WriteLog(handed);
+    Console.WriteLog(len(handed));
 
     // A parameter is a borrow, so passing a value does not copy it.
-    print(borrow(handed));
-    print(twice(handed));
+    Console.WriteLog(borrow(handed));
+    Console.WriteLog(twice(handed));
 
     // A field is a borrow too, and reading it copies.
     var h = new Held("in an object");
-    print(h.get());
-    print(h.label);
+    Console.WriteLog(h.get());
+    Console.WriteLog(h.label);
 
     // A copy stored into a field is the object's own, so releasing the local
     // leaves the object readable.
     var text = "owned by the field";
     var h2 = new Held(text);
-    print(h2.get());
+    Console.WriteLog(h2.get());
 
     // Concatenation in a loop, which is the case a per-store release has to get
     // right: every intermediate is released as it is overwritten.
@@ -72,18 +72,18 @@ int main() {
         acc = acc + "ab";
         i = i + 1;
     }
-    print(acc.length);   // 600
-    print(acc[0]);
-    print(acc[599]);
+    Console.WriteLog(acc.length);   // 600
+    Console.WriteLog(acc[0]);
+    Console.WriteLog(acc[599]);
 
     // An empty string is a real string, and releasing it is a no-op rather than
     // a free of nothing.
     var nothing = "";
-    print(len(nothing));
-    print(nothing == "");
+    Console.WriteLog(len(nothing));
+    Console.WriteLog(nothing == "");
 
     // A string that is never stored is a temporary, and its bytes live until the
     // program exits. Nothing here observes that; the print does.
-    print("temporary" + "!");
+    Console.WriteLog("temporary" + "!");
     return 0;
 }

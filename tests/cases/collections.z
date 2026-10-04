@@ -6,168 +6,168 @@
 int main() {
     /* ---- Vec: building, reading, growing ---- */
     var v = new Vec<int>();
-    print(v.size());             // 0
-    print(v.isEmpty());          // true
+    Console.WriteLog(v.size());             // 0
+    Console.WriteLog(v.isEmpty());          // true
     for (var i1 = 0; i1 < 100; i1++) { v.push(i1 * i1); }
-    print(v.size());             // 100
-    print(v.at(0));              // 0
-    print(v.at(99));             // 9801
-    print(v.at(10));             // 100
-    print(v.capacity() >= 100);  // true
+    Console.WriteLog(v.size());             // 100
+    Console.WriteLog(v.at(0));              // 0
+    Console.WriteLog(v.at(99));             // 9801
+    Console.WriteLog(v.at(10));             // 100
+    Console.WriteLog(v.capacity() >= 100);  // true
 
     /* Amortized growth: doubling means capacity is never far above length, and
      * 100 pushes never did more than a handful of copies. */
-    print(v.capacity() < 200);   // true
+    Console.WriteLog(v.capacity() < 200);   // true
 
     /* ---- a Vec is a reference ---- */
     var alias = v;
     alias.push(12345);
-    print(v.size());             // 101 -- the same vector, not a copy
+    Console.WriteLog(v.size());             // 101 -- the same vector, not a copy
     v.push(999);
-    print(alias.size());          // 102
+    Console.WriteLog(alias.size());          // 102
 
     /* ---- ends and middle ---- */
-    print(v.pop());              // 999
-    print(v.size());             // 101
+    Console.WriteLog(v.pop());              // 999
+    Console.WriteLog(v.size());             // 101
     var mid = new Vec<string>();
     mid.push("a");
     mid.push("b");
     mid.push("c");
-    print(mid.removeAt(1));      // b
-    print(mid.join(","));        // a,c
+    Console.WriteLog(mid.removeAt(1));      // b
+    Console.WriteLog(mid.join(","));        // a,c
     mid.insertAt(1, "X");
-    print(mid.join(","));        // a,X,c
+    Console.WriteLog(mid.join(","));        // a,X,c
     /* indexOf / contains / remove are absent on purpose: `==` on a class is
      * identity, so they would answer a different question for every element type
      * that is a reference. See lib/collections.z. */
-    print(mid.at(0));            // a
-    print(mid.at(2));            // c
+    Console.WriteLog(mid.at(0));            // a
+    Console.WriteLog(mid.at(2));            // c
 
     /* ---- ranges, both ends optional, clamped ---- */
     var r = new Vec<int>();
     for (var i2 = 0; i2 < 10; i2++) { r.push(i2); }
-    print(r.slice(2, 5).join(""));   // 234
-    print(r.sliceFrom(7).join(""));   // 789
-    print(r.sliceTo(3).join(""));     // 012
-    print(r.slice(8, 2).size());     // 0, an inverted range is empty
-    print(r.slice(-3, 99).join(""));  // 789
-    print(r.reversed().join(""));     // 9876543210
-    print(r.join(""));                // the original, untouched by slicing
+    Console.WriteLog(r.slice(2, 5).join(""));   // 234
+    Console.WriteLog(r.sliceFrom(7).join(""));   // 789
+    Console.WriteLog(r.sliceTo(3).join(""));     // 012
+    Console.WriteLog(r.slice(8, 2).size());     // 0, an inverted range is empty
+    Console.WriteLog(r.slice(-3, 99).join(""));  // 789
+    Console.WriteLog(r.reversed().join(""));     // 9876543210
+    Console.WriteLog(r.join(""));                // the original, untouched by slicing
 
     /* ---- take and drop ---- */
-    print(r.take(3).join(""));   // 012
-    print(r.size());             // 10 -- take copies
+    Console.WriteLog(r.take(3).join(""));   // 012
+    Console.WriteLog(r.size());             // 10 -- take copies
     var d = new Vec<int>();
     for (var i3 = 0; i3 < 5; i3++) { d.push(i3); }
     d.drop(2);
-    print(d.join(""));           // 234
+    Console.WriteLog(d.join(""));           // 234
     d.drop(99);
-    print(d.size());             // 0
+    Console.WriteLog(d.size());             // 0
 
     /* ---- clear keeps the buffer, release drops it ---- */
     var c = new Vec<int>();
     for (var i4 = 0; i4 < 50; i4++) { c.push(i4); }
     var capBefore = c.capacity();
     c.clear();
-    print(c.size());             // 0
-    print(c.capacity() == capBefore); // true
+    Console.WriteLog(c.size());             // 0
+    Console.WriteLog(c.capacity() == capBefore); // true
     c.release();
-    print(c.capacity() < capBefore);  // true
+    Console.WriteLog(c.capacity() < capBefore);  // true
 
     /* ---- an element type with a text form of its own ---- */
     var texts = new Vec<string>();
     texts.push("one");
     texts.push("two");
-    print(texts.join(" + "));    // one + two
+    Console.WriteLog(texts.join(" + "));    // one + two
     var nums = new Vec<int>();
     nums.push(1);
     nums.push(2);
     nums.push(3);
-    print(nums.join("-"));       // 1-2-3
-    print(nums.toString());      // 1, 2, 3
+    Console.WriteLog(nums.join("-"));       // 1-2-3
+    Console.WriteLog(nums.toString());      // 1, 2, 3
 
     /* ---- Map: string keys ---- */
     var ages = new Map<string,int>();
     ages.set("ann", 34);
     ages.set("bob", 29);
     ages.set("cid", 41);
-    print(ages.size());          // 3
-    print(ages.get("bob", -1));  // 29
-    print(ages.get("nobody", -1)); // -1
-    print(ages.has("ann"));      // true
-    print(ages.has("nobody"));   // false
-    print(ages.remove("bob"));   // true
-    print(ages.remove("bob"));   // false
-    print(ages.size());          // 2
-    print(ages.get("bob", -1));  // -1
+    Console.WriteLog(ages.size());          // 3
+    Console.WriteLog(ages.get("bob", -1));  // 29
+    Console.WriteLog(ages.get("nobody", -1)); // -1
+    Console.WriteLog(ages.has("ann"));      // true
+    Console.WriteLog(ages.has("nobody"));   // false
+    Console.WriteLog(ages.remove("bob"));   // true
+    Console.WriteLog(ages.remove("bob"));   // false
+    Console.WriteLog(ages.size());          // 2
+    Console.WriteLog(ages.get("bob", -1));  // -1
     ages.set("bob", 30);         // back in, and the size is right
-    print(ages.size());          // 3
-    print(ages.get("bob", -1));  // 30
+    Console.WriteLog(ages.size());          // 3
+    Console.WriteLog(ages.get("bob", -1));  // 30
 
     /* getOr computes a default only when there is nothing stored */
-    print(ages.getOr("ann", 0));        // 34, the default is not stored
-    print(ages.getOr("zoe", 1));        // 1
-    print(ages.get("zoe", -1));        // 1
-    print(ages.size());                 // 4
+    Console.WriteLog(ages.getOr("ann", 0));        // 34, the default is not stored
+    Console.WriteLog(ages.getOr("zoe", 1));        // 1
+    Console.WriteLog(ages.get("zoe", -1));        // 1
+    Console.WriteLog(ages.size());                 // 4
 
     /* Enough entries to force the table to grow, twice. The count has to survive
      * every rehash -- which is what a growable vector's rehash used to get wrong
      * at -O1, silently, after the first growth. */
     var many = new Map<int,int>();
     for (var i5 = 0; i5 < 500; i5++) { many.set(i5 * 3, i5); }
-    print(many.size());                 // 500
+    Console.WriteLog(many.size());                 // 500
     var sum = 0;
     for (var i6 = 0; i6 < 500; i6++) { sum = sum + many.get(i6 * 3, -1); }
-    print(sum);                        // 124750
-    print(many.get(1, -1));             // -1, a key that was never set
-    print(many.get(3 * 499, -1));       // 499
+    Console.WriteLog(sum);                        // 124750
+    Console.WriteLog(many.get(1, -1));             // -1, a key that was never set
+    Console.WriteLog(many.get(3 * 499, -1));       // 499
 
     /* Keys that collide on their low bits would cluster if the hash did not
      * spread them; 0 and 1024 differ only in the bits a table masks on. */
     var spread = new Map<int,int>();
     for (var i7 = 0; i7 < 64; i7++) { spread.set(i7 * 1024, i7); }
-    print(spread.size());               // 64
-    print(spread.get(1024 * 33, -1));   // 33
-    print(spread.get(0, -1));           // 0
+    Console.WriteLog(spread.size());               // 64
+    Console.WriteLog(spread.get(1024 * 33, -1));   // 33
+    Console.WriteLog(spread.get(0, -1));           // 0
 
     /* Removing and re-adding is what a tombstone exists for: the probe has to
      * run past the hole rather than stopping at it. */
     var churn = new Map<int,int>();
     for (var n1 = 0; n1 < 40; n1++) { churn.set(n1, n1 * 10); }
     for (var n2 = 0; n2 < 40; n2 += 2) { churn.remove(n2); }
-    print(churn.size());                // 20
+    Console.WriteLog(churn.size());                // 20
     for (var n3 = 0; n3 < 40; n3++) {
-        if (n3 % 2 == 0) { print(churn.has(n3)); } else { print(churn.get(n3, -1) / 10); }
+        if (n3 % 2 == 0) { Console.WriteLog(churn.has(n3)); } else { Console.WriteLog(churn.get(n3, -1) / 10); }
     }
     for (var n4 = 0; n4 < 40; n4++) { churn.set(n4, n4); }
-    print(churn.size());                // 40
-    print(churn.get(39, -1));           // 39
+    Console.WriteLog(churn.size());                // 40
+    Console.WriteLog(churn.get(39, -1));           // 39
 
     /* A Map's own text form, which is what a failed assertion wants. */
     var small = new Map<string,int>();
     small.set("a", 1);
-    print(small.toString().length >= 3); // true -- at least "a=1"
+    Console.WriteLog(small.toString().length >= 3); // true -- at least "a=1"
     small.clear();
-    print(small.size());                // 0
+    Console.WriteLog(small.size());                // 0
 
     /* ---- Map: int keys, and a struct as one ---- */
     struct Key { int a; int b; }
     var keys = new Map<int,string>();
     for (var i11 = 0; i11 < 20; i11++) { keys.set(i11, int_to_string(i11 * 100)); }
-    print(keys.get(7, "?"));            // 700
-    print(keys.size());                 // 20
+    Console.WriteLog(keys.get(7, "?"));            // 700
+    Console.WriteLog(keys.size());                 // 20
 
     /* ---- Set ---- */
     var seen = new Set<string>();
-    print(seen.size());                 // 0
-    print(seen.addIfNew("a"));          // true
-    print(seen.addIfNew("a"));          // false
-    print(seen.addIfNew("b"));          // true
-    print(seen.size());                 // 2
-    print(seen.has("a"));               // true
-    print(seen.has("z"));               // false
-    print(seen.remove("a"));            // true
-    print(seen.size());                 // 1
+    Console.WriteLog(seen.size());                 // 0
+    Console.WriteLog(seen.addIfNew("a"));          // true
+    Console.WriteLog(seen.addIfNew("a"));          // false
+    Console.WriteLog(seen.addIfNew("b"));          // true
+    Console.WriteLog(seen.size());                 // 2
+    Console.WriteLog(seen.has("a"));               // true
+    Console.WriteLog(seen.has("z"));               // false
+    Console.WriteLog(seen.remove("a"));            // true
+    Console.WriteLog(seen.size());                 // 1
 
     /* The counting idiom the whole shape exists for. */
     var dupes = new Set<int>();
@@ -177,26 +177,26 @@ int main() {
     for (var i13 = 0; i13 < data.size(); i13++) {
         if (dupes.addIfNew(data.at(i13))) { distinct = distinct + 1; }
     }
-    print(distinct);                    // 30
-    print(dupes.size());                // 30
+    Console.WriteLog(distinct);                    // 30
+    Console.WriteLog(dupes.size());                // 30
 
     /* set relations */
     var x = new Set<int>();
     var y = new Set<int>();
     for (var i14 = 0; i14 < 5; i14++) { x.add(i14); y.add(i14); }
     y.add(99);
-    print(x.containsAll(y));            // false
-    print(y.containsAll(x));            // true
-    print(x.isEqualTo(x));              // true
+    Console.WriteLog(x.containsAll(y));            // false
+    Console.WriteLog(y.containsAll(x));            // true
+    Console.WriteLog(x.isEqualTo(x));              // true
     y.remove(99);
-    print(x.isEqualTo(y));              // true
+    Console.WriteLog(x.isEqualTo(y));              // true
 
     /* A Set of 2000, which forces the inner map to rehash. */
     var big = new Set<int>();
     for (var i15 = 0; i15 < 2000; i15++) { big.add(i15 * 5); }
-    print(big.size());                  // 2000
-    print(big.has(9995));               // true
-    print(big.has(9994));               // false
+    Console.WriteLog(big.size());                  // 2000
+    Console.WriteLog(big.has(9995));               // true
+    Console.WriteLog(big.has(9994));               // false
 
     /* ---- a vector of vectors: the case the class decision is about ---- */
     var grid = new Vec<Vec<int>*>();
@@ -205,10 +205,10 @@ int main() {
         for (var col = 0; col < 3; col++) { line.push(row * 3 + col); }
         grid.push(line);
     }
-    print(grid.size());                 // 3
-    print(grid.at(1).at(1));            // 4
+    Console.WriteLog(grid.size());                 // 3
+    Console.WriteLog(grid.at(1).at(1));            // 4
     grid.at(0).push(99);
-    print(grid.at(0).size());           // 4
-    print(grid.at(0).join(""));         // 01299
+    Console.WriteLog(grid.at(0).size());           // 4
+    Console.WriteLog(grid.at(0).join(""));         // 01299
     return 0;
 }

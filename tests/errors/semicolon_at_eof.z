@@ -6,4 +6,4 @@
 // the first line of the file -- which, in a file that opens with a comment, points
 // at the one line that has nothing to do with it.
 var greeting = "hi";
-print(greeting + ", its me")
+Console.WriteLog(greeting + ", its me")

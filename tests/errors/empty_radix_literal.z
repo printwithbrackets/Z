@@ -1,1 +1,1 @@
-print(0x);
+Console.WriteLog(0x);

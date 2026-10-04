@@ -48,9 +48,9 @@ int main() {
     var r = new Rect(3, 4);
     Shape a = s;
     Shape b = r;
-    print(a.Area());
-    print(b.Area());
-    print(a.Name() + " " + b.Name());
+    Console.WriteLog(a.Area());
+    Console.WriteLog(b.Area());
+    Console.WriteLog(a.Name() + " " + b.Name());
 
     // ---- structs and classes in the same array ----
     // Nothing in common but the interface, and the struct has no vtable at all.
@@ -59,23 +59,23 @@ int main() {
     shapes[1] = new BigCircle(2);
     shapes[2] = new Square(3);
     for (var i = 0; i < 3; i = i + 1) {
-        print(shapes[i].Name() + " " + shapes[i].Area());
+        Console.WriteLog(shapes[i].Name() + " " + shapes[i].Area());
     }
 
     // ---- as parameters and as a result ----
-    print(total(s, r));
+    Console.WriteLog(total(s, r));
     var win = bigger(s, r);
-    print(win.Area());
-    print(total(bigger(r, s), s));
+    Console.WriteLog(win.Area());
+    Console.WriteLog(total(bigger(r, s), s));
 
     // ---- the interface is a pointer, so null is meaningful ----
     Shape nothing = null;
-    if (nothing == null) { print("null"); }
+    if (nothing == null) { Console.WriteLog("null"); }
 
     // ---- declared after its use, like any other type ----
     var late = new Deferred(3);
     Late l = late;
-    print(l.Area());
+    Console.WriteLog(l.Area());
     return 0;
 }
 

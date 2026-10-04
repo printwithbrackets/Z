@@ -28,8 +28,8 @@ when its scope ends, and releases the previous value when a slot is overwritten.
 variable is a compile error with a note pointing at the move.
 
 A temporary string, meaning one that is computed and never stored into anything,
-is released when the statement that made it ends, so `print(a + b)` inside a loop
-is bounded rather than one leak per iteration.
+is released when the statement that made it ends, so `Console.WriteLog(a + b)`
+inside a loop is bounded rather than one leak per iteration.
 
 **Everything else still leaks, and that is stated rather than hidden.** A class
 object from `new C()`, a heap array from `new T[n]`, a closure cell, and anything
@@ -89,6 +89,17 @@ loop-invariant code motion. `--bounds` range-checks array *and string* indexing,
 `-w` silences warnings, and `-Werror` makes them fail the build. Anything the
 compiler does not recognize is passed through to the linker.
 
+A `z.surface` file beside your code renames what a program writes for a global —
+the builtins, the standard library, your own globals — so a codebase can be
+written in its own dialect. It is found by walking up from the source file, and
+`--no-surface` ignores it:
+
+```sh
+# z.surface:  say = print
+./z run hello.z                  # a program in this project's dialect
+./z run hello.z --no-surface     # the shipped names only
+```
+
 The output path and those pass-through arguments are handed to the C toolchain
 as a real argument vector, never through a shell, so a path containing a quote,
 a semicolon or a space is just a path. There is a limit of 256 pass-through
@@ -124,65 +135,65 @@ var total = 0;
 for (var i = 1; i <= 10; i++) {   // C#-style for + ++
     total += i;
 }
-print(total);                        // 55
+Console.WriteLog(total);                        // 55
 
 // Arrays live on the heap; index with [], read .length.
 var a = new int[5];
 a[0] = 10;  a[1] = 20;
-print(a.length);                     // 5
-print(a[0] + a[1]);                  // 30
+Console.WriteLog(a.length);                     // 5
+Console.WriteLog(a[0] + a[1]);                  // 30
 
 // foreach desugars to an index-based loop.
-foreach (var x in a) { print(x); }   // 10 20 0 0 0
+foreach (var x in a) { Console.WriteLog(x); }   // 10 20 0 0 0
 
 // Pointers: & to take an address, * to deref.
 var p = &a[0];
-print(*p);                           // 10
+Console.WriteLog(*p);                           // 10
 *p = 99;
-print(a[0]);                         // 99
+Console.WriteLog(a[0]);                         // 99
 
 // Functions (C#-style: return type, then name).
 int fib(int n) {
     if (n < 2) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
-print(fib(15));                       // 610
+Console.WriteLog(fib(15));                       // 610
 
 // Structs (value types with fields).
 struct Point { int x; int y; }
 var p = new Point(3, 4);        // positional constructor
 var q = p;                      // value copy
 q.x = 10;                       // q.x = 10, p.x still 3
-print(p.x + p.y);               // 7
-print(q.x);                     // 10
+Console.WriteLog(p.x + p.y);               // 7
+Console.WriteLog(q.x);                     // 10
 
 // Methods with an implicit `this` (C# style).
 struct Point { int x; int y; int Sum() { return x + y; } int Mag2() => x*x + y*y; }
 var pt = new Point(3, 4);
-print(pt.Sum());                // 7
-print(pt.Mag2());               // 25
+Console.WriteLog(pt.Sum());                // 7
+Console.WriteLog(pt.Mag2());               // 25
 
 // Auto-properties and string interpolation.
 struct Acct { int id; int Id { get; set; } }
 var acc = new Acct(0); acc.Id = 9;
-print($"id = {acc.Id}");         // id = 9
+Console.WriteLog($"id = {acc.Id}");         // id = 9
 
 // Extension methods.
 int Twice(this int n) { return n * 2; }
-print(21.Twice());               // 42
+Console.WriteLog(21.Twice());               // 42
 
 // bool operators and string concatenation (incl. int→string).
 bool ok = 3 > 2 && !false;
-print(ok);                            // true
-print("count = " + 42);               // count = 42
+Console.WriteLog(ok);                            // true
+Console.WriteLog("count = " + 42);               // count = 42
 
 // Durations: a number with a unit stuck to it — h, m, s, ms, us. They run
 // together, and a bare trailing number is seconds.
 hold(2h21m37);                        // wait for 2h 21m 37s
 hold(37);                             // same as hold(37s)
 hold(500ms);                          // half a second
-print(2h + 21m + 37);                 // 8497 — a whole duration is an int of seconds
-print(1m500ms);                       // 60.5 — a sub-second part makes it a float
+Console.WriteLog(2h + 21m + 37);                 // 8497 — a whole duration is an int of seconds
+Console.WriteLog(1m500ms);                       // 60.5 — a sub-second part makes it a float
 ```
 
 ## How it works
@@ -210,9 +221,35 @@ system assembler — we do not write an ELF encoder.
 
 ## Roadmap
 
-- **M0–M1 (done):** pipeline, expressions, control flow, functions, `int`/`bool`/`string`, `var`, `print`, diagnostics.
+- **M0–M1 (done):** pipeline, expressions, control flow, functions, `int`/`bool`/`string`, `var`, `Console.WriteLog`, diagnostics.
 - **M2 (done):** real type system, pointers (`&`/`*`), heap arrays (`new T[n]`, indexing, `.length`), `for`/`foreach`, `++`/`--`, string concatenation/`int`→string, **structs** (fields, nested, copy semantics, arrays of structs, by-pointer params), embedded runtime. **Later:** by-value struct pass/return (SysV classifier).
 - **M3 (done):** C# sugar: properties, `$""` string interpolation, expression-bodied members, `operator` overloading, extension methods.
+- **Surface names (done):** the spelling a program uses for a global is data
+  rather than syntax, so a codebase can be written in its own dialect. A
+  `z.surface` manifest beside the code maps each name a project writes to the name
+  the compiler knows — builtins, standard-library types and their methods, and the
+  project's own globals — and matching ignores case, so `say`, `Say` and `SAY`
+  are one name. Nothing else changes: the compiler, the runtime and the emitted
+  x86-64 are the same, because a surface name becomes an ordinary global before
+  code generation sees it. A surface name is a *fallback*, so a project that
+  declares the spelling keeps its own declaration.
+
+  Two decisions are settled rather than open. The manifest is found by walking up
+  from the source file, nearest first, and the nearest wins — a dialect is a
+  property of a subtree, so a vendored project keeps its own. And **one** manifest
+  governs a whole compilation rather than one per file, because `import` splices
+  rather than isolates: an imported library is read in the importing project's
+  dialect, which is the rule `import` already follows. `--no-surface` ignores the
+  manifest and `--surface=<path>` names one, for a build that runs somewhere it
+  should not.
+
+  Not done: **keywords**. `var`, `foreach` and `match` are lexed rather than
+  resolved by name, so they are not renameable yet — that is the lexer's table
+  rather than a lookup site, and it is the remaining half of "every codebase looks
+  like a different language". Making it work also raises a question the lookup
+  sites do not: a keyword is not a fallback, so `if` would have to be genuinely
+  absent rather than merely shadowed.
+
 - **M3.5 (done):** the everyday-language layer — `const`; bitwise `& | ^ ~ << >>` and the compound forms; `break`/`continue`; the `null` literal; lexicographic string comparison; integer built-ins `abs min max clamp sqrt` and `sin`/`cos` (fixed point, a full turn of `1 << 30`); opt-in `--bounds` range checking.
 - **M3.7 (done):** C interoperability — `extern` (implemented in C) and `export` (defined in Z, callable from C) in both directions, with linker arguments passed through. Every Z function is emitted under a private `z$` symbol, so it can no longer collide with a libc name, a runtime helper, or a word the assembler reserves.
 - **M3.8 (done):** first-class function pointers — `&f` yields a value typed by
@@ -399,6 +436,13 @@ question is, because picking the wrong answer is the expensive way to find out.
   boundary this language cares about: a `readLine` built on `fgetc` would pull the
   rest of the file into a buffer the program cannot see.
 
+  Reading a *line* is now a builtin too — `read_string` from stdin, `input` for the
+  prompt-then-read a console program opens with, and `read_line` from any
+  descriptor — so "print to stdout and nothing else" is no longer the whole story.
+  They read through the same `z_read_byte`, one syscall per byte, for the reason
+  above. `stdin` is the test, and it is fed from a `.stdin` sibling because the
+  harness has no terminal to type at.
+
   The `Result<File, IoError>` layer is now written and reaches the runtime, having
   been blocked by a compiler bug this milestone also fixed: **a method returning a
   `Result` lost its first declared parameter.** `f.w(5)` reported
@@ -501,9 +545,9 @@ question is, because picking the wrong answer is the expensive way to find out.
     arity error both print the declaration they violated
     (`'add' is declared int add(int, int)`), and a non-exhaustive `match` names
     the variants it does not handle instead of counting them.
-  - **Cascades are suppressed.** `print(ghost)` used to report both the
-    undefined name and `print expects 'int' but got <null>`; the second is a
-    second complaint about one mistake, and it buries the first.
+  - **Cascades are suppressed.** `Console.WriteLog(ghost)` used to report both the
+    undefined name and `'Console.WriteLog' expects 'int' but got '<null>'`; the
+    second is a second complaint about one mistake, and it buries the first.
   - **Colour** on a terminal, off when redirected or piped, forced with
     `--color=always|never|auto`, and off under `NO_COLOR`.
   - **`--error-format=human|gcc|json`.** `gcc` is one line per problem and one
@@ -585,8 +629,8 @@ Recorded because each was invisible at the default optimization level, and
   function body's outermost scope, which is also what makes a nested function
   non-capturing by construction.
 - **A string temporary was released once per loop iteration instead of once.**
-  `print("ab" + "cd")` in a loop allocates a concatenation no variable ever names,
-  and with the collector gone it had no owner at all. Spilling it to a frame slot
+  `Console.WriteLog("ab" + "cd")` in a loop allocates a concatenation no variable
+  ever names, and with the collector gone it had no owner at all. Spilling it to a frame slot
   and releasing it at the end of the statement fixed the leak and introduced three
   ways to free the wrong thing, each of which is a crash rather than a wrong
   answer. A slot on the temp stack is reclaimed by every assignment and call, so

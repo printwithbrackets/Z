@@ -5,8 +5,8 @@ int fib(int n) {
     return fib(n - 1) + fib(n - 2);
 }
 
-print(fib(10));
-print(fib(15));
+Console.WriteLog(fib(10));
+Console.WriteLog(fib(15));
 
 int fact(int n) {
     if (n <= 1) {
@@ -14,5 +14,5 @@ int fact(int n) {
     }
     return n * fact(n - 1);
 }
-print(fact(6));
-print(fact(12));
+Console.WriteLog(fact(6));
+Console.WriteLog(fact(12));

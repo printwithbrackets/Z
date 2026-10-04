@@ -3,4 +3,4 @@
 var f = (int x) => x + 1;
 var n = 0;
 n = f;
-print(n);
+Console.WriteLog(n);

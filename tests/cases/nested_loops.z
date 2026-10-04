@@ -8,7 +8,7 @@ int main() {
         var lim = 1;
         for (var b = 0; b < lim; b = b + 1) { n = n + 1; }
     }
-    print(n);                                  // 3
+    Console.WriteLog(n);                                  // 3
 
     /* three deep, all counters live at once */
     var m = 0;
@@ -17,7 +17,7 @@ int main() {
             for (var k = 0; k < 2; k = k + 1) { m = m + 1; }
         }
     }
-    print(m);                                  // 8
+    Console.WriteLog(m);                                  // 8
 
     /* an outer counter and an inner one that also accumulates */
     var total = 0;
@@ -26,7 +26,7 @@ int main() {
         for (var y = 0; y < 3; y = y + 1) { inner = inner + y; }
         total = total + inner + x;
     }
-    print(total);                              // 3+4+5+6 = 18
+    Console.WriteLog(total);                              // 3+4+5+6 = 18
 
     /* a nested while inside a for, with a local live across both */
     var acc = 0;
@@ -35,6 +35,6 @@ int main() {
         var w = 0;
         while (w < g) { w = w + 1; acc = acc + 1; }
     }
-    print(acc);                                // 0+2+4 = 6
+    Console.WriteLog(acc);                                // 0+2+4 = 6
     return 0;
 }

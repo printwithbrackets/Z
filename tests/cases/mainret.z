@@ -1,4 +1,4 @@
 int main() {
-    print("int main returns 7");
+    Console.WriteLog("int main returns 7");
     return 7;
 }

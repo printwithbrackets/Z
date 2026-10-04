@@ -1,1 +1,1 @@
-print("hello from Z");
+Console.WriteLog("hello from Z");

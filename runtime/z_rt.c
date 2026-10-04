@@ -603,7 +603,7 @@ char *z_itoa(long v) {
     return out;
 }
 
-/* Prints a float, the way Z's `print` does for one.
+/* Prints a float, the way Z's `Console.WriteLog` does for one.
  *
  * This exists so the compiler never has to make a variadic call itself. Calling
  * printf with a floating-point argument means setting %al to the number of
@@ -1041,7 +1041,7 @@ char *z_join(const char *sep, void *parts) {
 }
 
 /* Formats a float as a string, with the same six significant digits `print`
- * uses, so `"x = " + 1.5` and `print(1.5)` never disagree about how a number
+ * uses, so `"x = " + 1.5` and `Console.WriteLog(1.5)` never disagree about how a number
  * looks. */
 char *z_ftoa(double v) {
     char buf[40];

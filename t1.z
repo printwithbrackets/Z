@@ -1,0 +1,2 @@
+class T { int id; T(int v) { this.id = v; } ~T() { Console.WriteLog("drop"); } }
+int main() { { var a = new T(1); } Console.WriteLog("left"); return 0; }

@@ -8,12 +8,12 @@ int fact(int n) { if (n <= 1) { return 1; } return n * fact(n - 1); }
 
 int main() {
     var v = makeVec(1, 2);
-    print(v.Sum());            // 3
+    Console.WriteLog(v.Sum());            // 3
     var n = 5;
     setVal(&n, 99);
-    print(n);                  // 99
-    print(fact(5));            // 120
+    Console.WriteLog(n);                  // 99
+    Console.WriteLog(fact(5));            // 120
     // nested generic call: result of one generic feeds another
-    print(neverCalled(1) + 0); // wait - neverCalled uninstantiated; calling it instantiates
+    Console.WriteLog(neverCalled(1) + 0); // wait - neverCalled uninstantiated; calling it instantiates
     return 0;
 }

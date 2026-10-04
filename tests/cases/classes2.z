@@ -38,17 +38,17 @@ class Loud {
 
 int main() {
     var c = new Counter(10);
-    print(c.Get());                      // 10
+    Console.WriteLog(c.Get());                      // 10
     c.Bump();
     c.Bump();
-    print(c.Get());                      // 12
-    print(c.Step());                     // 1
+    Console.WriteLog(c.Get());                      // 12
+    Console.WriteLog(c.Step());                     // 1
 
     // A freshly allocated object has zeroed fields, so a constructor that
     // does not assign one leaves it at zero rather than undefined.
     var d = new Counter(0);
     d.Bump();
-    print(d.Get());                      // 1
+    Console.WriteLog(d.Get());                      // 1
 
     // `virtual` still exists, and a class that declares it dispatches through
     // the interface rather than the class type.
@@ -57,16 +57,16 @@ int main() {
     var speakers = new Speakable[2];
     speakers[0] = n;
     speakers[1] = l;
-    print(speakers[0].Describe());       // name=rex
-    print(speakers[1].Describe());       // NAME=rex
+    Console.WriteLog(speakers[0].Describe());       // name=rex
+    Console.WriteLog(speakers[1].Describe());       // NAME=rex
 
     // The concrete type is unaffected by the interface.
-    print(n.Describe());                 // name=rex
-    print(l.Describe());                 // NAME=rex
+    Console.WriteLog(n.Describe());                 // name=rex
+    Console.WriteLog(l.Describe());                 // NAME=rex
 
     // A field a constructor did not assign reads as zero.
     var e = new Loud("x");
-    print(e.Hits());                     // 0
+    Console.WriteLog(e.Hits());                     // 0
     return 0;
 }
 

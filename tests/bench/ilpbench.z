@@ -22,6 +22,6 @@ int main() {
         d = d + 4;
         i = i + 1;
     }
-    print(a + b + c + d);
+    Console.WriteLog(a + b + c + d);
     return 0;
 }

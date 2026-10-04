@@ -51,30 +51,30 @@ int fib(int n) {
 }
 
 int main() {
-    print(twice(21));                 // 42
-    print(negate(negate(7)));         // 7
-    print(twice(twice(twice(3))));    // 24
+    Console.WriteLog(twice(21));                 // 42
+    Console.WriteLog(negate(negate(7)));         // 7
+    Console.WriteLog(twice(twice(twice(3))));    // 24
 
-    print(clamp(0, 1, 3));            // 1, under the low bound
-    print(clamp(5, 1, 3));            // 3, over the high bound
-    print(clamp(5, 1, 9));            // 5, inside
-    print(clamp(5, 6, 9));            // 6, on the low bound
-    print(declared_only(4));          // 40
+    Console.WriteLog(clamp(0, 1, 3));            // 1, under the low bound
+    Console.WriteLog(clamp(5, 1, 3));            // 3, over the high bound
+    Console.WriteLog(clamp(5, 1, 9));            // 5, inside
+    Console.WriteLog(clamp(5, 6, 9));            // 6, on the low bound
+    Console.WriteLog(declared_only(4));          // 40
 
     var n = 41;
     bump(&n);
-    print(n);                         // 42
+    Console.WriteLog(n);                         // 42
 
     var b = new Box(10);
-    print(b.plus(5));                 // 15
-    print(b.scaled(4));               // 41
+    Console.WriteLog(b.plus(5));                 // 15
+    Console.WriteLog(b.scaled(4));               // 41
     b.v = 3;
-    print(b.get());                   // 3
+    Console.WriteLog(b.get());                   // 3
 
     // The inliner recurses into a call it has itself inlined, up to its depth
     // limit and no further, so the answer must not depend on which side of that
     // limit a given call lands.
-    print(fib(10));                   // 55
-    print(twice(fib(9)) + negate(1)); // 2 * 34 - 1 = 67
+    Console.WriteLog(fib(10));                   // 55
+    Console.WriteLog(twice(fib(9)) + negate(1)); // 2 * 34 - 1 = 67
     return 0;
 }

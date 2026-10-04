@@ -155,7 +155,7 @@ var total = 0;
 while (let v = recv(chan)) {        // recv yields a Result
     total = total + v;
 }
-print(total);                       // 499500
+Console.WriteLog(total);                       // 499500
 ```
 
 Because ownership is single-threaded by construction, there is nothing to
@@ -274,8 +274,8 @@ done, and the rest of the slice is waiting on them.
   uses to stay a handover rather than an alias, and what `return move local;` is
   for.
   A string computed but never stored is a **temporary**, and it is released when
-  the statement that made it ends, so a loop of `print(a + b)` is bounded rather
-  than one leak per iteration. The value is spilled to a pinned frame slot and
+  the statement that made it ends, so a loop of `Console.WriteLog(a + b)` is
+  bounded rather than one leak per iteration. The value is spilled to a pinned frame slot and
   released after the statement, and an expression that may not run (a ternary's
   untaken arm, the right operand of a short-circuited `&&`) records nothing,
   because both are emitted and the skipped one would leave a slot holding the
@@ -387,7 +387,7 @@ hold(37);         // the same as hold(37s): a bare number is seconds
 The value is an ordinary integer count of seconds, which is the whole design.
 Everything downstream — the parser, the type checker, the code generator — sees an
 `int`, so there is no duration type anywhere and `hold(2h)` is visibly the same
-call as `hold(7200)`. The cost is that `print(2h)` prints `7200` rather than
+call as `hold(7200)`. The cost is that `Console.WriteLog(2h)` prints `7200` rather than
 `2h`, and that there is no sub-second duration: a duration literal is an integer,
 so `1.5h` is a float followed by an identifier, and `hold` takes an `int`.
 
@@ -409,7 +409,7 @@ that knows how to turn a value into bytes.
 
 ```
 var n = 3;
-print(format("n = {}, sq = {}", n, n * n));    // n = 3, sq = 9
+Console.WriteLog(format("n = {}, sq = {}", n, n * n));    // n = 3, sq = 9
 ```
 
 **[new]** Keywords added: `auto`, `move`, `clone`, `namespace`, `pub`,
@@ -706,8 +706,8 @@ closure() -> int counter() {
     return () => { n = n + 1; return n; };
 }
 var c = counter();
-print(c());   // 1
-print(c());   // 2
+Console.WriteLog(c());   // 1
+Console.WriteLog(c());   // 2
 ```
 
 **[new]** The box becomes an `Rc` cell, so it is freed when the last closure over
@@ -739,8 +739,8 @@ var v = Vec<int>();
 v.push_back(3);
 v.push_back(4);
 for (auto& x : v) { x = x * 2; }     // in place; auto& is what makes it in place
-print(v[0]);                          // 6
-print(v.size());                       // 2
+Console.WriteLog(v[0]);                          // 6
+Console.WriteLog(v.size());                       // 2
 ```
 
 `v[i]` is **always** bounds-checked in v2. **[new]** v1 had this behind
@@ -808,8 +808,8 @@ loop plus an unwrap.
 10. `* / %`
 11. `<< >>`
 12. unary `- ! & * ~`
-13. primary: literals, `new C(args)`, `(` expr `)`, variable, `print(expr)`, a
-    built-in, a user function, postfix `[i]`, `->`, `++`, `--`
+13. primary: literals, `new C(args)`, `(` expr `)`, variable, `Console.WriteLog(expr)`,
+    a built-in, a user function, postfix `[i]`, `->`, `++`, `--`
 
 **[now]** `&f` on a function name yields a `fn` typed by that function's
 signature; calling it checks the argument count and types. `&obj.M` on a class
@@ -824,9 +824,42 @@ turn of `1 << 30`. **[new]** `float` overloads of all of them are added, because
 a language with `float` and an integer-only `sqrt` makes everyone write the
 conversion by hand.
 
-**[now]** `print` is a builtin: `print(int)`, `print(bool)`, `print(float)`,
-`print(string)`. A float prints with `%g`, so `1.5` is `1.5` and `100.0` is
-`100`. This is the same formatting `format` uses, so the two never disagree.
+**[now]** `Console.WriteLog` is a builtin, taking an `int`, `bool`, `float` or
+`string`. A float prints with `%g`, so `1.5` is `1.5` and `100.0` is `100`. This
+is the same formatting `format` uses, so the two never disagree.
+
+**[now]** **Surface names.** The spelling a program writes for a global is data
+rather than syntax, so two codebases can disagree about what their Z looks like.
+Three forms reach the same table: a dotted name followed by `(`, as in
+`Console.WriteLog(x)`; a bare identifier being called, as in `say(x)`; and a name
+being resolved as a type or a method, as in `new TextBuffer()` or `b.push(x)`.
+Matching ignores case and is ASCII-only. Z's own identifiers stay
+case-sensitive — a project renames globals, it does not make two names equal.
+
+A surface name is a **fallback and never a claim**: every lookup tries the written
+name first, so a project that declares the spelling keeps its own declaration and
+a local variable named after a surface name is untouched. A renamed method is
+called and emitted under the internal name, which is what keeps `b.push(x)` from
+type-checking and then failing to link.
+
+The table is the shipped defaults plus a project manifest: `z.surface`, found by
+walking up from the source file, nearest first, one `written = internal` mapping
+per line, `#` for comments. One manifest governs the whole compilation, because
+`import` splices rather than isolates. `--no-surface` ignores it and
+`--surface=<path>` names one. A line with no `=`, or with an empty side, is an
+error naming the file and line: a manifest half-read is a dialect half in effect.
+
+**[new]** Keywords are not renameable. `var`, `foreach` and `match` are lexed
+rather than resolved by name, so they are outside the table, and a keyword is not
+a fallback: renaming one means making the original genuinely absent rather than
+shadowed.
+
+**[now]** `input(prompt)`, `read_string()` and `read_line(fd)` return one line
+without its terminator. A carriage return ends a line as much as a line feed
+does, and a CRLF pair counts once; end of file returns `""` rather than failing;
+`input` writes the prompt with no newline after it and flushes it before reading.
+Reads go through the same one-byte `read` as `read_byte`, never stdio, because
+stdio would buffer the rest of the descriptor where the program cannot see it.
 
 **[now]** `hold(seconds)` is a builtin, and the reason it reads well is the
 duration literal rather than the function: `hold(2h21m37)` says what it means,
@@ -884,7 +917,7 @@ thread(() => {
 });
 var total = 0;
 while (let v = recv(ch)) { total = total + v; }
-print(total);                       // 499500
+Console.WriteLog(total);                       // 499500
 ```
 
 - **A value belongs to one thread; sending moves it.** A second send of a value
@@ -981,8 +1014,8 @@ struct Square { int side; int Area() { return side * side; } string Name() => "s
 struct Rect   { int w; int h; int Area() { return w * h; } string Name() { return "rect"; } }
 
 Shape a = new Square(5);
-print(a.Area());        // 25
-print(a.Name());        // square
+Console.WriteLog(a.Area());        // 25
+Console.WriteLog(a.Name());        // square
 ```
 
 An interface value is a **pointer** to a two-word cell, `{ itab, receiver }`, so
@@ -1061,8 +1094,8 @@ write, where they were when they wrote it, and what the constraint actually was.
   lambda started on.
 - **The constraint, not only the violation.** An argument type error and an
   arity error both print the declaration they violated.
-- **Cascades are suppressed.** `print(ghost)` reports the undefined name, not
-  also that `print expects 'int' but got <null>`.
+- **Cascades are suppressed.** `Console.WriteLog(ghost)` reports the undefined name, not
+  also that `'Console.WriteLog' expects 'int' but got '<null>'`.
 - **Colour** on a terminal, off when redirected or piped, forced with
   `--color`, and off under `NO_COLOR`.
 - **`--error-format=human|gcc|json`.** `gcc` is one line per problem and per
@@ -1174,7 +1207,14 @@ Loop-invariant code motion shipped exactly that way once.
 The compiler in this repository implements v1. Specifically, all of the following
 is real and tested today, and stays:
 
-- top-level statements, `var`, `print`, `int`/`bool`/`string`/`float`
+- top-level statements, `var`, `Console.WriteLog`, `int`/`bool`/`string`/`float`
+- **surface names**: what a program writes for a global is data, not syntax. A
+  `z.surface` manifest gives a codebase its own dialect over the builtins, the
+  standard library and its own globals, matched without regard to case, and always
+  as a fallback so a declared spelling wins. `Console.WriteLog` is one; there is
+  no bare `print`, so a program may define its own
+- reading a line: `input(prompt)`, `read_string()`, `read_line(fd)`, over raw
+  descriptors rather than stdio
 - the whole type system: pointers, structs with methods, enums, `Result<T,E>`
 - closures, nested functions, function pointers, bound method pointers
 - interfaces, classes with vtables, **`override` and inheritance** — the last of
@@ -1184,8 +1224,8 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 172 tests in all — 91 golden, 73 diagnostic, and 8 runtime, interop, warning
-  and module tests — with `make test-all` green across four `-O` levels
+- 197 tests in all — 86 golden, 76 diagnostic, and 35 runtime, interop, module,
+  warning and driver tests — with `make test-all` green across four `-O` levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into
 calls at the end of a scope. What works, and is tested:
@@ -1201,6 +1241,12 @@ calls at the end of a scope. What works, and is tested:
   real use of it
 - a function whose body owns something is declined by the inliner, so its drops
   cannot be spliced into a caller's frame
+- teardown on `return` runs *after* the returned value has been computed and
+  copied, never before it. A returned local is one of the values that teardown
+  destroys and the copy is what reads it, so the other order frees the bytes the
+  copy was about to read and hands the caller a copy of freed memory. The value
+  is spilled across the destructors to keep that ordering, and pinned so the
+  destructors are not handed its slot
 
 What does not work yet, and so does **not** satisfy the rest of section 2:
 

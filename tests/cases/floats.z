@@ -32,120 +32,120 @@ int main() {
     // ---- literals --------------------------------------------------------
     // A '.' starts a fraction only before a digit, which is what leaves
     // `21.Twice()` a member access rather than the integer 21 followed by junk.
-    print(1.5);
-    print(0.5);
-    print(100.0);
-    print(1e3);
-    print(1.5e2);
-    print(2E-2);
-    print(21.Twice());
-    print(0.1 + 0.2);              // 0.3, at six significant digits
+    Console.WriteLog(1.5);
+    Console.WriteLog(0.5);
+    Console.WriteLog(100.0);
+    Console.WriteLog(1e3);
+    Console.WriteLog(1.5e2);
+    Console.WriteLog(2E-2);
+    Console.WriteLog(21.Twice());
+    Console.WriteLog(0.1 + 0.2);              // 0.3, at six significant digits
 
     // ---- arithmetic ------------------------------------------------------
     var x = 1.5;
-    print(x + 0.25);
-    print(x - 0.5);
-    print(x * 2.0);
-    print(x / 0.5);
-    print(-x);
+    Console.WriteLog(x + 0.25);
+    Console.WriteLog(x - 0.5);
+    Console.WriteLog(x * 2.0);
+    Console.WriteLog(x / 0.5);
+    Console.WriteLog(-x);
     var y = 2;                      // an int widens, and the whole expression
-    print(x + y);                   // becomes a float
+    Console.WriteLog(x + y);                   // becomes a float
     var acc = 1.0;
     acc += 0.5;
     acc -= 0.25;
     acc *= 4.0;
     acc /= 2.0;
-    print(acc);
+    Console.WriteLog(acc);
 
     // ---- comparison ------------------------------------------------------
-    print(x > 1.0);
-    print(x < 1.0);
-    print(x >= 1.5);
-    print(x <= 1.5);
-    print(x == 1.5);
-    print(x != 1.5);
-    print(x > 1.0 && x < 2.0);
-    print(x > 2.0 || x < 2.0);
-    if (x > 1.0) { print("positive"); }
+    Console.WriteLog(x > 1.0);
+    Console.WriteLog(x < 1.0);
+    Console.WriteLog(x >= 1.5);
+    Console.WriteLog(x <= 1.5);
+    Console.WriteLog(x == 1.5);
+    Console.WriteLog(x != 1.5);
+    Console.WriteLog(x > 1.0 && x < 2.0);
+    Console.WriteLog(x > 2.0 || x < 2.0);
+    if (x > 1.0) { Console.WriteLog("positive"); }
 
     // ---- conversion ------------------------------------------------------
     // float -> int truncates toward zero, never rounds.
-    print((int)3.9);
-    print((int)-3.9);
-    print((int)0.5);
-    print((float)3);
+    Console.WriteLog((int)3.9);
+    Console.WriteLog((int)-3.9);
+    Console.WriteLog((int)0.5);
+    Console.WriteLog((float)3);
     // Every int is exactly representable as a float, so this widening is exact.
-    print((float)9007199254740993 == 9007199254740992.0);
+    Console.WriteLog((float)9007199254740993 == 9007199254740992.0);
     // ...and assigning a float to an int is refused rather than truncated.
     // (see tests/errors/float_to_int.z)
 
     // ---- infinities and NaN ----------------------------------------------
     // IEEE-754, not a trap: division by zero is an infinity.
-    print(recip(0.0));
-    print(-recip(0.0));
+    Console.WriteLog(recip(0.0));
+    Console.WriteLog(-recip(0.0));
     var nan = 0.0 / 0.0;
     // NaN compares false against everything, including itself, in every
     // direction. This is the case a hand-written comparison gets wrong.
-    print(nan == nan);
-    print(nan != nan);
-    print(nan < 1.0);
-    print(nan > 1.0);
-    print(nan <= 1.0);
-    print(nan >= 1.0);
+    Console.WriteLog(nan == nan);
+    Console.WriteLog(nan != nan);
+    Console.WriteLog(nan < 1.0);
+    Console.WriteLog(nan > 1.0);
+    Console.WriteLog(nan <= 1.0);
+    Console.WriteLog(nan >= 1.0);
 
     // ---- calls -----------------------------------------------------------
-    print(half(10.0));
-    print(add3(1.0, 2.0, 3.0));
+    Console.WriteLog(half(10.0));
+    Console.WriteLog(add3(1.0, 2.0, 3.0));
     // The integer and vector argument registers are numbered independently, so
     // a float argument does not shift the integers that follow it.
-    print(mixed(1, 2.5));
-    print(mixed(7, 0.5));
+    Console.WriteLog(mixed(1, 2.5));
+    Console.WriteLog(mixed(7, 0.5));
 
     // ---- structs, classes, arrays ----------------------------------------
     var a = new Vec(3.0, 4.0);
     var b = new Vec(1.0, 2.0);
-    print(a.Len2());
-    print(a.Dot(b));
+    Console.WriteLog(a.Len2());
+    Console.WriteLog(a.Dot(b));
     var c = a.Add(b);
-    print(c.x);
-    print(c.y);
+    Console.WriteLog(c.x);
+    Console.WriteLog(c.y);
     var box = new Box(2.5);
-    print(box.Get());
+    Console.WriteLog(box.Get());
     box.v = 4.5;
-    print(box.v);
+    Console.WriteLog(box.v);
     // A constructor and a virtual method both take a float while a receiver
     // occupies rdi, so the declared arguments arrive in the integer sequence
     // rather than xmm0. Staging these with gen_expr saved rax instead of the
     // value, which printed the receiver's address as a denormal double.
     var gauge = new Gauge(3.0);
-    print(gauge.Read());
-    print(gauge.Scale(4.0));
+    Console.WriteLog(gauge.Read());
+    Console.WriteLog(gauge.Scale(4.0));
     var g2 = new Gauge(5.0);
-    print(g2.Scale(2.0));
+    Console.WriteLog(g2.Scale(2.0));
     var fs = new float[3];
     fs[0] = 1.5;
     fs[1] = 2.5;
     fs[2] = 3.0;
-    print(fs.length);
-    print(fs[0] + fs[1] + fs[2]);
+    Console.WriteLog(fs.length);
+    Console.WriteLog(fs[0] + fs[1] + fs[2]);
     var sum = 0.0;
     foreach (var v in fs) {
         sum = sum + v;
     }
-    print(sum);
+    Console.WriteLog(sum);
 
     // ---- control flow ----------------------------------------------------
     var t = true ? 1.5 : 2.5;
-    print(t);
+    Console.WriteLog(t);
     var u = false ? 1.5 : 2.5;
-    print(u);
-    print(a.Len2() > a.Dot(b));
+    Console.WriteLog(u);
+    Console.WriteLog(a.Len2() > a.Dot(b));
 
     // Concatenation converts a float to text the same way it converts an int,
     // and the two spell a number identically.
-    print("v = " + 1.5);
-    print(1.5 + " is a float");
-    print("sum " + (1.5 + 2.5));
+    Console.WriteLog("v = " + 1.5);
+    Console.WriteLog(1.5 + " is a float");
+    Console.WriteLog("sum " + (1.5 + 2.5));
 
     // A float accumulator in a hot loop, divided by a value that changes every
     // iteration. None of the integer strength reduction applies, and the answer
@@ -154,6 +154,6 @@ int main() {
     for (var i = 1; i <= 100; i++) {
         h = h + 1.0 / (float)i;
     }
-    print(h);
+    Console.WriteLog(h);
     return 0;
 }

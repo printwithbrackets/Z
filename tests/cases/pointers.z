@@ -1,8 +1,8 @@
 var x = 42;
 var p = &x;
-print(*p);
+Console.WriteLog(*p);
 *p = 99;
-print(x);
+Console.WriteLog(x);
 int get(int* q) {
     return *q;
 }
@@ -11,6 +11,6 @@ int set(int* q, int v) {
     return 0;
 }
 var y = 7;
-print(get(&y));
+Console.WriteLog(get(&y));
 set(&y, 123);
-print(y);
+Console.WriteLog(y);

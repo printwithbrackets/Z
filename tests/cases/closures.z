@@ -15,12 +15,12 @@ closure(int) -> int makeAdder(int n) {
 int main() {
     // ---- capturing nothing ----
     var add = (int a, int b) => a + b;
-    print(add(2, 3));
+    Console.WriteLog(add(2, 3));
     var zero = () => 42;
-    print(zero());
+    Console.WriteLog(zero());
     // The member access must still win over a fraction: the '.' is followed by a
     // letter, not a digit.
-    print(21.Twice());
+    Console.WriteLog(21.Twice());
 
     // ---- capturing a local, and sharing it ----
     // Both the closure and the function that made it must see the same counter.
@@ -30,17 +30,17 @@ int main() {
         count = count + 1;
         return count;
     };
-    print(bump());
-    print(bump());
-    print(count);
+    Console.WriteLog(bump());
+    Console.WriteLog(bump());
+    Console.WriteLog(count);
 
     // ---- outliving the frame ----
     // The captured value has to be on the heap: by the time this runs, the frame
     // of makeAdder is gone.
     var escape = makeAdder(10);
-    print(escape(5));
-    print(escape(1));
-    print(applyTwice(escape, 1));
+    Console.WriteLog(escape(5));
+    Console.WriteLog(escape(1));
+    Console.WriteLog(applyTwice(escape, 1));
 
     // ---- each lambda captures its own copy ----
     // Three lambdas built in one function, each over a different local. If the
@@ -51,19 +51,19 @@ int main() {
     var f0 = (int x) => x * 10 + k0;
     var f1 = (int x) => x * 10 + k1;
     var f2 = (int x) => x * 10 + k2;
-    print(f0(1));
-    print(f1(1));
-    print(f2(1));
+    Console.WriteLog(f0(1));
+    Console.WriteLog(f1(1));
+    Console.WriteLog(f2(1));
 
     // ---- a lambda over a float, and one over a struct field ----
     var scale = (float f) => f * 2.0;
-    print(scale(1.5));
+    Console.WriteLog(scale(1.5));
     var pt = new Point(3, 4);
     var getX = () => pt.x;
-    print(getX());
+    Console.WriteLog(getX());
 
     // ---- a lambda passed straight to a call ----
-    print(applyTwice((int v) => v + 1, 5));
+    Console.WriteLog(applyTwice((int v) => v + 1, 5));
 
     // ---- more than eight lambdas in one function ----
     // add_pending grows its array by allocating a new one, and a grow that
@@ -78,8 +78,8 @@ int main() {
     var l7 = (int x) => x + 7;
     var l8 = (int x) => x + 8;
     var l9 = (int x) => x + 9;
-    print(l9(0));
-    print(l1(0) + l2(0) + l3(0) + l4(0) + l5(0) + l6(0) + l7(0) + l8(0) + l9(0));
+    Console.WriteLog(l9(0));
+    Console.WriteLog(l1(0) + l2(0) + l3(0) + l4(0) + l5(0) + l6(0) + l7(0) + l8(0) + l9(0));
 
     // ---- a captured constant ----
     // Constant propagation drops the store for a plain local because every read
@@ -88,7 +88,7 @@ int main() {
     // built even though the value was folded. This read 0 or garbage before.
     var konst = 41;
     var readConst = () => konst + 1;
-    print(readConst());
+    Console.WriteLog(readConst());
 
     // ---- more than eight returns in one lambda body ----
     var many = (int x) => {
@@ -101,7 +101,7 @@ int main() {
         if (x < 14) { return 700; }
         return 800;
     };
-    print(many(0));
-    print(many(13));
+    Console.WriteLog(many(0));
+    Console.WriteLog(many(13));
     return 0;
 }

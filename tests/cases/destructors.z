@@ -9,8 +9,8 @@ class Tracked {
     int id;
     Tracked(int v) { this.id = v; }
     ~Tracked() {
-        print("drop");
-        print(this.id);
+        Console.WriteLog("drop");
+        Console.WriteLog(this.id);
     }
 }
 
@@ -23,16 +23,16 @@ int main() {
         var a = new Tracked(1);
         var b = new Tracked(2);
         var c = new Tracked(3);
-        print("in scope");
+        Console.WriteLog("in scope");
     }
-    print("left scope");
+    Console.WriteLog("left scope");
 
     // A type with no destructor costs nothing to declare and nothing to run.
     {
         var x = 5;
-        print(x);
+        Console.WriteLog(x);
         var y = "hello";
-        print(y);
+        Console.WriteLog(y);
     }
 
     // Nested scopes drop innermost first.
@@ -40,40 +40,40 @@ int main() {
         var outer = new Tracked(4);
         {
             var inner = new Tracked(5);
-            print("inner scope");
+            Console.WriteLog("inner scope");
         }
-        print("outer still live");
+        Console.WriteLog("outer still live");
     }
-    print("nested done");
+    Console.WriteLog("nested done");
 
     // A function that returns still destroys what it owns. This is the case a
     // `free` the programmer has to remember gets wrong: there are five exits
     // from a function and the one you forget is the one that leaks.
-    print("calling makeOne");
+    Console.WriteLog("calling makeOne");
     var made = makeOne();
-    print("made");
-    print(made.id);
+    Console.WriteLog("made");
+    Console.WriteLog(made.id);
 
     // A `return` from inside a nested scope destroys both scopes' values, inner
     // first.
     var got = early(9);
-    print(got);
+    Console.WriteLog(got);
 
     // A loop that runs to completion drops each iteration's value as it ends,
     // rather than all of them at the end of the function.
     for (var i = 1; i <= 2; i = i + 1) {
         var scoped = new Tracked(100 + i);
     }
-    print("loop done");
+    Console.WriteLog("loop done");
 
     // `break` leaves the loop, so the values the iteration owns go with it.
     for (var j = 1; j <= 5; j = j + 1) {
         var earlyExit = new Tracked(200 + j);
         if (j == 2) { break; }
     }
-    print("break done");
+    Console.WriteLog("break done");
 
-    print("end of main");
+    Console.WriteLog("end of main");
     jumpUser();
     tryUser();
     return 0;
@@ -111,17 +111,17 @@ int jumps(int which) {
             if (which == 0) { break; }
             continue;
         }
-        print("kept " + int_to_string(owned.id));
+        Console.WriteLog("kept " + int_to_string(owned.id));
     }
     return 0;
 }
 
 int jumpUser() {
-    print("before");
+    Console.WriteLog("before");
     jumps(0);
-    print("after break");
+    Console.WriteLog("after break");
     jumps(1);
-    print("after continue");
+    Console.WriteLog("after continue");
     return 0;
 }
 
@@ -158,7 +158,7 @@ string describeTry(Result<int, string> r) {
 Result<int, string> tryOwner() {
     var owned = new Tracked(401);
     var v = tryFail(true)?;
-    print("unreachable " + int_to_string(v));
+    Console.WriteLog("unreachable " + int_to_string(v));
     return Ok(v);
 }
 
@@ -167,7 +167,7 @@ Result<int, string> tryOwnerNested() {
     if (true) {
         var inner = new Tracked(403);
         var v = tryFail(true)?;
-        print("unreachable " + int_to_string(v));
+        Console.WriteLog("unreachable " + int_to_string(v));
     }
     return Ok(0);
 }
@@ -175,13 +175,13 @@ Result<int, string> tryOwnerNested() {
 Result<int, string> tryLaterLocal() {
     var v = tryFail(true)?;
     var late = new Tracked(404);
-    print("unreachable " + int_to_string(v));
+    Console.WriteLog("unreachable " + int_to_string(v));
     return Ok(v);
 }
 
 int tryUser() {
-    print("try " + describeTry(tryOwner()));
-    print("try " + describeTry(tryOwnerNested()));
-    print("try " + describeTry(tryLaterLocal()));
+    Console.WriteLog("try " + describeTry(tryOwner()));
+    Console.WriteLog("try " + describeTry(tryOwnerNested()));
+    Console.WriteLog("try " + describeTry(tryLaterLocal()));
     return 0;
 }

@@ -2,7 +2,7 @@ int main() {
     var a = new int[2];
     var p = &a;
     for (auto x : p) {
-        print(x);
+        Console.WriteLog(x);
     }
     return 0;
 }

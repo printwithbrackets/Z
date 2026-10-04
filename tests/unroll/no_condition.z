@@ -13,7 +13,7 @@ int main() {
             break;
         }
     }
-    print(a);
-    print(b);
+    Console.WriteLog(a);
+    Console.WriteLog(b);
     return 0;
 }

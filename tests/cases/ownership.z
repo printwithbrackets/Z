@@ -16,11 +16,11 @@ int main() {
         var scratch = "garbage" + i;
         /* Read, so the allocation is not dead code -- and never true, so the
          * scratch string is built and dropped exactly as intended. */
-        if (scratch.length == 99999999) { print("never"); }
+        if (scratch.length == 99999999) { Console.WriteLog("never"); }
         i = i + 1;
     }
-    print(keep);
-    print(arr[0] + arr[1] + arr[2]);
+    Console.WriteLog(keep);
+    Console.WriteLog(arr[0] + arr[1] + arr[2]);
 
     /* A string's { len, cap } header is written *inside* its allocation.
      *
@@ -36,18 +36,18 @@ int main() {
      * comes back as whatever the allocator left there. The symptom was a `join`
      * of the result computing a length in the terabytes. */
     var parts = split("one,two,,three", ",");
-    print(parts.length);
-    print(parts[0].length);
-    print(parts[1].length);
-    print(parts[2].length);   // 0: the empty piece is a real string, not null
-    print(parts[3].length);
-    print(join(",", parts));
+    Console.WriteLog(parts.length);
+    Console.WriteLog(parts[0].length);
+    Console.WriteLog(parts[1].length);
+    Console.WriteLog(parts[2].length);   // 0: the empty piece is a real string, not null
+    Console.WriteLog(parts[3].length);
+    Console.WriteLog(join(",", parts));
 
     // Every piece of a one-character split is a one-byte allocation, so this is
     // the tightest packing of headers the allocator ever sees.
     var bytes = split("abcd", "");
-    print(bytes.length);
-    print(bytes[0].length + bytes[1].length + bytes[2].length + bytes[3].length);
+    Console.WriteLog(bytes.length);
+    Console.WriteLog(bytes[0].length + bytes[1].length + bytes[2].length + bytes[3].length);
 
     // A string built one piece at a time, each piece its own allocation, and
     // then read back after every one of them has been made.
@@ -57,8 +57,8 @@ int main() {
         grown = grown + "ab";
         j = j + 1;
     }
-    print(grown.length);   // 1000
-    print(grown[0]);
-    print(grown[999]);
+    Console.WriteLog(grown.length);   // 1000
+    Console.WriteLog(grown[0]);
+    Console.WriteLog(grown[999]);
     return 0;
 }

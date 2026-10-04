@@ -1,6 +1,6 @@
 int double(int n) { return n * 2; }
 int triple(int n) { return n * 3; }
 
-print(double(triple(2)) + double(1));
-print(double(double(double(5))));
-print(triple(1 + double(1)));
+Console.WriteLog(double(triple(2)) + double(1));
+Console.WriteLog(double(double(double(5))));
+Console.WriteLog(triple(1 + double(1)));

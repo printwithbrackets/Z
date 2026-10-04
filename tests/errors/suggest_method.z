@@ -9,5 +9,5 @@ class Bag {
 void go() {
     var b = new Bag();
     b.puch(1);
-    print(b.size());
+    Console.WriteLog(b.size());
 }

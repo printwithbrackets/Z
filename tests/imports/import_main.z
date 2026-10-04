@@ -5,19 +5,19 @@ import "lib/shapes.z";
 import "lib/math.z";
 
 int main() {
-    print(triple(4));                            // 12
-    print(square(5));                            // 25
-    print(SCALE);                                // 3
+    Console.WriteLog(triple(4));                            // 12
+    Console.WriteLog(square(5));                            // 25
+    Console.WriteLog(SCALE);                                // 3
 
     var v = add(new Vec(1, 2), new Vec(10, 20));
-    print(v.x);                                  // 11
-    print(v.y);                                  // 22
+    Console.WriteLog(v.x);                                  // 11
+    Console.WriteLog(v.y);                                  // 22
 
     var r = new Rect(3, 4);
-    print(area(r));                              // 12
-    print(scaled_area(r));                       // 36
+    Console.WriteLog(area(r));                              // 12
+    Console.WriteLog(scaled_area(r));                       // 36
 
     /* a struct, a const and a function all cross the boundary */
-    print(square(SCALE) + triple(2));            // 9 + 6 = 15
+    Console.WriteLog(square(SCALE) + triple(2));            // 9 + 6 = 15
     return 0;
 }

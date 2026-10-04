@@ -3,7 +3,7 @@
 // one of the things a C string never had.
 int main() {
     var s = "hello";
-    print(s.length);
-    print(s[s.length]);
+    Console.WriteLog(s.length);
+    Console.WriteLog(s[s.length]);
     return 0;
 }

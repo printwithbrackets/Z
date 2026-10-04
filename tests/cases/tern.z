@@ -2,10 +2,10 @@ int max2(int a, int b) => a > b ? a : b;
 int sign(int n) => n < 0 ? -1 : n > 0 ? 1 : 0;
 string pick(bool f, string a, string b) => f ? a : b;
 int main() {
-    print(max2(3, 9));
-    print(sign(-5));
-    print(sign(0));
-    print(pick(true, "yes", "no"));
-    print(5 > 3 ? 100 : 200);
+    Console.WriteLog(max2(3, 9));
+    Console.WriteLog(sign(-5));
+    Console.WriteLog(sign(0));
+    Console.WriteLog(pick(true, "yes", "no"));
+    Console.WriteLog(5 > 3 ? 100 : 200);
     return 0;
 }

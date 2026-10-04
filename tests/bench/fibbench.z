@@ -9,6 +9,6 @@ int fib(int n) {
     return fib(n - 1) + fib(n - 2);
 }
 int main() {
-    print(fib(35));
+    Console.WriteLog(fib(35));
     return 0;
 }

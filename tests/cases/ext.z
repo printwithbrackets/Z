@@ -3,9 +3,9 @@ int Add(this int a, int b) { return a + b; }
 string Shout(this string s) { return s + "!"; }
 
 int main() {
-    print(5.Twice());
-    print(7.Add(3));
-    print("hi".Shout());
-    print(10.Twice() + 1.Twice());
+    Console.WriteLog(5.Twice());
+    Console.WriteLog(7.Add(3));
+    Console.WriteLog("hi".Shout());
+    Console.WriteLog(10.Twice() + 1.Twice());
     return 0;
 }

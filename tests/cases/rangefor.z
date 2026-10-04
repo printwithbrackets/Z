@@ -17,20 +17,20 @@ int main() {
     for (auto x : v) {
         sum = sum + x;
     }
-    print(sum);                     // 10
+    Console.WriteLog(sum);                     // 10
 
     // Writing through `&`. This is the case a copy cannot do.
     for (auto& x : v) {
         *x = *x * 10;
     }
-    print(v.toString());            // 0, 10, 20, 30, 40
+    Console.WriteLog(v.toString());            // 0, 10, 20, 30, 40
 
     // Reading after the in-place write, so the write is proven to have stuck.
     sum = 0;
     for (auto x : v) {
         sum = sum + x;
     }
-    print(sum);                     // 100
+    Console.WriteLog(sum);                     // 100
 
     // Reading through `&` reads the same values, so `&` is not a different
     // iteration order or a different bound.
@@ -38,7 +38,7 @@ int main() {
     for (auto& x : v) {
         sum = sum + *x;
     }
-    print(sum);                     // 100
+    Console.WriteLog(sum);                     // 100
 
     // A string iterates as its bytes, the same way a fixed array does.
     var s = "abc";
@@ -46,9 +46,9 @@ int main() {
     for (auto b : s) {
         n = n + b;
     }
-    print(n);                       // 97 + 98 + 99
+    Console.WriteLog(n);                       // 97 + 98 + 99
     for (auto& b : s) {
-        print(*b);
+        Console.WriteLog(*b);
     }
 
     // A fixed array, which is the other thing that knows its own length.
@@ -60,11 +60,11 @@ int main() {
     for (auto x : a) {
         sum = sum + x;
     }
-    print(sum);                     // 24
+    Console.WriteLog(sum);                     // 24
     for (auto& x : a) {
         *x = *x + 1;
     }
-    print(a[0]);                    // 8
+    Console.WriteLog(a[0]);                    // 8
 
     // `continue` still runs the step, as it does in an index loop.
     var count = 0;
@@ -72,7 +72,7 @@ int main() {
         if (x < 20) { continue; }
         count = count + 1;
     }
-    print(count);                   // 3 -- 20, 30 and 40
+    Console.WriteLog(count);                   // 3 -- 20, 30 and 40
 
     // `break` leaves the loop, as it does anywhere else.
     count = 0;
@@ -80,7 +80,7 @@ int main() {
         if (x == 20) { break; }
         count = count + 1;
     }
-    print(count);                   // 2
+    Console.WriteLog(count);                   // 2
 
     // A Set, which is a class like a Vec. It has no `at`, because a set is
     // unordered and one element address is not a thing; it hands out its
@@ -92,6 +92,6 @@ int main() {
     for (auto x : st.values()) {
         sum = sum + x;
     }
-    print(sum);                     // 9
+    Console.WriteLog(sum);                     // 9
     return 0;
 }

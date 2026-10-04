@@ -6,6 +6,8 @@
 #include "lexer.h"
 #include "parser.h"
 
+#include "surface.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,7 +107,7 @@ static int run_argv(char *const argv[]) {
 static void usage(void) {
     fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]\n"
                     "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
-                    "       [--no-std] [linker args...]\n"
+                    "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
                     "  -O0 naive codegen (no register allocation, no folding)\n"
                     "  -O1 default: folding, register allocation, strength reduction\n"
                     "  -O2 adds loop-invariant code motion\n"
@@ -117,7 +119,9 @@ static void usage(void) {
                     "            unreachable, unused-import)\n"
                     "  --error-format=human|gcc|json  how to render diagnostics\n"
                     "  --color=auto|always|never       colour, auto = only on a terminal\n"
-                    "  --no-std   compile without the embedded standard library\n");
+                    "  --no-std   compile without the embedded standard library\n"
+                    "  --no-surface  ignore a project manifest; use the shipped names only\n"
+                    "  --surface=<path>  take the dialect from this file instead of searching\n");
 }
 
 /* ---- imports ----
@@ -346,8 +350,8 @@ static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout, Stri
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
  * links an executable. Returns the process exit status. */
 static int compile(const char *src, const char *exe, const char *asm_path, int bounds_checks,
-                   int opt_level, int debug_info, int use_stdlib, char *const *link_args,
-                   int n_link_args) {
+                   int opt_level, int debug_info, int use_stdlib, int no_surface,
+                   const char *surface_path, char *const *link_args, int n_link_args) {
     long len = 0;
     char *text = read_file(src, &len);
     if (text == NULL)
@@ -405,7 +409,24 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
     }
     ntoks++;
 
-    Stmt *program = parse_program(&arena, toks, ntoks, &strings, opt_level);
+    /* The dialect this program is written in. Loaded from the manifest that
+     * governs `src`, unless the caller turned that off or named one. The surface
+     * is on the arena because the parser keeps a pointer to it and shallow copies
+     * of the parser share that pointer. */
+    Surface *surf = surface_new(&arena);
+    if (surf == NULL)
+        return 1;
+    if (no_surface) {
+        /* Asked to ignore the manifest. The shipped names still apply, because
+         * they are the language rather than a project's choice. */
+    } else if (surface_path != NULL) {
+        if (surface_load(surf, surface_path) != 0)
+            return 1;
+    } else if (surface_discover(surf, src) < 0) {
+        return 1;
+    }
+
+    Stmt *program = parse_program(&arena, toks, ntoks, &strings, opt_level, surf);
     /* A summary line, because "there were 3 of those somewhere above" is the
      * one thing a reader cannot work out by scrolling. Skipped in the
      * machine-readable formats, where a line that is not a diagnostic would be
@@ -510,6 +531,11 @@ int main(int argc, char **argv) {
      * which is what a program that wants to define its own `StringBuilder` (or
      * measure the compiler without the library in the way) needs. */
     int use_stdlib = 1;
+    /* --no-surface ignores a project manifest; --surface=<path> names one
+     * explicitly. Both exist because a manifest is found by walking up from the
+     * source, which is convenient until a build runs somewhere it should not. */
+    int no_surface = 0;
+    const char *surface_path = NULL;
     /* -O0..-O3, spelled like gcc's. The default matches what the compiler has
      * always done, so an invocation without a flag behaves exactly as before. */
     int opt_level = Z_OPT_DEFAULT;
@@ -527,6 +553,10 @@ int main(int argc, char **argv) {
             bounds_checks = 1;
         } else if (strcmp(argv[i], "--no-std") == 0) {
             use_stdlib = 0;
+        } else if (strcmp(argv[i], "--no-surface") == 0) {
+            no_surface = 1;
+        } else if (strncmp(argv[i], "--surface=", 10) == 0) {
+            surface_path = argv[i] + 10;
         } else if (strcmp(argv[i], "-g") == 0) {
             /* Consumed here rather than passed to the link: the debug sections
              * are produced by codegen emitting .loc and .debug_* directives, and
@@ -579,7 +609,7 @@ int main(int argc, char **argv) {
             out = default_out;
         }
         int rc = compile(src, out, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
-                         link_args, n_link_args) == 0
+                         no_surface, surface_path, link_args, n_link_args) == 0
                      ? 0
                      : 1;
         free(default_out);
@@ -589,8 +619,8 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, link_args,
-                    n_link_args) != 0)
+        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
+                    no_surface, surface_path, link_args, n_link_args) != 0)
             return 1;
         char *run_it[] = {exe, NULL};
         int rc = run_argv(run_it);
@@ -601,6 +631,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
         return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info, use_stdlib,
+                       no_surface, surface_path,
                        link_args, n_link_args) == 0
                    ? 0
                    : 1;

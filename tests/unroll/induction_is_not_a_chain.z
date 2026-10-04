@@ -14,6 +14,6 @@ int main() {
         s = (s * 31 + i) % 1000000007;
         i = i * 3 + 1;
     }
-    print(s);
+    Console.WriteLog(s);
     return 0;
 }

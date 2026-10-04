@@ -12,21 +12,21 @@ int countTo<T>(T start, int n) { var c = 0; var i = 0; while (i < n) { c = c + 1
 T twice<T>(T a) { return a + a; }
 
 int main() {
-    print(max(3, 7));         // 7
-    print(max(10, 4));        // 10
-    print(pick(3, 9));        // 9
-    print(first(42, 7));      // 42
-    print(same(5, 5));        // true
-    print(same(5, 6));        // false
-    print(same(true, false)); // false
-    print(twice(21));         // 42
+    Console.WriteLog(max(3, 7));         // 7
+    Console.WriteLog(max(10, 4));        // 10
+    Console.WriteLog(pick(3, 9));        // 9
+    Console.WriteLog(first(42, 7));      // 42
+    Console.WriteLog(same(5, 5));        // true
+    Console.WriteLog(same(5, 6));        // false
+    Console.WriteLog(same(true, false)); // false
+    Console.WriteLog(twice(21));         // 42
 
     var arr = new int[4];
     arr[0]=1; arr[1]=2; arr[2]=3; arr[3]=4;
-    print(total(arr));        // 10
+    Console.WriteLog(total(arr));        // 10
 
     // generic that ignores its type param for the body, called with two types
-    print(countTo(0, 5));     // 5
-    print(countTo(100, 3));   // 3
+    Console.WriteLog(countTo(0, 5));     // 5
+    Console.WriteLog(countTo(100, 3));   // 3
     return 0;
 }

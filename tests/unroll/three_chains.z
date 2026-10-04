@@ -12,8 +12,8 @@ int main() {
         c = c * 5 - 1;
         i = i + 1;
     }
-    print(a);
-    print(b);
-    print(c);
+    Console.WriteLog(a);
+    Console.WriteLog(b);
+    Console.WriteLog(c);
     return 0;
 }

@@ -1,21 +1,21 @@
 var x = 1;
 {
     var x = 2;
-    print(x);
+    Console.WriteLog(x);
     {
         var x = 3;
-        print(x);
+        Console.WriteLog(x);
     }
-    print(x);
+    Console.WriteLog(x);
 }
-print(x);
+Console.WriteLog(x);
 
 int scopeTest(int n) {
     var local = n;
     {
         var local = n * 2;
-        print(local);
+        Console.WriteLog(local);
     }
     return local;
 }
-print(scopeTest(5));
+Console.WriteLog(scopeTest(5));

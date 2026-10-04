@@ -89,7 +89,7 @@ int main() {
 
     var ok = 1;
     for (var i = 0; i < n; i = i + 1) { if (r[i] == 0) { ok = 0; } }
-    print(n);
-    print(ok);
+    Console.WriteLog(n);
+    Console.WriteLog(ok);
     return 0;
 }

@@ -7,6 +7,6 @@
 int main() {
     var sum = 1; var i = 0;
     while (i < 30000000) { sum = (sum * 31 + i) % 3000000007; i = i + 1; }
-    print(sum);
+    Console.WriteLog(sum);
     return 0;
 }

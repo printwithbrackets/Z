@@ -11,10 +11,10 @@ int main() {
     var a = new Vec(1, 2);
     var b = new Vec(3, 4);
     var c = a + b;
-    print(c.Show());
+    Console.WriteLog(c.Show());
     var d = a * 10;
-    print(d.Show());
-    print(a == b);
-    print((a + b) == new Vec(4, 6));
+    Console.WriteLog(d.Show());
+    Console.WriteLog(a == b);
+    Console.WriteLog((a + b) == new Vec(4, 6));
     return 0;
 }

@@ -20,9 +20,9 @@ int main() {
     var a = Circle(5);
     var b = Rect(3, 4);
     var c = Point();
-    print(describe(a));
-    print(describe(b));
-    print(describe(c));
-    print("areas: " + (area(a) + area(b) + area(c)));
+    Console.WriteLog(describe(a));
+    Console.WriteLog(describe(b));
+    Console.WriteLog(describe(c));
+    Console.WriteLog("areas: " + (area(a) + area(b) + area(c)));
     return 0;
 }

@@ -206,7 +206,7 @@ typedef struct {
     int loop_marker; /* incremented once per loop walked; see LocalInfo.loop_marker */
     /* Frame slots holding fresh string values that nothing has taken over yet.
      * A temporary lives until the end of the statement that made it, which is
-     * the smallest scope that is always reached: `print(a + b)` allocates a
+     * the smallest scope that is always reached: `Console.WriteLog(a + b)` allocates a
      * string that no variable ever names, and without this it is live until the
      * program exits.
      *
@@ -2152,7 +2152,7 @@ static void gen_stmt_body(CG *cg, Stmt *s);
  * exists.
  *
  * It is spilled into a frame slot first because the release happens at the end of
- * the statement while the value was produced somewhere inside it: `print(a + b)`
+ * the statement while the value was produced somewhere inside it: `Console.WriteLog(a + b)`
  * has a fresh string in argument position and an int as the statement's own
  * value, so there is no single expression left to attach a release to. The slot
  * is left allocated (`temp_top` is not restored) so nothing reuses it before the
@@ -2180,7 +2180,7 @@ static void note_str_temp(CG *cg, Expr *e) {
         return;
     /* A hoisted expression was computed once, before the loop, into a frame slot
      * of its own. Every iteration reads that same value back, so releasing it per
-     * iteration frees the same allocation over and over -- and `print("ab" +
+     * iteration frees the same allocation over and over -- and `Console.WriteLog("ab" +
      * "cd")` inside a loop is exactly that, since the concatenation of two
      * literals is loop-invariant and the strength reducer hoists it. The hoisted
      * slot lives as long as the function, which is the right lifetime for a value
@@ -2636,7 +2636,7 @@ static void gen_expr_body(CG *cg, Expr *e) {
              *
              * This is the same hole as a ternary's untaken arm, and it was live
              * for the whole of the temporary-release work: `match (r) { Ok(n) =>
-             * print("ok " + itoa(n)), Err(e) => print("e " + e) }` on a Result
+             * Console.WriteLog("ok " + itoa(n)), Err(e) => Console.WriteLog("e " + e) }` on a Result
              * whose Ok payload is an int freed an int as a string pointer. A
              * match was the one conditional form not covered. */
             cg->no_str_temp++;
@@ -2728,7 +2728,7 @@ static void gen_expr_body(CG *cg, Expr *e) {
             int t0 = temp_alloc(cg);
             int t1 = temp_alloc(cg);
             /* A float operand is formatted in C and handed back as a string, so
-             * the number-to-text rule lives with `print` rather than being
+             * the number-to-text rule lives with `Console.WriteLog` rather than being
              * written twice in assembly. z_concat_f takes it in xmm0, which is
              * where a float already is. */
             int lflt = is_kind(e->lhs->type, TK_F64);
@@ -3901,7 +3901,7 @@ static void licm_hoist(CG *cg, Stmt *body, Expr *step, int emit) {
  * The list is saved and restored rather than cleared, so an enclosing statement's
  * own temporaries survive: `f(g())` releases `g()`'s string when the call
  * statement ends, not when the function does. Loops go through here once per
- * iteration, which is what makes `for (...) { print(a + b); }` release per
+ * iteration, which is what makes `for (...) { Console.WriteLog(a + b); }` release per
  * iteration rather than accumulating. */
 /* Releases every string temporary recorded since `saved`, and unpins the slots so
  * they go back to the pool. The frame keeps its high-water mark, which is what

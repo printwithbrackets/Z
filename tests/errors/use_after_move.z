@@ -4,7 +4,7 @@
 int main() {
     var a = "hello";
     var b = move a;
-    print(b);
-    print(a);
+    Console.WriteLog(b);
+    Console.WriteLog(a);
     return 0;
 }

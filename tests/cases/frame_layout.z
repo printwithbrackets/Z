@@ -47,11 +47,11 @@ int chain(int n) {
 int main() {
     var a = new int[8];
     for (var i = 0; i < 8; i = i + 1) { a[i] = 1; }
-    print(outer(&a[0], 8, 3));  // 48
-    print(wide(1, 2, 3, 4, 5, 6)); // 51
-    print(chain(4));            // reference below
+    Console.WriteLog(outer(&a[0], 8, 3));  // 48
+    Console.WriteLog(wide(1, 2, 3, 4, 5, 6)); // 51
+    Console.WriteLog(chain(4));            // reference below
     var b = new int[4];
     for (var j = 0; j < 4; j = j + 1) { b[j] = j; }
-    print(outer(&b[0], 4, 1));  // 20
+    Console.WriteLog(outer(&b[0], 4, 1));  // 20
     return 0;
 }

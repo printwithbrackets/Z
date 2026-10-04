@@ -35,14 +35,17 @@ Z source files use the `.z` extension.
 ## 2. Hello, world
 
 ```csharp
-print("Hello, world!");
+Console.WriteLog("Hello, world!");
 ```
 
 ```
 Hello, world!
 ```
 
-`print` is a builtin that accepts `int`, `bool`, or `string`.
+`Console.WriteLog` is a builtin that accepts `int`, `bool`, `float`, or
+`string`. Z has no bare `print`: see [Surface names](#surface-names) for
+why the name is a dotted one, and why that is a decision rather than an
+accident.
 
 ---
 
@@ -105,7 +108,7 @@ const int FLAGS = 1 | 2 | 4;
 const int MASK = FLAGS & 6;      // 6
 const int SHIFTED = 1 << 10;     // 1024
 
-print(HALF);                     // 50
+Console.WriteLog(HALF);                     // 50
 ```
 
 A const must be declared **before** it is used, the same way types must be. That
@@ -122,10 +125,10 @@ fraction when a digit follows it, which is why `21.Twice()` below still means
 "call the extension method on 21":
 
 ```csharp
-print(1.5);      // 1.5
-print(1e3);      // 1000
-print(2E-2);     // 0.02
-print(21.Twice());  // 42  -- the '.' belongs to the member access
+Console.WriteLog(1.5);      // 1.5
+Console.WriteLog(1e3);      // 1000
+Console.WriteLog(2E-2);     // 0.02
+Console.WriteLog(21.Twice());  // 42  -- the '.' belongs to the member access
 ```
 
 Arithmetic is `+ - * /`. There is no `%` for a float, because a non-integer has
@@ -133,9 +136,9 @@ no remainder, and none of the bitwise operators either.
 
 ```csharp
 var x = 1.5;
-print(x * 2.0);      // 3
-print(x + 2);        // 3.5   an int operand widens, and the result is a float
-print("v = " + 1.5); // v = 1.5
+Console.WriteLog(x * 2.0);      // 3
+Console.WriteLog(x + 2);        // 3.5   an int operand widens, and the result is a float
+Console.WriteLog("v = " + 1.5); // v = 1.5
 ```
 
 **The one conversion Z does on its own** is `int` to `float`. Every `int` is
@@ -146,9 +149,9 @@ never implicit, because it does lose something:
 var n = 0;
 n = 2.5;             // error: cannot assign 'float' to 'int' without losing
                      // precision; write '(int)' if that is what you want
-print((int)3.9);     // 3   a cast truncates toward zero; it does not round
-print((int)-3.9);    // -3
-print((int)0.5);     // 0
+Console.WriteLog((int)3.9);     // 3   a cast truncates toward zero; it does not round
+Console.WriteLog((int)-3.9);    // -3
+Console.WriteLog((int)0.5);     // 0
 ```
 
 ### Floats follow IEEE-754, which surprises people
@@ -158,8 +161,8 @@ floating-point division is specified to do:
 
 ```csharp
 float recip(float x) { return 1.0 / x; }
-print(recip(0.0));   // inf
-print(recip(-0.0));  // -inf
+Console.WriteLog(recip(0.0));   // inf
+Console.WriteLog(recip(-0.0));  // -inf
 ```
 
 And a NaN -- "not a number", which you can make with `0.0 / 0.0` -- compares
@@ -167,12 +170,12 @@ And a NaN -- "not a number", which you can make with `0.0 / 0.0` -- compares
 
 ```csharp
 var nan = 0.0 / 0.0;
-print(nan == nan);   // false   ...it is not equal to itself
-print(nan != nan);   // true    ...so the two are "different"
-print(nan < 1.0);    // false
-print(nan > 1.0);    // false
-print(nan <= 1.0);   // false
-print(nan >= 1.0);   // false
+Console.WriteLog(nan == nan);   // false   ...it is not equal to itself
+Console.WriteLog(nan != nan);   // true    ...so the two are "different"
+Console.WriteLog(nan < 1.0);    // false
+Console.WriteLog(nan > 1.0);    // false
+Console.WriteLog(nan <= 1.0);   // false
+Console.WriteLog(nan >= 1.0);   // false
 ```
 
 The last four are the ones worth internalizing: a comparison against a NaN is
@@ -181,7 +184,7 @@ the same value. This is not a quirk of this compiler; it is IEEE-754, and every
 other language with floats behaves the same way.
 
 A float also prints with `%g`, so a whole-valued float looks like an integer:
-`print(100.0)` prints `100`, and `0.1 + 0.2` prints `0.3` rather than
+`Console.WriteLog(100.0)` prints `100`, and `0.1 + 0.2` prints `0.3` rather than
 `0.30000000000000004`. Six significant digits, trading exact digits for
 readable ones.
 
@@ -192,20 +195,20 @@ readable ones.
 Arithmetic, comparison, and logic work as you'd expect (integers are 64-bit):
 
 ```csharp
-print(2 + 3);      // 5
-print(7 - 2);      // 5
-print(6 * 7);      // 42
-print(7 / 2);      // 3   (integer division)
-print(7 % 2);      // 1   (remainder)
-print(1 + 2 * 3);  // 7   (* binds tighter than +)
-print(10 / 3);     // 3
+Console.WriteLog(2 + 3);      // 5
+Console.WriteLog(7 - 2);      // 5
+Console.WriteLog(6 * 7);      // 42
+Console.WriteLog(7 / 2);      // 3   (integer division)
+Console.WriteLog(7 % 2);      // 1   (remainder)
+Console.WriteLog(1 + 2 * 3);  // 7   (* binds tighter than +)
+Console.WriteLog(10 / 3);     // 3
 
-print(3 > 2);      // true
-print(3 == 3);     // true
-print(3 != 3);     // false
-print(true && false);  // false
-print(true || false);  // true
-print(!true);          // false
+Console.WriteLog(3 > 2);      // true
+Console.WriteLog(3 == 3);     // true
+Console.WriteLog(3 != 3);     // false
+Console.WriteLog(true && false);  // false
+Console.WriteLog(true || false);  // true
+Console.WriteLog(!true);          // false
 ```
 
 Increment/decrement work on variables:
@@ -213,21 +216,21 @@ Increment/decrement work on variables:
 ```csharp
 var i = 5;
 i++;
-print(i);   // 6
+Console.WriteLog(i);   // 6
 i--;
-print(i);   // 5
+Console.WriteLog(i);   // 5
 ```
 
 Bitwise operators work on the full 64-bit value, and wrap on overflow the way
 C's do:
 
 ```csharp
-print(12 & 10);        // 8    (1100 & 1010)
-print(12 | 10);        // 14   (1100 | 1010)
-print(12 ^ 10);        // 6    (1100 ^ 1010)
-print(~0);             // -1   (all 64 bits set)
-print(1 << 10);        // 1024
-print(1024 >> 3);      // 128
+Console.WriteLog(12 & 10);        // 8    (1100 & 1010)
+Console.WriteLog(12 | 10);        // 14   (1100 | 1010)
+Console.WriteLog(12 ^ 10);        // 6    (1100 ^ 1010)
+Console.WriteLog(~0);             // -1   (all 64 bits set)
+Console.WriteLog(1 << 10);        // 1024
+Console.WriteLog(1024 >> 3);      // 128
 ```
 
 The compound forms work too, and are common in flag manipulation:
@@ -236,20 +239,20 @@ The compound forms work too, and are common in flag manipulation:
 var flags = 0;
 flags |= 1;      // set bit 0
 flags |= 4;      // set bit 2
-print(flags);    // 5
+Console.WriteLog(flags);    // 5
 flags &= 6;      // keep only bits 1 and 2
-print(flags);    // 4
+Console.WriteLog(flags);    // 4
 flags ^= 4;      // clear bit 2
-print(flags);    // 0
+Console.WriteLog(flags);    // 0
 ```
 
 Literals come in every radix, and `_` is a digit separator:
 
 ```csharp
-print(0xff);            // 255
-print(0o755);           // 493   (octal)
-print(0b1010_0110);     // 166   (binary, grouped)
-print(1_000_000);       // 1000000
+Console.WriteLog(0xff);            // 255
+Console.WriteLog(0o755);           // 493   (octal)
+Console.WriteLog(0b1010_0110);     // 166   (binary, grouped)
+Console.WriteLog(1_000_000);       // 1000000
 ```
 
 **Note on division:** division and modulo by a *constant* are strength-reduced
@@ -264,11 +267,11 @@ A handful of functions are built into the compiler rather than written in Z.
 They are ordinary calls, so they read the same way:
 
 ```csharp
-print(abs(0 - 7));            // 7
-print(min(3, 9));             // 3
-print(max(3, 9));             // 9
-print(clamp(15, 0, 10));      // 10   (x, low, high)
-print(sqrt(17));              // 4    (integer square root, rounded down)
+Console.WriteLog(abs(0 - 7));            // 7
+Console.WriteLog(min(3, 9));             // 3
+Console.WriteLog(max(3, 9));             // 9
+Console.WriteLog(clamp(15, 0, 10));      // 10   (x, low, high)
+Console.WriteLog(sqrt(17));              // 4    (integer square root, rounded down)
 ```
 
 `abs`, `min`, `max` and `clamp` compile down to a couple of instructions each.
@@ -281,13 +284,13 @@ turn is `1 << 30` units** and the result is Q30, so `1.0` is exactly `1 << 30`:
 ```csharp
 const int TURN = 1 << 30;
 const int ONE = 1 << 30;         // 1.0 in Q30
-print(cos(0));            // 1073741824   exactly 1.0
-print(sin(TURN / 4));     // 1073741824   a quarter turn: also 1.0
-print(cos(TURN / 2));     // -1073741824  a half turn: exactly -1.0
+Console.WriteLog(cos(0));            // 1073741824   exactly 1.0
+Console.WriteLog(sin(TURN / 4));     // 1073741824   a quarter turn: also 1.0
+Console.WriteLog(cos(TURN / 2));     // -1073741824  a half turn: exactly -1.0
 
 /* sin of a whole turn is mathematically 0, but the fixed-point result can be
  * off by an ulp or two, so compare with a tolerance rather than == 0. */
-print(abs(sin(TURN)) < 8 ? 1 : 0);   // 1
+Console.WriteLog(abs(sin(TURN)) < 8 ? 1 : 0);   // 1
 ```
 
 Angles outside one turn wrap, and the result is exactly periodic, so you can
@@ -299,25 +302,143 @@ which is far more than a game needs and far better than a lookup table.
 A user function of the same name shadows a built-in, so you can define your own
 `min` if you prefer.
 
+### Reading input
+
+Three built-ins read a line. `input` prompts and reads, `read_string` reads
+without prompting, and `read_line` is the same reader from a descriptor:
+
+```csharp
+var name = input("what is your name? ");
+var silent = read_string();
+Console.WriteLog(len(silent));
+
+var fd = open("/tmp/names.txt", "r");
+while (true) {
+    var line = read_line(fd);
+    if (len(line) == 0) { break; }     // end of file
+    Console.WriteLog(line);
+}
+close(fd);
+```
+
+- The prompt is written with **no newline** after it, which is what lets the
+  answer appear on the same line, and it is flushed before the read — otherwise a
+  piped program would appear to hang with nothing on screen.
+- All three stop **at** the line terminator and do not include it.
+- `\r` ends a line as much as `\n` does, and a CRLF pair counts **once**. A file
+  written on Windows does not come back with an empty line between every pair.
+- At end of file they return `""` rather than failing, so a program that runs off
+  the end of its input reads empty answers instead of trapping.
+
+One byte is read per syscall, which is the same trade `read_byte` makes: stdio
+would buffer the rest of the descriptor somewhere the program cannot see it, and
+a later `seek` on that descriptor would be wrong in a way nothing in the output
+would show.
+
+### Surface names
+
+Z has no namespaces, and `Console.WriteLog` is not one. It is a **surface name**:
+a dotted spelling that the parser resolves to an ordinary global call before
+anything else looks at it.
+
+```csharp
+Console.WriteLog("hello");   // the same function as the internal name `print`
+console.logwrite("hello");   // case does not matter
+```
+
+Three things are worth knowing about it.
+
+**Case is ignored, and only here.** `Console.WriteLog`, `console.logwrite` and
+`CONSOLE.LOGWRITE` are one name. Z's own identifiers are case-sensitive; this one
+is not, because a name in this table is a spelling a house style gets to choose
+rather than an identifier the compiler is matching. Folding is ASCII-only, for
+the same reason `upper` and `lower` are: a byte above 127 starts a UTF-8
+sequence, and folding it alone would corrupt the character it belongs to.
+
+**It only applies to a call.** `Console.WriteLog` followed by `(` is a surface
+name. `p.x` is a field, `v.M()` is a method, and both stay exactly what they
+were — a dotted name is a member access unless the table claims it *and* it is
+being called. A variable of your own named `Console` also wins, because a name in
+scope is a name in scope.
+
+**There is no bare `print`.** Writing it is an ordinary undefined-name error,
+which means you are free to define your own `print` and have it mean what you
+like. A diagnostic about `Console.WriteLog` names `Console.WriteLog`, never the
+internal spelling, because a message that named a form no program can write would
+be the one thing a diagnostic must not do.
+
+#### A project picks its own dialect
+
+The names above ship with Z. A project overrides them in a `z.surface` file
+beside its code, one mapping per line — what the program writes, then `=`, then
+what the compiler calls it:
+
+```
+# a comment
+Console.WriteLog = say
+StringBuilder   = TextBuffer
+append          = push
+```
+
+That program is now written in its own vocabulary, and none of the compiler, the
+runtime or the emitted machine code changed:
+
+```csharp
+var b = new TextBuffer();
+b.push("hello ");
+say(b.finish());
+```
+
+The compiler looks for `z.surface` starting in the source file's own directory
+and walking up, and takes the first one it finds. The nearest wins, so a project
+vendored inside another keeps its own dialect. **One** manifest governs the whole
+compilation rather than one per file, because `import` splices rather than
+isolates: a library you import is read in *your* dialect, which is the same rule
+`import` already follows.
+
+```sh
+z run main.z                      # uses ./z.surface if the walk finds one
+z run main.z --no-surface         # ignore it; the shipped names only
+z run main.z --surface=path/to/x  # use this one instead of searching
+```
+
+Two rules keep this from surprising anybody, and both are the whole design:
+
+- **A surface name is a fallback, never a claim.** Every lookup tries the name as
+  written *first*. If your project declares its own `say`, or its own
+  `TextBuffer`, or its own `push`, that is what the code means — the table only
+  answers for names that would otherwise be missing. A local variable named after
+  a surface name is never renamed out from under the code that reads it.
+- **A renamed method is still called by its own name.** `b.push(x)` reaches the
+  library's `append` and the emitted symbol is the one `append` was emitted
+  under. That is the detail a rename gets wrong first: it type-checks, and then
+  the link fails on a symbol nobody defined.
+
+What can be renamed is anything resolved by name — the builtins, the standard
+library's types and their methods, and your own globals. What cannot yet be
+renamed is the *keywords*: `var`, `foreach`, `match` and the rest are lexed, and
+those are the lexer's table rather than a name lookup. That is the remaining half
+of this idea.
+
 ### The string library
 
 Available without declaring anything, and type-checked like any other call:
 
 ```csharp
 var s = "  Hello, World  ";
-print($"[{trim(s)}]");            // [Hello, World]
-print(len(s));                    // 16   bytes, and 0 for null
-print(upper(trim(s)));            // HELLO, WORLD
-print(char_at("abc", 1));         // 98   the byte, or -1 past the end
-print(sub("abcdef", 1, 3));       // bcd
-print(sub("abcdef", -2, 2));      // ef   a negative start counts from the end
-print(index_of("abcdef", "cd"));  // 2    or -1
-print(contains("abcdef", "zz"));  // false
-print(replace("a-b-c", "-", "="));// a=b=c
-print(repeat("ab", 3));           // ababab
+Console.WriteLog($"[{trim(s)}]");            // [Hello, World]
+Console.WriteLog(len(s));                    // 16   bytes, and 0 for null
+Console.WriteLog(upper(trim(s)));            // HELLO, WORLD
+Console.WriteLog(char_at("abc", 1));         // 98   the byte, or -1 past the end
+Console.WriteLog(sub("abcdef", 1, 3));       // bcd
+Console.WriteLog(sub("abcdef", -2, 2));      // ef   a negative start counts from the end
+Console.WriteLog(index_of("abcdef", "cd"));  // 2    or -1
+Console.WriteLog(contains("abcdef", "zz"));  // false
+Console.WriteLog(replace("a-b-c", "-", "="));// a=b=c
+Console.WriteLog(repeat("ab", 3));           // ababab
 
 foreach (var part in split("a,b,c", ",")) {   // split returns a real string[]
-    print(part);
+    Console.WriteLog(part);
 }
 ```
 
@@ -333,22 +454,22 @@ continuation byte on its own would corrupt the sequence.
 
 ```csharp
 var s = "hello world";
-print(s.length);          // 11
-print(s[0]);              // 104   the byte, as an int
-print(s[1..3]);           // el    half-open: s[a..b] keeps a..b-1
-print(s[..5]);            // hello an end may be left out
-print(s[6..]);            // world and so may the start
-print(s[1..999]);          // ello world, an end past the end just clamps
-print(s[4..2]);           // (empty) an inverted range is empty, not an error
+Console.WriteLog(s.length);          // 11
+Console.WriteLog(s[0]);              // 104   the byte, as an int
+Console.WriteLog(s[1..3]);           // el    half-open: s[a..b] keeps a..b-1
+Console.WriteLog(s[..5]);            // hello an end may be left out
+Console.WriteLog(s[6..]);            // world and so may the start
+Console.WriteLog(s[1..999]);          // ello world, an end past the end just clamps
+Console.WriteLog(s[4..2]);           // (empty) an inverted range is empty, not an error
 
 var z = "a\0bc";
-print(z.length);          // 4     a zero byte is a byte, not an end
-print(z[1]);              // 0
-print(z[0] + z[2] + z[3]);// 294
-print(contains("ab\0cd", "b\0"));   // true
+Console.WriteLog(z.length);          // 4     a zero byte is a byte, not an end
+Console.WriteLog(z[1]);              // 0
+Console.WriteLog(z[0] + z[2] + z[3]);// 294
+Console.WriteLog(contains("ab\0cd", "b\0"));   // true
 
-print("ab" < "abc");      // true   a prefix sorts before what extends it
-print("ab\0c" == "ab\0d"); // false, and strcmp would have called this equal
+Console.WriteLog("ab" < "abc");      // true   a prefix sorts before what extends it
+Console.WriteLog("ab\0c" == "ab\0d"); // false, and strcmp would have called this equal
 ```
 
 Three things follow from the length being stored rather than found by scanning
@@ -359,7 +480,8 @@ the header immediately before the bytes.
 
 **A zero byte is data.** A C string ends at the first zero, so `"a\0bc"` used to
 print as nothing and measure as 0, and every function that took it stopped early.
-Now the length is 4, every byte is reachable, `print` writes all four, and
+Now the length is 4, every byte is reachable, `Console.WriteLog` writes all
+four, and
 `split`, `replace` and `index_of` all see it. C interoperability still stops at
 a zero — that is a property of C's strings, not a bug in this one — and
 [section 18](#types) says how a C caller gets past it.
@@ -384,9 +506,9 @@ for (var i = 0; i < 200; i++) {
 }
 b.append("!");
 b.appendInt(42);
-print(b.length());            // 403
-print(b.toString()[402]);     // 50, the '2'
-print(ends_with(b.toString(), "42"));    // true
+Console.WriteLog(b.length());            // 403
+Console.WriteLog(b.toString()[402]);     // 50, the '2'
+Console.WriteLog(ends_with(b.toString(), "42"));    // true
 ```
 
 `append` is amortized constant time: the builder owns its buffer, so appending
@@ -402,9 +524,9 @@ string, pass it on, don't need it again".
 ### The integer library
 
 ```csharp
-print(pow(2, 10));     // 1024
-print(gcd(12, 18));    // 6
-print(lcm(4, 6));      // 12
+Console.WriteLog(pow(2, 10));     // 1024
+Console.WriteLog(gcd(12, 18));    // 6
+Console.WriteLog(lcm(4, 6));      // 12
 ```
 
 `exp`, `log` and `tan` are absent. They are worth having only for a `float`, and
@@ -421,14 +543,14 @@ automatically). The `$"..."` form interpolates expressions inline:
 ```csharp
 var name = "World";
 var n = 3;
-print("count = " + 42);            // count = 42
-print("name: " + name);           // name: World
-print($"Hello, {name}!");          // Hello, World!
-print($"n={n}, n*n={n*n}");        // n=3, n*n=9
-print($"bool: {true}");            // bool: true
+Console.WriteLog("count = " + 42);            // count = 42
+Console.WriteLog("name: " + name);           // name: World
+Console.WriteLog($"Hello, {name}!");          // Hello, World!
+Console.WriteLog($"n={n}, n*n={n*n}");        // n=3, n*n=9
+Console.WriteLog($"bool: {true}");            // bool: true
 ```
 
-Nested quotes inside an interpolation work: `print($"a {"b"} c");`.
+Nested quotes inside an interpolation work: `Console.WriteLog($"a {"b"} c");`.
 
 ### Escapes, and literal braces
 
@@ -437,8 +559,8 @@ the character, escape it — or spell it as a byte or a code point, which is als
 how you get a brace that would otherwise open a hole:
 
 ```csharp
-print($"a\{b}c");              // a{b}c      a literal brace, nothing interpolated
-print($"\x7bnot a hole\x7d");    // {not a hole}
+Console.WriteLog($"a\{b}c");              // a{b}c      a literal brace, nothing interpolated
+Console.WriteLog($"\x7bnot a hole\x7d");    // {not a hole}
 ```
 
 Outside an interpolated string a brace needs no escape, and `\{` is a mistake
@@ -451,13 +573,13 @@ same ordering C's `strcmp` gives, so a shorter string that is a prefix of a
 longer one sorts first.
 
 ```csharp
-print("hello" == "hello" ? 1 : 0);   // 1
-print("hello" == "world" ? 1 : 0);   // 0
-print("apple" < "banana" ? 1 : 0);   // 1
-print("ab" < "abc" ? 1 : 0);         // 1
-print("B" < "a" ? 1 : 0);            // 1  (byte order, so uppercase sorts first)
+Console.WriteLog("hello" == "hello" ? 1 : 0);   // 1
+Console.WriteLog("hello" == "world" ? 1 : 0);   // 0
+Console.WriteLog("apple" < "banana" ? 1 : 0);   // 1
+Console.WriteLog("ab" < "abc" ? 1 : 0);         // 1
+Console.WriteLog("B" < "a" ? 1 : 0);            // 1  (byte order, so uppercase sorts first)
 
-if ("q" > "p") { print("yes"); }     // usable as a condition
+if ("q" > "p") { Console.WriteLog("yes"); }     // usable as a condition
 ```
 
 Comparison is by byte value, not by any notion of alphabetical order, and it is
@@ -472,9 +594,9 @@ case-sensitive.
 ```csharp
 var x = 10;
 if (x > 5) {
-    print("big");
+    Console.WriteLog("big");
 } else {
-    print("small");
+    Console.WriteLog("small");
 }
 ```
 
@@ -482,7 +604,7 @@ The ternary operator is available too:
 
 ```csharp
 var x = 10;
-print(x > 5 ? "big" : "small");   // big
+Console.WriteLog(x > 5 ? "big" : "small");   // big
 ```
 
 ### `while`
@@ -490,7 +612,7 @@ print(x > 5 ? "big" : "small");   // big
 ```csharp
 var i = 0;
 while (i < 3) {
-    print(i);
+    Console.WriteLog(i);
     i = i + 1;                    // 0, 1, 2
 }
 ```
@@ -501,7 +623,7 @@ while (i < 3) {
 
 ```csharp
 for (var i = 0; i < 5; i++) {
-    print(i);                     // 0 1 2 3 4
+    Console.WriteLog(i);                     // 0 1 2 3 4
 }
 ```
 
@@ -512,8 +634,8 @@ for (var i = 0; i < 5; i++) {
 ```csharp
 var a = new int[3];
 a[0] = 10; a[1] = 20; a[2] = 30;
-foreach (var v in a) { print(v); }   // 10 20 30
-foreach (v in a) { print(v); }       // also fine (type inferred)
+foreach (var v in a) { Console.WriteLog(v); }   // 10 20 30
+foreach (v in a) { Console.WriteLog(v); }       // also fine (type inferred)
 ```
 
 ### `break` and `continue`
@@ -526,14 +648,14 @@ while (true) {
     i = i + 1;
     if (i > 5) { break; }        // stops the loop entirely
 }
-print(i);                        // 6
+Console.WriteLog(i);                        // 6
 
 var s = 0;
 for (var k = 0; k < 10; k++) {
     if (k < 3) { continue; }     // skips the rest of this iteration...
     s = s + k;                   // ...so this only runs for k >= 3
 }
-print(s);                        // 42
+Console.WriteLog(s);                        // 42
 ```
 
 In a `for` loop, `continue` jumps to the step, not back to the top of the body,
@@ -552,14 +674,14 @@ int fib(int n) {
     if (n < 2) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
-print(fib(15));   // 610
+Console.WriteLog(fib(15));   // 610
 ```
 
 A single-expression function can use `=>` (expression-bodied):
 
 ```csharp
 int square(int n) => n * n;
-print(square(7));   // 49
+Console.WriteLog(square(7));   // 49
 ```
 
 ### The entry point
@@ -569,13 +691,13 @@ You can write a program two ways. Either use **top-level statements** (no
 
 ```csharp
 // top-level style (used throughout this tutorial)
-print("hi");
+Console.WriteLog("hi");
 ```
 
 ```csharp
 // or explicit main
 int main() {
-    print("hi");
+    Console.WriteLog("hi");
     return 0;
 }
 ```
@@ -591,14 +713,14 @@ signature, so `var` needs no annotation:
 int dbl(int x) { return x * 2; }
 
 var f = &dbl;
-print(f(21));      // 42
+Console.WriteLog(f(21));      // 42
 ```
 
 Where a *type* is needed, write it as `fn(params) -> ret`:
 
 ```csharp
 int apply(fn(int) -> int f, int v) { return f(v); }
-print(apply(&dbl, 5));     // 10
+Console.WriteLog(apply(&dbl, 5));     // 10
 ```
 
 A call through a pointer is checked like a direct call — the argument count and
@@ -612,11 +734,11 @@ struct field, or be passed around:
 ```csharp
 var fs = new fn(int) -> int[2];
 fs[0] = &dbl;
-print(fs[0](4));            // 8
+Console.WriteLog(fs[0](4));            // 8
 
 struct Op { fn(int) -> int f; }
 var op = new Op(&dbl);
-print(op.f(3));             // 6
+Console.WriteLog(op.f(3));             // 6
 ```
 
 ### Method pointers
@@ -635,9 +757,9 @@ class Counter {
 
 var c = new Counter(5);
 var m = &c.add;
-print(m(3));            // 8
+Console.WriteLog(m(3));            // 8
 c.bump(10);
-print(m(0));            // 15   the receiver is bound, so mutation shows through
+Console.WriteLog(m(0));            // 15   the receiver is bound, so mutation shows through
 ```
 
 A `method(...)` value is a pointer to a garbage-collected cell holding the code
@@ -666,7 +788,7 @@ expression does, and it captures any variable in scope where it is written:
 
 ```csharp
 var add = (int a, int b) => a + b;
-print(add(2, 3));            // 5
+Console.WriteLog(add(2, 3));            // 5
 ```
 
 A one-expression body *is* the result. A block body must `return` on every path.
@@ -682,7 +804,7 @@ closure(int) -> int makeAdder(int n) {
 }
 
 var plus10 = makeAdder(10);
-print(plus10(5));            // 15
+Console.WriteLog(plus10(5));            // 15
 ```
 
 `closure` and `fn` are separate types on purpose — a closure carries an
@@ -699,9 +821,9 @@ closure() -> int counter() {
 }
 
 var c = counter();
-print(c());                  // 1
-print(c());                  // 2
-print(c());                  // 3
+Console.WriteLog(c());                  // 1
+Console.WriteLog(c());                  // 2
+Console.WriteLog(c());                  // 3
 ```
 
 Writing to a captured variable writes to the closure's own copy, shared by every
@@ -715,7 +837,7 @@ class reads and writes the real thing:
 struct P { int x; int y; }
 var p = new P(3, 4);
 var getX = () => p.x;
-print(getX());               // 3
+Console.WriteLog(getX());               // 3
 ```
 
 There is one limit: a lambda may not be written inside another lambda. A
@@ -733,7 +855,7 @@ int outer() {
     int twice(int n) { return n * 2; }
     return helper(twice(5));
 }
-print(outer());             // 11
+Console.WriteLog(outer());             // 11
 ```
 
 It is hoisted out to the top level and emitted under a symbol derived from the
@@ -745,7 +867,7 @@ int fact(int n) {
     if (n < 2) { return 1; }
     return n * fact(n - 1);
 }
-print(fact(5));             // 120
+Console.WriteLog(fact(5));             // 120
 ```
 
 Declare it before you call it. A nested function's scope runs to the end of the
@@ -760,7 +882,7 @@ whatever its own frame happened to hold. That is an error, not a wrong answer:
 int main() {
     var k = 7;
     int peek() { return k; }   // error: undefined variable 'k'
-    print(peek());
+    Console.WriteLog(peek());
     return 0;
 }
 ```
@@ -781,8 +903,8 @@ Result<int, string> parse(string s) {
     return Err("not a number: " + s);
 }
 
-print(match parse("42") { Ok(v) => v, Err(e) => 0 });   // 42
-print(match parse("x")  { Ok(_) => 0, Err(e) => 0 });  // 0
+Console.WriteLog(match parse("42") { Ok(v) => v, Err(e) => 0 });   // 42
+Console.WriteLog(match parse("x")  { Ok(_) => 0, Err(e) => 0 });  // 0
 ```
 
 `_` is a binding that is deliberately not read, so an arm can ignore the payload
@@ -831,8 +953,8 @@ interface's method rather than to anything the value happens to be:
 
 ```csharp
 Shape a = new Square(5);
-print(a.Area());      // 25
-print(a.Name());      // square
+Console.WriteLog(a.Area());      // 25
+Console.WriteLog(a.Name());      // square
 ```
 
 That is the point: unrelated types in one collection. Structs, classes and
@@ -842,7 +964,7 @@ subclasses of different hierarchies, all called the same way.
 var shapes = new Shape[2];
 shapes[0] = new Square(3);
 shapes[1] = new Circle(2);      // a class, in the same array
-for (var i = 0; i < 2; i = i + 1) { print(shapes[i].Name()); }
+for (var i = 0; i < 2; i = i + 1) { Console.WriteLog(shapes[i].Name()); }
 ```
 
 An interface value is a *pointer* to a two-word cell holding a method table and
@@ -871,8 +993,8 @@ the length with `.length`:
 var a = new int[5];       // 5 zeros
 a[0] = 10;
 a[1] = 20;
-print(a.length);          // 5
-print(a[0] + a[1]);       // 30
+Console.WriteLog(a.length);          // 5
+Console.WriteLog(a[0] + a[1]);       // 30
 ```
 
 Combine with a loop:
@@ -880,7 +1002,7 @@ Combine with a loop:
 ```csharp
 var squares = new int[5];
 for (var i = 0; i < 5; i++) { squares[i] = i * i; }
-foreach (var s in squares) { print(s); }   // 0 1 4 9 16
+foreach (var s in squares) { Console.WriteLog(s); }   // 0 1 4 9 16
 ```
 
 ### Modules
@@ -897,7 +1019,7 @@ import "lib/math.z";
 import "lib/shapes.z";
 
 int main() {
-    print(triple(4));     // 12, from lib/math.z
+    Console.WriteLog(triple(4));     // 12, from lib/math.z
     return 0;
 }
 ```
@@ -923,9 +1045,9 @@ Take an address with `&`, dereference with `*`:
 ```csharp
 var x = 10;
 var p = &x;
-print(*p);      // 10
+Console.WriteLog(*p);      // 10
 *p = 99;
-print(x);       // 99
+Console.WriteLog(x);       // 99
 ```
 
 Pointers are useful for mutating through a reference, and for passing
@@ -935,7 +1057,7 @@ by-reference parameters:
 void setTo(int* q, int v) { *q = v; return; }
 int n = 5;
 setTo(&n, 42);
-print(n);       // 42
+Console.WriteLog(n);       // 42
 ```
 
 Pointers nest, so a pointer to a pointer (`int**`) is a type you can write:
@@ -945,7 +1067,7 @@ var a = new int[2];
 a[0] = 7;
 var p = &a[0];           // int*
 var t = &p;              // int**
-print(**t);              // 7
+Console.WriteLog(**t);              // 7
 ```
 
 `&a[0]` is how you get a pointer to an array's first element. Passing an array
@@ -959,9 +1081,9 @@ into any pointer slot:
 
 ```csharp
 var p = null;
-if (p == null) { print("unset"); }        // unset
+if (p == null) { Console.WriteLog("unset"); }        // unset
 var q = &a[0];
-if (q != null) { print("set"); }          // set
+if (q != null) { Console.WriteLog("set"); }          // set
 p = q;                                    // a var declared null takes a pointer later
 ```
 
@@ -978,12 +1100,12 @@ A `struct` is a value type: copying a struct copies its fields.
 struct Point { int x; int y; }
 
 var p = new Point(3, 4);   // positional constructor (matches field order)
-print(p.x + p.y);          // 7
+Console.WriteLog(p.x + p.y);          // 7
 
 var q = p;                  // value copy
 q.x = 10;
-print(p.x);                // 3   (p is unchanged)
-print(q.x);                // 10
+Console.WriteLog(p.x);                // 3   (p is unchanged)
+Console.WriteLog(q.x);                // 10
 ```
 
 ### Methods
@@ -998,8 +1120,8 @@ struct Point {
 }
 
 var pt = new Point(3, 4);
-print(pt.Sum());     // 7
-print(pt.Mag2());    // 25
+Console.WriteLog(pt.Sum());     // 7
+Console.WriteLog(pt.Mag2());    // 25
 ```
 
 To pass a struct to another method, use a pointer parameter `Type*` and call
@@ -1009,7 +1131,7 @@ with `&`:
 struct Point { int x; int y; int Dot(Point* o) { return x * o.x + y * o.y; } }
 var a = new Point(1, 2);
 var b = new Point(3, 4);
-print(a.Dot(&b));   // 11
+Console.WriteLog(a.Dot(&b));   // 11
 ```
 
 ### Auto-properties
@@ -1020,7 +1142,7 @@ print(a.Dot(&b));   // 11
 struct Acct { int id; int Id { get; set; } }
 var acc = new Acct(0);
 acc.Id = 9;
-print(acc.Id);   // 9
+Console.WriteLog(acc.Id);   // 9
 ```
 
 ### Operator overloading
@@ -1038,9 +1160,9 @@ struct Vec {
 
 var a = new Vec(3, 4);
 var b = new Vec(1, 2);
-print(a + b);          // (4, 6)   -> "+" returns a Vec, print shows it via Show()
-print(a * 3);          // (9, 12)
-print(a == b);         // false
+Console.WriteLog(a + b);          // (4, 6)   -> "+" returns a Vec, print shows it via Show()
+Console.WriteLog(a * 3);          // (9, 12)
+Console.WriteLog(a == b);         // false
 ```
 
 ### Extension methods
@@ -1052,9 +1174,9 @@ int Twice(this int n) { return n * 2; }
 string Exclaim(this string s) => s + "!";
 bool IsEven(this int n) => n % 2 == 0;
 
-print(21.Twice());      // 42
-print("hi".Exclaim());  // hi!
-print(4.IsEven());      // true
+Console.WriteLog(21.Twice());      // 42
+Console.WriteLog("hi".Exclaim());  // hi!
+Console.WriteLog(4.IsEven());      // true
 ```
 
 ---
@@ -1081,9 +1203,9 @@ int area(Shape s) => match s {
     Point       => 0
 };
 
-print(area(Circle(5)));   // 75
-print(area(Rect(3, 4)));  // 12
-print(area(Point));       // 0
+Console.WriteLog(area(Circle(5)));   // 75
+Console.WriteLog(area(Rect(3, 4)));  // 12
+Console.WriteLog(area(Point));       // 0
 ```
 
 The `match` must be **exhaustive** — cover every variant. Add a new variant to
@@ -1097,7 +1219,7 @@ string describe(Shape s) => match s {
     Rect(w, h) => $"{w}x{h} rect",
     Point      => "a point"
 };
-print(describe(Rect(3, 4)));   // 3x4 rect
+Console.WriteLog(describe(Rect(3, 4)));   // 3x4 rect
 ```
 
 ---
@@ -1117,8 +1239,8 @@ class Dog {
 }
 
 var d = new Dog(4, "Rex");
-print(d.Speak());   // Rex woof
-print(d.Legs());    // 4
+Console.WriteLog(d.Speak());   // Rex woof
+Console.WriteLog(d.Legs());    // 4
 ```
 
 - `virtual` gives the method a dispatch slot, one per virtual in declaration
@@ -1141,8 +1263,8 @@ class Cat {
 var animals = new Animal[2];
 animals[0] = new Dog(4, "Rex");
 animals[1] = new Cat(4);
-print(animals[0].Speak());   // Rex woof
-print(animals[1].Speak());   // meow
+Console.WriteLog(animals[0].Speak());   // Rex woof
+Console.WriteLog(animals[1].Speak());   // meow
 ```
 
 - `new C(args)` allocates a garbage-collected object and runs the constructor
@@ -1184,10 +1306,10 @@ to the interface's method rather than to whatever the value happens to be:
 
 ```csharp
 var a = new Square(5);
-print(a.Area());   // 25
+Console.WriteLog(a.Area());   // 25
 
 Shape one = new Square(5);
-print(one.Area());  // 25   -- dispatched through the interface
+Console.WriteLog(one.Area());  // 25   -- dispatched through the interface
 ```
 
 - A **`class`** must declare every method it offers to an interface `virtual`,
@@ -1217,12 +1339,12 @@ T max<T>(T a, T b) { if (a > b) { return a; } return b; }
 U pick<T, U>(T a, U b) { return b; }          // two type parameters
 int total<T>(T[] xs) { var s = 0; foreach (v in xs) { s = s + v; } return s; }
 
-print(max(3, 7));      // 7
-print(max(10, 4));     // 10
-print(pick(3, 9));     // 9
+Console.WriteLog(max(3, 7));      // 7
+Console.WriteLog(max(10, 4));     // 10
+Console.WriteLog(pick(3, 9));     // 9
 
 var arr = new int[4]; arr[0]=1; arr[1]=2; arr[2]=3; arr[3]=4;
-print(total(arr));     // 10
+Console.WriteLog(total(arr));     // 10
 ```
 
 The declaration must appear before its uses. There is no runtime generic
@@ -1238,7 +1360,7 @@ mark-sweep collector. You never free anything:
 ```csharp
 var live = "survivor";
 for (var i = 0; i < 100000; i = i + 1) { live = live + "x"; }  // tons of garbage
-print(live);   // "survivorxxx..." — `live` survived
+Console.WriteLog(live);   // "survivorxxx..." — `live` survived
 ```
 
 Locals live on the stack (no GC cost); only heap allocations are collected.
@@ -1296,13 +1418,13 @@ int main() {
     shapes[1] = new Square(3);
 
     for (var i = 0; i < 2; i++) {
-        print($"{shapes[i].Name()} area = {shapes[i].Area()}");
+        Console.WriteLog($"{shapes[i].Name()} area = {shapes[i].Area()}");
     }
     // square area = 25
     // square area = 9
 
-    print(apply(Add(2, 3)) + " " + apply(Mul(4, 5)));   // 5 20
-    print(maxOf(7, 9));                                 // 9
+    Console.WriteLog(apply(Add(2, 3)) + " " + apply(Mul(4, 5)));   // 5 20
+    Console.WriteLog(maxOf(7, 9));                                 // 9
     return 0;
 }
 ```
@@ -1351,8 +1473,8 @@ extern int c_add(int a, int b);
 extern int c_strlen(string s);
 
 int main() {
-    print(c_add(2, 3));         // 5
-    print(c_strlen("hello"));   // 5
+    Console.WriteLog(c_add(2, 3));         // 5
+    Console.WriteLog(c_strlen("hello"));   // 5
     return 0;
 }
 ```

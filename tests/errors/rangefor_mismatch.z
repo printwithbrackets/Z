@@ -2,7 +2,7 @@ int main() {
     var v = new Vec<string>();
     v.push("a");
     for (int x : v) {
-        print(x);
+        Console.WriteLog(x);
     }
     return 0;
 }

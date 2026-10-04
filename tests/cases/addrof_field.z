@@ -21,25 +21,25 @@ int main() {
     // `&h.data[0]` is the address of the first element.
     var p = &h.data[0];
     *p = 99;
-    print(h.data[0]);               // 99
-    print(h.data[1]);               // 2
+    Console.WriteLog(h.data[0]);               // 99
+    Console.WriteLog(h.data[1]);               // 2
 
     // Through a second pointer, so the address is taken and then followed.
     var q = p;
     *q = 55;
-    print(h.data[0]);               // 55
+    Console.WriteLog(h.data[0]);               // 55
 
     // The address of a scalar field.
     var s = &h.scalar;
     *s = 42;
-    print(h.scalar);                // 42
+    Console.WriteLog(h.scalar);                // 42
 
     // `->` reads the same field as `.`, so the two spellings agree.
     var hp = &h;
-    print(hp->scalar);              // 42
+    Console.WriteLog(hp->scalar);              // 42
     var sp = &hp->scalar;
     *sp = 13;
-    print(h.scalar);                // 13
+    Console.WriteLog(h.scalar);                // 13
 
     // A method pointer is still a method pointer, not a field address: this is
     // the case the field check must not have broken.
@@ -50,6 +50,6 @@ int main() {
     }
     var c = new Counter();
     var f = &c.Get;
-    print(f());                     // 0
+    Console.WriteLog(f());                     // 0
     return 0;
 }

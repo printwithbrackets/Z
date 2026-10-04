@@ -4,9 +4,9 @@
 int main() {
     /* ---- the length is stored, not scanned ---- */
     var s = "hello world";
-    print(s.length);            // 11
-    print(len(s));               // 11
-    print("".length);            // 0  -- the empty string is a real string
+    Console.WriteLog(s.length);            // 11
+    Console.WriteLog(len(s));               // 11
+    Console.WriteLog("".length);            // 0  -- the empty string is a real string
 
     /* ---- an embedded zero is just a byte ----
      *
@@ -14,13 +14,13 @@ int main() {
      * nothing at all and measure as 0. Now the length is four and every byte
      * is reachable. */
     var z = "a\0bc";
-    print(z.length);             // 4
-    print(z[0]);                 // 97  ('a')
-    print(z[1]);                 // 0
-    print(z[2]);                 // 98  ('b')
-    print(z[3]);                 // 99  ('c')
-    print(z[0] + z[2] + z[3]);   // 294
-    print(("a\0bc" + "!").length); // 5
+    Console.WriteLog(z.length);             // 4
+    Console.WriteLog(z[0]);                 // 97  ('a')
+    Console.WriteLog(z[1]);                 // 0
+    Console.WriteLog(z[2]);                 // 98  ('b')
+    Console.WriteLog(z[3]);                 // 99  ('c')
+    Console.WriteLog(z[0] + z[2] + z[3]);   // 294
+    Console.WriteLog(("a\0bc" + "!").length); // 5
 
     /* ---- indexing is byte indexing, stated once and applied everywhere ----
      *
@@ -28,53 +28,53 @@ int main() {
      * and each is its own int. The same rule `char_at` and `.length` always
      * had, now written s[i] instead of called. */
     var e = "café";
-    print(e.length);             // 5  (c a f 0xC3 0xA9)
-    print(e[0]);                 // 99
-    print(e[3]);                 // 195
-    print(e[4]);                 // 169
-    print(char_at(e, 1));     // 97
-    print(char_at(e, 99));    // -1, past the end
+    Console.WriteLog(e.length);             // 5  (c a f 0xC3 0xA9)
+    Console.WriteLog(e[0]);                 // 99
+    Console.WriteLog(e[3]);                 // 195
+    Console.WriteLog(e[4]);                 // 169
+    Console.WriteLog(char_at(e, 1));     // 97
+    Console.WriteLog(char_at(e, 99));    // -1, past the end
 
     /* ---- comparison is by content, then by length ---- */
-    print("abc" == "abc");       // true
-    print("abc" == "abd");       // false
-    print("abc" == "abcd");      // false
-    print("ab" < "abc");         // true  -- a prefix sorts first
-    print("abc" < "abd");        // true
-    print("b" > "abc");          // true
+    Console.WriteLog("abc" == "abc");       // true
+    Console.WriteLog("abc" == "abd");       // false
+    Console.WriteLog("abc" == "abcd");      // false
+    Console.WriteLog("ab" < "abc");         // true  -- a prefix sorts first
+    Console.WriteLog("abc" < "abd");        // true
+    Console.WriteLog("b" > "abc");          // true
     /* Equal up to the zero, different after it. strcmp calls these equal. */
-    print("ab\0c" == "ab\0c");   // true
-    print("ab\0c" == "ab\0d");   // false
+    Console.WriteLog("ab\0c" == "ab\0c");   // true
+    Console.WriteLog("ab\0c" == "ab\0d");   // false
 
     /* ---- slicing, half-open, either end optional, clamped at both ends ---- */
     var t = "abcdef";
-    print(t[1..3]);              // bc
-    print(t[0..0].length);       // 0, an empty range is an empty string
-    print(t[..2]);               // ab
-    print(t[3..]);               // def
-    print(t[1..999]);            // bcdef, an end past the end clamps
-    print(t[..]);                // abcdef
-    print((t[1..999]).length);   // 5
-    print(t[4..2].length);       // 0, an inverted range is empty not an error
-    print(sub(t, 1, 3));         // bcd, the same thing, callable
+    Console.WriteLog(t[1..3]);              // bc
+    Console.WriteLog(t[0..0].length);       // 0, an empty range is an empty string
+    Console.WriteLog(t[..2]);               // ab
+    Console.WriteLog(t[3..]);               // def
+    Console.WriteLog(t[1..999]);            // bcdef, an end past the end clamps
+    Console.WriteLog(t[..]);                // abcdef
+    Console.WriteLog((t[1..999]).length);   // 5
+    Console.WriteLog(t[4..2].length);       // 0, an inverted range is empty not an error
+    Console.WriteLog(sub(t, 1, 3));         // bcd, the same thing, callable
 
     /* ---- search finds a zero, because it is a byte ---- */
-    print(index_of("ab\0cd", "b\0")); // 1
-    print(contains("ab\0cd", "b\0")); // true
-    print(index_of("abcdef", "cd"));      // 2
-    print(index_of("abcdef", "zz"));      // -1
-    print(index_of("abc", ""));           // 0
-    print(index_of("", "a"));             // -1
-    print(index_of_byte("aaa", 97));      // 0
-    print(last_index_of_byte("aaa", 97)); // 3
-    print(last_index_of_byte("aXbXc", 88)); // 4
+    Console.WriteLog(index_of("ab\0cd", "b\0")); // 1
+    Console.WriteLog(contains("ab\0cd", "b\0")); // true
+    Console.WriteLog(index_of("abcdef", "cd"));      // 2
+    Console.WriteLog(index_of("abcdef", "zz"));      // -1
+    Console.WriteLog(index_of("abc", ""));           // 0
+    Console.WriteLog(index_of("", "a"));             // -1
+    Console.WriteLog(index_of_byte("aaa", 97));      // 0
+    Console.WriteLog(last_index_of_byte("aaa", 97)); // 3
+    Console.WriteLog(last_index_of_byte("aXbXc", 88)); // 4
 
     /* ---- split and join are inverses, over real lengths ---- */
     var parts = split("one,two,,three", ",");
-    print(parts.length);         // 4
-    print(parts[2].length);      // 0, the empty piece between two separators
-    print(join(",", parts));     // one,two,,three
-    print(join("-", split("a", ""))); // a
+    Console.WriteLog(parts.length);         // 4
+    Console.WriteLog(parts[2].length);      // 0, the empty piece between two separators
+    Console.WriteLog(join(",", parts));     // one,two,,three
+    Console.WriteLog(join("-", split("a", ""))); // a
 
     /* ---- building a string is not concatenation ----
      *
@@ -84,51 +84,51 @@ int main() {
      * buffer, so an append extends it in place and is amortized constant time. */
     var naive = "";
     for (var i = 0; i < 200; i++) { naive = naive + "ab"; }
-    print(naive.length);         // 400
+    Console.WriteLog(naive.length);         // 400
 
     var b = new StringBuilder();
     for (var j = 0; j < 200; j++) { b.append("ab"); }
     b.append("!");
-    print(b.length());           // 401
-    print(b.toString()[400]);    // 33  ('!')
+    Console.WriteLog(b.length());           // 401
+    Console.WriteLog(b.toString()[400]);    // 33  ('!')
     b.appendInt(12345);
-    print(ends_with(b.toString(), "12345"));  // true
+    Console.WriteLog(ends_with(b.toString(), "12345"));  // true
     b.clear();
-    print(b.isEmpty());          // true
+    Console.WriteLog(b.isEmpty());          // true
     b.append("fresh");
-    print(b.toString());         // fresh
+    Console.WriteLog(b.toString());         // fresh
 
     /* A builder reuses its buffer, so a long build is not quadratic in copies.
      * Counted rather than timed: 4000 appends is where a per-append copy stops
      * being invisible. */
     var big = new StringBuilder();
     for (var k = 0; k < 4000; k++) { big.append("x"); }
-    print(big.length());         // 4000
-    print(big.take().length);    // 4000, and the builder is empty again
-    print(big.length());         // 0
+    Console.WriteLog(big.length());         // 4000
+    Console.WriteLog(big.take().length);    // 4000, and the builder is empty again
+    Console.WriteLog(big.length());         // 0
 
     /* ---- case, trim, replace, reverse, pad: all length-aware now ---- */
     var m = "  \tMixed CASE \n ";
-    print("[" + trim(m) + "]");         // [Mixed CASE]
-    print(trim_start(m).length);          // 13, only the leading blanks go
-    print(trim_end(m).length);            // 13 -- the trailing space and newline only
-    print(trim(m).length);              // 10
-    print(upper(trim(m)));              // MIXED CASE
-    print(lower(trim(m)));              // mixed case
-    print(repeat("ab", 3));              // ababab
-    print(reverse("abc"));               // cba
-    print(reverse("ab\0c").length);      // 4
-    print(replace("a-b-c", "-", "+"));    // a+b+c
-    print(replace("a\0b", "\0", "-"));    // a-b, a zero is a byte to replace
-    print(replace("aaa", "aa", "b"));     // ba
-    print(pad_left("7", 3, 48));         // 007
-    print(pad_right("7", 3, 48));        // 700
-    print(pad_left("toolong", 3, 48));   // toolong, padding never truncates
+    Console.WriteLog("[" + trim(m) + "]");         // [Mixed CASE]
+    Console.WriteLog(trim_start(m).length);          // 13, only the leading blanks go
+    Console.WriteLog(trim_end(m).length);            // 13 -- the trailing space and newline only
+    Console.WriteLog(trim(m).length);              // 10
+    Console.WriteLog(upper(trim(m)));              // MIXED CASE
+    Console.WriteLog(lower(trim(m)));              // mixed case
+    Console.WriteLog(repeat("ab", 3));              // ababab
+    Console.WriteLog(reverse("abc"));               // cba
+    Console.WriteLog(reverse("ab\0c").length);      // 4
+    Console.WriteLog(replace("a-b-c", "-", "+"));    // a+b+c
+    Console.WriteLog(replace("a\0b", "\0", "-"));    // a-b, a zero is a byte to replace
+    Console.WriteLog(replace("aaa", "aa", "b"));     // ba
+    Console.WriteLog(pad_left("7", 3, 48));         // 007
+    Console.WriteLog(pad_right("7", 3, 48));        // 700
+    Console.WriteLog(pad_left("toolong", 3, 48));   // toolong, padding never truncates
 
     /* ---- named conversions, for the places a temporary would be silly ---- */
-    print(int_to_string(-1234));         // -1234
-    print(char_str(65));                 // A
-    print(char_str(65).length);          // 1
-    print("x" + int_to_string(7) + "y"); // x7y
+    Console.WriteLog(int_to_string(-1234));         // -1234
+    Console.WriteLog(char_str(65));                 // A
+    Console.WriteLog(char_str(65).length);          // 1
+    Console.WriteLog("x" + int_to_string(7) + "y"); // x7y
     return 0;
 }

@@ -1,2 +1,2 @@
 extern int c_scale(int v, int k);
-int main() { print(c_scale("nope", 2)); return 0; }
+int main() { Console.WriteLog(c_scale("nope", 2)); return 0; }

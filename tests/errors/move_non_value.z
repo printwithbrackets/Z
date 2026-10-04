@@ -4,7 +4,7 @@
 string g(string s) { return s; }
 
 int main() {
-    print(move g("a"));
-    print(move "b");
+    Console.WriteLog(move g("a"));
+    Console.WriteLog(move "b");
     return 0;
 }

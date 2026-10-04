@@ -30,9 +30,9 @@ void main() {
         total += v;
     }
     var p = makePair(1, 2);
-    print(sum(&p));
-    print(p.Sum());
-    print(addToTotal(&total, 10));
+    Console.WriteLog(sum(&p));
+    Console.WriteLog(p.Sum());
+    Console.WriteLog(addToTotal(&total, 10));
     // A for-loop phase variable and an unused-looking `i` are both read.
-    print(i);
+    Console.WriteLog(i);
 }

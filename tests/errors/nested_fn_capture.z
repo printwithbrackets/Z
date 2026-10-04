@@ -4,6 +4,6 @@
 int main() {
     var k = 7;
     int peek() { return k; }
-    print(peek());
+    Console.WriteLog(peek());
     return 0;
 }

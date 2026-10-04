@@ -18,7 +18,7 @@
  * is worse than it first looks: a `Vec` as a struct would be three words -- buffer,
  * length, capacity -- and copying it would leave two headers pointing at one
  * buffer. Growing one would reallocate, and the other would keep reading the old
- * array, so `var b = a; b.push(x); print(a.size());` would quietly be wrong. In
+ * array, so `var b = a; b.push(x); Console.WriteLog(a.size());` would quietly be wrong. In
  * a language whose structs copy, a struct holding a pointer is a trap, and a
  * growable container is the worst place to have one: the failure is invisible
  * until the two copies disagree.
@@ -100,7 +100,7 @@ class Vec<T> {
      * which length rather than read whatever the collector left there. */
     T at(int i) {
         if (i < 0 || i >= len) {
-            print("Vec index " + i + " out of range, length is " + len);
+            Console.WriteLog("Vec index " + i + " out of range, length is " + len);
             die(1);
         }
         return data[i];
@@ -138,7 +138,7 @@ class Vec<T> {
     /* Removes and returns the last element. */
     T pop() {
         if (len == 0) {
-            print("Vec.pop on an empty vector");
+            Console.WriteLog("Vec.pop on an empty vector");
             die(1);
         }
         len--;
@@ -156,7 +156,7 @@ class Vec<T> {
      * while preserving its order cannot be otherwise. */
     T removeAt(int i) {
         if (i < 0 || i >= len) {
-            print("Vec.removeAt index " + i + " out of range, length is " + len);
+            Console.WriteLog("Vec.removeAt index " + i + " out of range, length is " + len);
             die(1);
         }
         var out = data[i];
@@ -167,7 +167,7 @@ class Vec<T> {
 
     void insertAt(int i, T v) {
         if (i < 0 || i > len) {
-            print("Vec.insertAt index " + i + " out of range, length is " + len);
+            Console.WriteLog("Vec.insertAt index " + i + " out of range, length is " + len);
             die(1);
         }
         this.Grow(len + 1);
@@ -516,7 +516,7 @@ class Map<K,V> {
             used++;
         }
         if (keep != len) {
-            print("Map.rehash lost an entry: kept " + keep + ", rehashed " + len);
+            Console.WriteLog("Map.rehash lost an entry: kept " + keep + ", rehashed " + len);
             die(1);
         }
     }

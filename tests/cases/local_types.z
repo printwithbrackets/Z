@@ -13,12 +13,12 @@ int main() {
     // ---- a struct ----
     struct Local { int a; int b; }
     var v = new Local(3, 4);
-    print(v.a + v.b);
+    Console.WriteLog(v.a + v.b);
 
     // ---- a struct with a method ----
     struct WithMethod { int n; int Twice() { return n * 2; } }
     var w = new WithMethod(21);
-    print(w.Twice());
+    Console.WriteLog(w.Twice());
 
     // ---- a class, with virtual dispatch ----
     // A local interface and a local class. There is no base class to inherit
@@ -35,12 +35,12 @@ int main() {
         virtual int Id() { return id; }
     }
     var sh = new Square(5);
-    print(sh.Area());
-    print(sh.Id());
+    Console.WriteLog(sh.Area());
+    Console.WriteLog(sh.Id());
     // through an interface value, so the itab is what decides
     Shape asShape = sh;
-    print(asShape.Area());
-    print(asShape.Id());
+    Console.WriteLog(asShape.Area());
+    Console.WriteLog(asShape.Id());
 
     // ---- an enum, with an exhaustive match ----
     enum Colour { Red, Green, Blue }
@@ -49,8 +49,8 @@ int main() {
         Green => "g",
         Blue => "b"
     };
-    print(name(Green));
-    print(name(Red));
+    Console.WriteLog(name(Green));
+    Console.WriteLog(name(Red));
 
     // ---- referred to before it is declared ----
     // The pre-scan registers every type name, so this resolves.
@@ -59,6 +59,6 @@ int main() {
     var hold = new Holder(9);
     var wrap = new Wrapper(null);
     wrap.h = &hold;
-    print(wrap.h.n);
+    Console.WriteLog(wrap.h.n);
     return 0;
 }

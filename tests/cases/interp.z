@@ -1,6 +1,6 @@
 var name = "Z";
 var n = 3;
-print($"Hello, {name}!");
-print($"n={n}, n*n={n*n}");
-print($"no interp here");
-print($"nested {"inner"} ok");
+Console.WriteLog($"Hello, {name}!");
+Console.WriteLog($"n={n}, n*n={n*n}");
+Console.WriteLog($"no interp here");
+Console.WriteLog($"nested {"inner"} ok");

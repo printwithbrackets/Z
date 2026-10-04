@@ -6,9 +6,9 @@ int square(int n) {
     return n * n;
 }
 
-print(add(3, 4));
-print(square(5));
-print(add(square(2), add(1, 1)));
+Console.WriteLog(add(3, 4));
+Console.WriteLog(square(5));
+Console.WriteLog(add(square(2), add(1, 1)));
 
 int noReturn(int n) {
     if (n > 0) {
@@ -16,5 +16,5 @@ int noReturn(int n) {
     }
     return 0;
 }
-print(noReturn(5));
-print(noReturn(-1));
+Console.WriteLog(noReturn(5));
+Console.WriteLog(noReturn(-1));

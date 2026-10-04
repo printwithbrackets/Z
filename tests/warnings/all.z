@@ -9,18 +9,18 @@ int shadowing() {
     var x = 1;
     {
         var x = 2;
-        print(x);
+        Console.WriteLog(x);
     }
     return x;
 }
 
 int unreachable() {
     return 1;
-    print("never");
+    Console.WriteLog("never");
 }
 
 void main() {
-    print(unusedLocal(0));
-    print(shadowing());
-    print(unreachable());
+    Console.WriteLog(unusedLocal(0));
+    Console.WriteLog(shadowing());
+    Console.WriteLog(unreachable());
 }

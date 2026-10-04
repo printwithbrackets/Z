@@ -11,21 +11,21 @@ int main() {
         var a = 3; var b = 5; var c = 7; var d = 11;
         var sum = 0; var i = 0;
         while (i < 1000) { sum = sum + a * b + c * d - (a + c); i = i + 1; }
-        print(sum);                      // 1000 * 82
+        Console.WriteLog(sum);                      // 1000 * 82
     }
 
     // ---- solved: several updates to one accumulator, and a `for` header ----
     {
         var sum = 0;
         for (var i = 0; i < 100; i = i + 1) { sum += 2; sum -= 1; }
-        print(sum);                      // 100
+        Console.WriteLog(sum);                      // 100
     }
 
     // ---- solved: a downward loop, and a non-unit stride ----
     {
         var sum = 0; var i = 100;
         while (i > 0) { sum = sum + 3; i = i - 4; }
-        print(sum);                      // 25 iterations of +3
+        Console.WriteLog(sum);                      // 25 iterations of +3
     }
 
     // ---- solved: a constant start found by looking back, not by a `for` ----
@@ -33,14 +33,14 @@ int main() {
         var sum = 0; var i = 0;
         i = 5;                            // the start is here, not a declaration
         while (i < 9) { sum = sum + 1; i = i + 1; }
-        print(sum);                      // 4
+        Console.WriteLog(sum);                      // 4
     }
 
     // ---- not solved: the amount reads the accumulator, so it is not invariant
     {
         var sum = 0; var i = 0;
         while (i < 10) { sum = sum + sum; i = i + 1; }
-        print(sum);                      // 0
+        Console.WriteLog(sum);                      // 0
     }
 
     // ---- not solved: a string accumulator ----
@@ -50,21 +50,21 @@ int main() {
         var s = "";
         var i = 0;
         while (i < 5) { s = s + "x"; i = i + 1; }
-        print(s + "!");
+        Console.WriteLog(s + "!");
     }
 
     // ---- not solved: a call in the body ----
     {
         var n = 0; var i = 0;
         while (i < 5) { n = n + step(); i = i + 1; }
-        print(n);                        // 15
+        Console.WriteLog(n);                        // 15
     }
 
     // ---- not solved: an early exit changes the trip count ----
     {
         var sum = 0; var i = 0;
         while (i < 100) { if (i == 6) { break; } sum = sum + 1; i = i + 1; }
-        print(sum);                      // 6
+        Console.WriteLog(sum);                      // 6
     }
 
     // ---- not solved: `continue` ----
@@ -76,14 +76,14 @@ int main() {
             if (i % 2 == 0) { continue; }
             sum = sum + 1;
         }
-        print(sum);                      // 5
+        Console.WriteLog(sum);                      // 5
     }
 
     // ---- not solved: a multiply, which would need a power ----
     {
         var p = 1; var i = 0;
         while (i < 5) { p = p * 2; i = i + 1; }
-        print(p);                        // 32
+        Console.WriteLog(p);                        // 32
     }
 
     // ---- not solved: a start that is not a constant ----
@@ -91,7 +91,7 @@ int main() {
         var from = 3 + 1;                // folds to a constant, so this one *is* solved
         var sum = 0; var i = from;
         while (i < 7) { sum = sum + 1; i = i + 1; }
-        print(sum);                      // 3
+        Console.WriteLog(sum);                      // 3
     }
 
     return 0;

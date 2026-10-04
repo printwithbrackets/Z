@@ -2,8 +2,8 @@
 int main() {
     var t = true;
     var f = false;
-    print("t=" + t + " f=" + f);
-    print($"inline {t} and {f} and {1 == 1} and {1 == 2}");
-    print("num still works: " + 42 + " bool: " + t);
+    Console.WriteLog("t=" + t + " f=" + f);
+    Console.WriteLog($"inline {t} and {f} and {1 == 1} and {1 == 2}");
+    Console.WriteLog("num still works: " + 42 + " bool: " + t);
     return 0;
 }

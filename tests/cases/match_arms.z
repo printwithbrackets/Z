@@ -18,8 +18,8 @@ Result<int, string> parse(string s) {
 // An arm that concatenates: a fresh string in the arm that runs.
 int showOk(Result<int, string> r) {
     match (r) {
-        Ok(n) => print("ok " + int_to_string(n)),
-        Err(e) => print("err " + e),
+        Ok(n) => Console.WriteLog("ok " + int_to_string(n)),
+        Err(e) => Console.WriteLog("err " + e),
     };
     return 0;
 }
@@ -28,8 +28,8 @@ int showOk(Result<int, string> r) {
 // right shape.
 int showBoth(Result<int, string> r) {
     match (r) {
-        Ok(n) => print("value is " + int_to_string(n)),
-        Err(e) => print("failed with " + e + " (" + int_to_string(len(e)) + ")"),
+        Ok(n) => Console.WriteLog("value is " + int_to_string(n)),
+        Err(e) => Console.WriteLog("failed with " + e + " (" + int_to_string(len(e)) + ")"),
     };
     return 0;
 }
@@ -37,8 +37,8 @@ int showBoth(Result<int, string> r) {
 // Three arms, so the middle one is skipped as well as the last.
 int showThree(Result<int, string> r) {
     match (r) {
-        Ok(_) => print("one"),
-        Err(_) => print("two"),
+        Ok(_) => Console.WriteLog("one"),
+        Err(_) => Console.WriteLog("two"),
     };
     return 0;
 }
@@ -63,8 +63,8 @@ int main() {
         i = i + 1;
     }
 
-    print(nameOf(parse("42")));
-    print(nameOf(parse("q")));
-    print(len(nameOf(parse("42")) + nameOf(parse("42"))));
+    Console.WriteLog(nameOf(parse("42")));
+    Console.WriteLog(nameOf(parse("q")));
+    Console.WriteLog(len(nameOf(parse("42")) + nameOf(parse("42"))));
     return 0;
 }

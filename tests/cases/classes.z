@@ -28,8 +28,8 @@ class Circle {
 int main() {
     var s = new Square(5);
     var c = new Circle(2);
-    print(s.Name() + " " + s.Area());   // square 25
-    print(c.Name() + " " + c.Area());   // circle 12
+    Console.WriteLog(s.Name() + " " + s.Area());   // square 25
+    Console.WriteLog(c.Name() + " " + c.Area());   // circle 12
 
     // A single collection of unrelated types, which is what a base-typed array
     // used to be. Nothing here is a subtype of anything else.
@@ -38,16 +38,16 @@ int main() {
     shapes[1] = c;
     shapes[2] = new Square(3);
     for (auto sh : shapes) {
-        print(sh.Name() + " " + sh.Area());
+        Console.WriteLog(sh.Name() + " " + sh.Area());
     }
 
     // Dispatch is through the interface, not through a declared base type.
     var one = shapes[0];
-    print(one.Name());                   // square
-    print(one.Area());                   // 25
+    Console.WriteLog(one.Name());                   // square
+    Console.WriteLog(one.Area());                   // 25
 
     // A class method reached directly still works, and is not an interface call.
-    print(s.Area());                     // 25
+    Console.WriteLog(s.Area());                     // 25
 
     // A struct satisfies the same interface, so a collection need not be
     // homogeneous in the class/struct sense either.
@@ -59,7 +59,7 @@ int main() {
     }
     var mixed = new Shape[1];
     mixed[0] = new Rect(3, 4);
-    print(mixed[0].Name());              // rect
-    print(mixed[0].Area());              // 12
+    Console.WriteLog(mixed[0].Name());              // rect
+    Console.WriteLog(mixed[0].Area());              // 12
     return 0;
 }

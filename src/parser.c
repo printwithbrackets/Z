@@ -4,6 +4,15 @@
 
 #include "limits.h"
 
+#include "surface.h"
+
+/* How a diagnostic names the output builtin. A message that said `print` would be
+ * naming a spelling no program can write, which is the one thing a diagnostic must
+ * not do. The shipped surface spelling lives in surface.c's defaults; a project
+ * that renames it also renames what the message says, because a project that
+ * cannot write `Console.WriteLog` does not deserve to be told about it. */
+#define PRINT_SURFACE "Console.WriteLog"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -262,7 +271,34 @@ typedef struct {
      * different bodies may both declare `helper` and one symbol cannot serve
      * both. This maps the name the program writes to the symbol emitted. */
     struct LocalFn *local_fns;
+
+    /* The dialect this program is written in: the names a project writes mapped
+     * to the names the compiler knows. Consulted only where ordinary resolution
+     * has already failed, so it renames the standard library and the builtins
+     * without ever getting between a program and a name it declared itself. */
+    struct Surface *surf;
 } Parser;
+
+/* The internal name for `name`, or `name` itself. See the surface rules in
+ * surface.h; the short version is that this is a fallback, not a claim. */
+static const char *surf(Parser *p, const char *name) {
+    return surface_name(p->surf, name);
+}
+
+/* A method lookup that falls back to the dialect.
+ *
+ * Same rule as a type: the written name is tried first, so a project that has
+ * declared its own `append` on its own type keeps that one, and only a name that
+ * would otherwise be missing is looked up under its surface spelling. `v.push(x)`
+ * on a `TextBuffer` therefore reaches the standard library's `append`, and
+ * `v.push(x)` on a type of the project's own with a `push` method reaches the
+ * project's. */
+static StructMethod *find_method(Parser *p, StructDef *sd, const char *name) {
+    StructMethod *m = struct_find_method(sd, name);
+    if (m == NULL && p->surf != NULL)
+        m = struct_find_method(sd, surf(p, name));
+    return m;
+}
 
 static int is_kind(Type *t, TypeKind k);
 
@@ -404,6 +440,8 @@ static ConstDef *const_find(Parser *p, const char *name);
 static Expr *const_expr(Parser *p, ConstDef *c, Span span);
 static int const_fold_static(Parser *p, Expr *e, long long *out);
 
+
+
 /* ---- token helpers ---- */
 
 static Token *peek(Parser *p, int off) {
@@ -504,10 +542,18 @@ static Type *base_type_or_name(Parser *p, Token *t) {
         if (p->inst_sdef != NULL && p->inst_srcname != NULL &&
             strcmp(t->text, p->inst_srcname) == 0)
             return type_find_struct(p->ty, p->inst_sdef->name);
+        /* The written name is tried first and the dialect second, so a project
+         * that declares its own `TextBuffer` gets its own rather than the
+         * standard library's `StringBuilder` under that name. */
         Type *st = type_find_struct(p->ty, t->text);
+        if (st == NULL)
+            st = type_find_struct(p->ty, surf(p, t->text));
         if (st != NULL)
             return st;
-        return type_find_union(p->ty, t->text);
+        Type *un = type_find_union(p->ty, t->text);
+        if (un == NULL)
+            un = type_find_union(p->ty, surf(p, t->text));
+        return un;
     }
     return NULL;
 }
@@ -1640,7 +1686,7 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
 
     /* A property: `type Name { ... }` reads as a zero-argument method. */
     if (!is_ctor && j < p->ntoks && p->toks[j].kind == T_LBRACE) {
-        if (struct_find_method(sd, mname) != NULL)
+        if (find_method(p, sd, mname) != NULL)
             return i;
         Parser sub = *p;
         sub.pos = tstart;
@@ -1693,7 +1739,7 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
      * not call a method written below it -- the failure was invisible until
      * something needed a sibling call, and then the "undefined method" pointed at
      * a method that was right there in the file. */
-    if (is_ctor || struct_find_method(sd, mname) != NULL)
+    if (is_ctor || find_method(p, sd, mname) != NULL)
         return j;
     /* The types come from the real parser, not from a token scan.
      *
@@ -3117,7 +3163,32 @@ static StructDef *resolve_gtype(Parser *p, GenericType *g, Type **args, int narg
     return instantiate_type(p, g, args, span);
 }
 
-static Expr *parse_call(Parser *p, char *name, Span span) {
+/* `via_surface` says the name reached this call through the qualified surface
+ * table rather than off a token. It is what keeps `print` reachable: the internal
+ * name is still `print`, but a program writes `Console.WriteLog`, so without this
+ * a bare `Console.WriteLog(...)` would find the same builtin and quietly keep working. */
+static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
+
+    /* A plain-identifier surface name: `say(...)` for the `print` this compiler
+     * knows, or `magnitude(...)` for `abs`.
+     *
+     * Done by rewriting `name` in place rather than by re-entering this function.
+     * Re-entering would be the shorter line and it is wrong: by here the argument
+     * list has been consumed, so a second pass would read the first argument's
+     * first token as its opening paren. Rewriting also means everything below --
+     * the argument types, the intrinsic table, the user-function shadowing check
+     * -- sees the internal name, which is what it is written in terms of.
+     *
+     * A declared function or generic of the same spelling is the user's and wins,
+     * so those are asked first. The whole rule is "surface names are a fallback":
+     * ordinary resolution always gets the first turn. */
+    if (!via_surface) {
+        const char *mapped = surface_lookup(p->surf, name, strlen(name));
+        if (mapped != NULL && find_sig(p, name) == NULL && find_generic(p, name) == NULL) {
+            name = (char *)mapped;
+            via_surface = 1;
+        }
+    }
     /* `base(args)` called a base class constructor, and went with inheritance.
      * It is a diagnostic rather than a silent undefined function, because a
      * program carried over from v1 will have one and the reader needs to know
@@ -3207,10 +3278,16 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         return e;
     }
 
-    /* Builtin print. */
-    if (strcmp(name, "print") == 0) {
+    /* Built-in print, reached only through a surface name.
+     *
+     * There is deliberately no bare `print` any more: `Console.WriteLog` is how a
+     * program says it, and a name the table defines is one place to change if the
+     * spelling changes. The internal name stays `print` -- the runtime symbol,
+     * the emitted call and this check all predate the surface table, and none of
+     * them is a thing a program can see. */
+    if (via_surface && strcmp(name, "print") == 0) {
         if (n != 1) {
-            diag_error(span, "print expects 1 argument but got %d", n);
+            diag_error(span, "'%s' expects 1 argument but got %d", PRINT_SURFACE, n);
             e->type = type_void(p->ty);
             return e;
         }
@@ -3221,8 +3298,8 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
         if (!is_unk(at0) && !is_kind(at0, TK_INT) && !is_kind(at0, TK_BOOL) &&
             !is_kind(at0, TK_STRING) && !is_kind(at0, TK_F64)) {
             diag_error_code(span, "type_mismatch",
-                            "print expects 'int', 'bool', 'float' or 'string' but got '%s'",
-                            type_name(p->ty, at0));
+                            "'%s' expects 'int', 'bool', 'float' or 'string' but got '%s'",
+                            PRINT_SURFACE, type_name(p->ty, at0));
         }
         e->type = type_void(p->ty);
         return e;
@@ -3374,7 +3451,14 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
 
     /* User function. A function declared inside another one answers to a mangled
      * symbol, and its signature was filed under that symbol, so both the lookup
-     * and the emitted call go through the same resolution. */
+     * and the emitted call go through the same resolution.
+     *
+     * The dialect is consulted here, before the lookup rather than instead of it:
+     * the internal name has to be what is searched for and what is emitted, and
+     * the caller's `name` is the surface spelling. A program that declares its
+     * own function under the surface name has already claimed it, because this
+     * runs only after `find_sig` below has had a chance to say so -- see the
+     * retry there. */
     const char *sym = resolve_fn_sym(p, name);
     Sig *s = find_sig(p, sym);
     if (s == NULL) {
@@ -3686,7 +3770,7 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
              * really are called through the value that is the field. */
             if (p->take_method_addr && is_kind(st, TK_STRUCT) && !fp_field && !at(p, T_LPAREN) &&
                 struct_find_field(st->sdef, name) == NULL) {
-                StructMethod *bm = struct_find_method(st->sdef, name);
+                StructMethod *bm = find_method(p, st->sdef, name);
                 if (bm == NULL) {
                     suggest_member(st->sdef, "method", name);
                     diag_error_code(span, "no_such_method", "type %s has no method '%s'",
@@ -3718,9 +3802,15 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                     for (int i = 0; i < np; i++)
                         pts[i] = bm->ptypes[i];
                 }
-                char *mang = arena_alloc(p->arena, strlen(st->sdef->name) + strlen(name) + 3);
-                snprintf(mang, strlen(st->sdef->name) + strlen(name) + 3, "%s__%s", st->sdef->name,
-                         name);
+                /* Mangle against the method's own name, not the one that was
+                 * written. Under a dialect those differ -- `&b.push` reaches the
+                 * standard library's `append` -- and the symbol has to be the one
+                 * the method was emitted under or the link fails on a name that
+                 * was never defined. */
+                const char *iname = bm->name;
+                char *mang = arena_alloc(p->arena, strlen(st->sdef->name) + strlen(iname) + 3);
+                snprintf(mang, strlen(st->sdef->name) + strlen(iname) + 3, "%s__%s",
+                         st->sdef->name, iname);
                 Expr *mp = new_expr(p, E_MPTR, span);
                 mp->name = mang;
                 mp->lhs = rcv;
@@ -3733,7 +3823,7 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 continue;
             }
             if (at(p, T_LPAREN) && is_kind(st, TK_STRUCT) && !fp_field) {
-                StructMethod *m = struct_find_method(st->sdef, name);
+                StructMethod *m = find_method(p, st->sdef, name);
                 if (m == NULL) {
                     suggest_member(st->sdef, "method", name);
                     diag_error_code(span, "no_such_method", "type %s has no method '%s'",
@@ -3790,11 +3880,15 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 }
                 /* Mangle against the DECLARING class so inherited non-virtual
                  * methods call the base implementation. */
-                StructDef *owner = struct_method_owner(st->sdef, name);
+                /* The method's own name again, for the same reason: the owner is
+                 * found by the internal name and the symbol is built from it. */
+                const char *iname = m->name;
+                StructDef *owner = struct_method_owner(st->sdef, iname);
                 if (owner == NULL)
                     owner = st->sdef;
-                char *mang = arena_alloc(p->arena, strlen(owner->name) + strlen(name) + 3);
-                snprintf(mang, strlen(owner->name) + strlen(name) + 3, "%s__%s", owner->name, name);
+                char *mang = arena_alloc(p->arena, strlen(owner->name) + strlen(iname) + 3);
+                snprintf(mang, strlen(owner->name) + strlen(iname) + 3, "%s__%s", owner->name,
+                         iname);
                 if (st->sdef->is_class && m->is_virtual) {
                     /* Dynamic dispatch through the receiver's vtable. */
                     Expr *call = new_expr(p, E_VCALL, span);
@@ -4048,7 +4142,7 @@ static Expr *parse_new_args(Parser *p, Span start, Type *st, const char *written
     if (st->sdef->is_class) {
         /* `new C(args)`: heap object. A constructor is a method named like the
          * class; if absent, fields are simply zero-initialized. */
-        StructMethod *ctor = struct_find_method(st->sdef, st->sdef->name);
+        StructMethod *ctor = find_method(p, st->sdef, st->sdef->name);
         Expr *e = new_expr(p, E_NEWCLASS, start);
         e->args = args;
         e->nargs = n;
@@ -4130,6 +4224,11 @@ static Expr *parse_new(Parser *p) {
         advance(p);
         advance(p); /* '(' */
         Type *st = type_find_struct(p->ty, sname);
+        /* The dialect is the second attempt, not the first: a project that has
+         * declared its own `TextBuffer` keeps it. `parse_new_args` is handed the
+         * written name so the diagnostic quotes what the program wrote. */
+        if (st == NULL)
+            st = type_find_struct(p->ty, surf(p, sname));
         if (st == NULL) {
             suggest_in_scope(p, SK_TYPE, "type", sname);
             diag_error_code(start, "unknown_type", "unknown type '%s'", sname);
@@ -4263,6 +4362,33 @@ static Expr *parse_interp(Parser *p, Token *t) {
     return acc;
 }
 
+static Expr *parse_qualified(Parser *p, char *base, Span span) {
+    /* The base is still the current token, so the dot is one past it. */
+    if (peek(p, 1)->kind != T_DOT)
+        return NULL;
+    Token *member = peek(p, 2);
+    if (member->kind != T_IDENT)
+        return NULL;
+    /* Only a call. `Console.Thing` without an argument list is not a function
+     * being named, and treating it as one would report an arity error about a
+     * spelling the programmer may have meant as something else entirely. */
+    if (peek(p, 3)->kind != T_LPAREN)
+        return NULL;
+    size_t n = strlen(base) + 1 + strlen(member->text);
+    char *joined = arena_alloc(p->arena, n + 1);
+    snprintf(joined, n + 1, "%s.%s", base, member->text);
+    const char *internal = surface_lookup(p->surf, joined, n);
+    if (internal == NULL)
+        return NULL;
+    /* A declared name of the same spelling is the user's, not the table's. */
+    if (lookup_var(p, base) != NULL)
+        return NULL;
+    advance(p); /* the base name */
+    advance(p); /* the '.' */
+    advance(p); /* the member name, leaving '(' as the current token */
+    return parse_call(p, (char *)internal, span, 1);
+}
+
 static Expr *parse_primary(Parser *p) {
     Token *t = cur(p);
     switch (t->kind) {
@@ -4324,6 +4450,18 @@ static Expr *parse_primary(Parser *p) {
     case T_IDENT: {
         char *name = t->text;
         Span span = t->span;
+        /* A qualified surface name: `Console.WriteLog(...)`.
+         *
+         * Z has no namespaces, so `A.B(...)` is otherwise a member call on
+         * something named `A`, and a name that is not a variable is an error
+         * before the dot is ever reached. The check lives here, at the one point
+         * where a name becomes a value, because that is the only place that can
+         * tell an ordinary identifier from the first half of a qualified one. */
+        {
+            Expr *q = parse_qualified(p, name, span);
+            if (q != NULL)
+                return q;
+        }
         /* A local holding a function pointer is called through the pointer, so
          * this is decided before the ordinary function lookup, which would
          * report the name as undefined. */
@@ -4467,7 +4605,7 @@ static Expr *parse_primary(Parser *p) {
                 e->type = want != NULL ? want : type_find_union(p->ty, owner->name);
                 return parse_postfix(p, e);
             }
-            return parse_postfix(p, parse_call(p, name, span));
+            return parse_postfix(p, parse_call(p, name, span, 0));
         }
         Var *v = lookup_var(p, name);
         if (v == NULL) {
@@ -6799,7 +6937,7 @@ static Stmt *parse_range_for(Parser *p, Span start) {
     /* A by-reference element is a *pointer* to the element, so the variable is
      * declared as one. Declaring it as the element type and storing an address
      * in it type-checks and then reads the address as if it were the value --
-     * `print(x)` printed the element's location rather than the element, and
+     * `Console.WriteLog(x)` printed the element's location rather than the element, and
      * `x = 5` overwrote the location. The body then works through `*`, exactly
      * as a hand-written `var p = &v.data[i]` does. */
     int elem_slot = declare_var(p, name, by_ref ? type_ptr(p->ty, cbase) : cbase);
@@ -7707,7 +7845,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
             /* One destructor per type. A second one would emit the same symbol
              * twice and fail in the assembler, which is a worse error than
              * saying so here. */
-            if (sd != NULL && struct_find_method(sd, dtor_name(p, sd)) != NULL) {
+            if (sd != NULL && find_method(p, sd, dtor_name(p, sd)) != NULL) {
                 diag_error_code(dspan, "duplicate_destructor", "'%s' already has a destructor",
                                 name);
             }
@@ -7748,7 +7886,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
              * than the alternative, which is a method that silently does not
              * exist -- or an `nmethods` with two entries emitting the same
              * symbol twice and failing in the assembler. */
-            if (struct_find_method(sd, name) != NULL) {
+            if (find_method(p, sd, name) != NULL) {
                 diag_error_code(cur(p)->span, "duplicate_constructor",
                                 "%s '%s' already has a constructor; Z has no constructor "
                                 "overloading, so give the second one a different name",
@@ -7880,7 +8018,7 @@ static Stmt *parse_stmt(Parser *p) {
 
     /* A function declared inside another function, written where a statement
      * goes. `at_func_decl` requires a type, then a name, then '(', so this
-     * cannot swallow `print(x);` (no leading type), `var v = 1;` (`var` is not a
+     * cannot swallow `Console.WriteLog(x);` (no leading type), `var v = 1;` (`var` is not a
      * type token), or `P p = ...;` (an '=' where the '(' would be). It also
      * tolerates a leading `extern`/`export`, which parse_func then rejects. */
     if (at_func_decl(p)) {
@@ -8119,10 +8257,12 @@ static Stmt *parse_stmt(Parser *p) {
     return s;
 }
 
-Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, int opt_level) {
+Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, int opt_level,
+                    Surface *surf) {
     Parser p;
     memset(&p, 0, sizeof p);
     p.arena = arena;
+    p.surf = surf;
     p.toks = toks;
     p.ntoks = ntoks;
     {

@@ -86,16 +86,16 @@ int main() {
 
     var scaled = 0;
     for (var i = 0; i < 10; i++) { scaled = i * 5; }
-    print(scaled);            // 45 -- the last iteration, not the first
+    Console.WriteLog(scaled);            // 45 -- the last iteration, not the first
 
     var total = 0;
     for (var j = 0; j < 100; j++) { total = total + j; }
-    print(total);             // 4950
+    Console.WriteLog(total);             // 4950
 
     /* A hoisted read of one local and a written read of another. */
     var bias = 7;
     var acc = 0;
     for (var k = 0; k < 10; k++) { acc = acc + bias * 2 + k; }
-    print(acc);               // 185 -- 10 * 14 + (0 + ... + 9)
+    Console.WriteLog(acc);               // 185 -- 10 * 14 + (0 + ... + 9)
     return 0;
 }

@@ -1,0 +1,8 @@
+# The dialect this test is written in. One mapping per line:
+#   what a program writes = what the compiler calls it
+
+say = print
+Buffer = StringBuilder
+add = append
+addInt = appendInt
+finish = toString

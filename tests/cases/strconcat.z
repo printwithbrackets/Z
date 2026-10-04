@@ -1,4 +1,4 @@
 var a = "Hello";
 var b = "World";
-print(a + ", " + b);
-print("n=" + 5);
+Console.WriteLog(a + ", " + b);
+Console.WriteLog("n=" + 5);

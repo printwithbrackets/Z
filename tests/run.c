@@ -184,6 +184,7 @@ int main(int argc, char **argv) {
         "rangefor",
         "addrof_field",
         "destructors",
+        "surface",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -199,7 +200,17 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        /* A case with a sibling <name>.dialect is compiled in that dialect, named
+         * with --surface. Without this the manifest would have to sit beside the
+         * source, and one beside a whole directory would apply to every case in
+         * it -- which is a shared global setting a test suite cannot have. */
+        char dialect_path[512];
+        snprintf(dialect_path, sizeof dialect_path, "%s/%s.dialect", case_dir, cases[i]);
+        char dialect_flag[600] = "";
+        if (access(dialect_path, R_OK) == 0)
+            snprintf(dialect_flag, sizeof dialect_flag, "--surface=%s", dialect_path);
+        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s %s 2>&1", zc, path,
+                 dialect_flag, opt_flag());
         char build_err[1 << 16];
         int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
         if (rc != 0) {
@@ -687,9 +698,9 @@ int main(int argc, char **argv) {
         remove(marker_arg);
         mkdir(dir, 0700);
 
-        static const char plain_src[] = "int main() { print(42); return 0; }\n";
+        static const char plain_src[] = "int main() { Console.WriteLog(42); return 0; }\n";
         static const char link_src[] = "extern int c_scale(int v, int k);\n"
-                                       "int main() { print(c_scale(7, 6)); return 0; }\n";
+                                       "int main() { Console.WriteLog(c_scale(7, 6)); return 0; }\n";
         static const char csrc[] = "long c_scale(long v, long k) { return v * k; }\n";
         remove(plain_out);
         remove(out_path);

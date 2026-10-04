@@ -1,2 +1,2 @@
 int f(int a) { return a; }
-print(f(1, 2));
+Console.WriteLog(f(1, 2));

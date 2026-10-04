@@ -25,29 +25,29 @@ int describe(int flags) {
 int scaled(int n) { return n * MAX + HALF; }
 
 int main() {
-    print(MAX);        // 100
-    print(HALF);       // 50
-    print(FLAGS);      // 7
-    print(SHIFTED);    // 1024
-    print(MASKED);     // 6
-    print(NEG);        // -7
-    print(WRAPPED);    // 1099511627776
-    print(ON);         // true
-    print(OFF);        // false
-    print(NAME);       // z
-    print(scaled(2));  // 250
+    Console.WriteLog(MAX);        // 100
+    Console.WriteLog(HALF);       // 50
+    Console.WriteLog(FLAGS);      // 7
+    Console.WriteLog(SHIFTED);    // 1024
+    Console.WriteLog(MASKED);     // 6
+    Console.WriteLog(NEG);        // -7
+    Console.WriteLog(WRAPPED);    // 1099511627776
+    Console.WriteLog(ON);         // true
+    Console.WriteLog(OFF);        // false
+    Console.WriteLog(NAME);       // z
+    Console.WriteLog(scaled(2));  // 250
 
-    print(describe(F_ALIVE));                    // 1
-    print(describe(F_ALIVE | F_ELITE));          // 3
-    print(describe(F_ELITE));                    // 3
+    Console.WriteLog(describe(F_ALIVE));                    // 1
+    Console.WriteLog(describe(F_ALIVE | F_ELITE));          // 3
+    Console.WriteLog(describe(F_ELITE));                    // 3
 
     /* A const works anywhere a literal does, including array sizes. */
     var a = new int[MAX / 50];
     a[0] = HALF;
-    print(a[0]);        // 50
-    print(a.length);    // 2
+    Console.WriteLog(a[0]);        // 50
+    Console.WriteLog(a.length);    // 2
 
     /* And consts are compile-time constant, so they fold. */
-    print(MAX / 4 + 1); // 26
+    Console.WriteLog(MAX / 4 + 1); // 26
     return 0;
 }

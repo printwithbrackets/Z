@@ -33,16 +33,16 @@ int main() {
     animals[0] = d; animals[1] = c;
     var p = new Vec(1, 2); var q = new Vec(3, 4);
     var r = p + q;
-    print(animals[0].Speak() + "/" + animals[1].Speak());  // Rex woof/meow
-    print(animals[0].Id() + " " + animals[1].Id());        // 1 2
-    print("v " + r.x + "," + r.y);                          // v 4,6
-    print(apply(Add(2, 3)) + " " + apply(Mul(4, 5)) + " " + apply(Neg(7)));
-    print(maxOf(v3, v4) + " " + maxOf(9, 2));               // 40 9
+    Console.WriteLog(animals[0].Speak() + "/" + animals[1].Speak());  // Rex woof/meow
+    Console.WriteLog(animals[0].Id() + " " + animals[1].Id());        // 1 2
+    Console.WriteLog("v " + r.x + "," + r.y);                          // v 4,6
+    Console.WriteLog(apply(Add(2, 3)) + " " + apply(Mul(4, 5)) + " " + apply(Neg(7)));
+    Console.WriteLog(maxOf(v3, v4) + " " + maxOf(9, 2));               // 40 9
     var acc = 0;
     for (var i = 0; i < 50; i = i + 1) {
         if (i % 2 == 0) { acc = acc + d.Id() + i; } else { acc = acc - i; }
         if (acc > 20) { acc = acc % 17; }
     }
-    print("acc " + acc);
+    Console.WriteLog("acc " + acc);
     return 0;
 }

@@ -1,0 +1,46 @@
+// A project manifest renames what the compiler already has.
+//
+// The names a program writes for a global are data, not syntax: `z.surface` maps
+// each spelling a project uses to the name the compiler knows. This is the whole
+// of it -- nothing here is a second compiler, a second runtime, or a second set
+// of emitted symbols. `say` reaches the `print` that has always been there, and
+// the x86-64 below is the same x86-64 the undialected spelling produces.
+//
+// What makes it safe is that a surface name is a *fallback*. Every lookup below
+// tries the written name first, so a project that declares its own `say` keeps
+// its own, and a local variable named after a surface name is never renamed out
+// from under the code that reads it. `wins` is the test of exactly that.
+
+class TextBuffer {
+    string text;
+    TextBuffer() { this.text = ""; }
+    void push(string s) { this.text = this.text + s; }
+    void pushInt(int v) { this.text = this.text + int_to_string(v); }
+    string done() { return this.text; }
+}
+
+int main() {
+    // The standard library's own builder, under this project's names.
+    var b = new Buffer();
+    b.add("total: ");
+    b.addInt(42);
+    say(b.finish());
+
+    // A type and a method this project declared, reached by the names it wrote.
+    var own = new TextBuffer();
+    own.push("mine ");
+    own.pushInt(7);
+    say(own.done());
+
+    // The builtins are renamed like everything else.
+    say(int_to_string(abs(0 - 5)) + "," + max(3, 9) + "," + clamp(15, 0, 10));
+
+    // The declaration wins over the mapping: this project's `say` above is a
+    // *different* function from the one `say = print` names, and a program that
+    // declares the spelling keeps the declaration.
+    say(shout("quiet"));
+
+    return 0;
+}
+
+string shout(string s) { return upper(s) + "!"; }

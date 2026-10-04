@@ -9,6 +9,6 @@ int main() {
         s = i * 3;
         i = i + 1;
     }
-    print(s);
+    Console.WriteLog(s);
     return 0;
 }

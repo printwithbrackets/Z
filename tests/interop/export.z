@@ -13,9 +13,9 @@ int internal(int v) { return v + 100; }
 extern void c_call_back();
 
 int main() {
-    print(z_triple(7));      // 21
-    print(z_sum_to(10));     // 55
-    print(internal(1));      // 101
+    Console.WriteLog(z_triple(7));      // 21
+    Console.WriteLog(z_sum_to(10));     // 55
+    Console.WriteLog(internal(1));      // 101
     c_call_back();
     return 0;
 }

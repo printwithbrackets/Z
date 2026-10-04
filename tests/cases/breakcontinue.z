@@ -6,14 +6,14 @@ int main() {
         i = i + 1;
         if (i > 5) { break; }
     }
-    print(i);                                  // 6
+    Console.WriteLog(i);                                  // 6
 
     var s = 0;
     for (var k = 0; k < 10; k = k + 1) {
         if (k < 3) { continue; }
         s = s + k;
     }
-    print(s);                                  // 42
+    Console.WriteLog(s);                                  // 42
 
     /* break leaves the innermost loop only */
     var n = 0;
@@ -23,7 +23,7 @@ int main() {
             n = n + 1;
         }
     }
-    print(n);                                  // 3
+    Console.WriteLog(n);                                  // 3
 
     var t = 0;
     var m = 0;
@@ -32,7 +32,7 @@ int main() {
         if (m % 2 == 0) { continue; }
         t = t + m;
     }
-    print(t);                                  // 25
+    Console.WriteLog(t);                                  // 25
 
     var u = 0;
     var arr = new int[4];
@@ -40,12 +40,12 @@ int main() {
         u = u + 1;
         if (u == 2) { break; }
     }
-    print(u);                                  // 2
+    Console.WriteLog(u);                                  // 2
 
     /* a loop with no exit condition other than break */
     var w = 0;
     while (w < 100) { w = w + 7; if (w > 40) { break; } }
-    print(w);                                  // 42
+    Console.WriteLog(w);                                  // 42
 
     /* break/continue inside a switch-free if chain, and a do-once body */
     var z = 0;
@@ -54,6 +54,6 @@ int main() {
         if (q == 4) { break; }
         z = z + q;
     }
-    print(z);                                  // 0+1+3 = 4
+    Console.WriteLog(z);                                  // 0+1+3 = 4
     return 0;
 }

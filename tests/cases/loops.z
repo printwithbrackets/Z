@@ -1,6 +1,6 @@
 var i = 0;
 while (i < 3) {
-    print(i);
+    Console.WriteLog(i);
     i = i + 1;
 }
 var sum = 0;
@@ -9,8 +9,8 @@ while (i <= 5) {
     sum = sum + i;
     i = i + 1;
 }
-print(sum);
+Console.WriteLog(sum);
 while (false) {
-    print("never");
+    Console.WriteLog("never");
 }
-print("end");
+Console.WriteLog("end");

@@ -14,7 +14,7 @@ int main() {
         t = cstep(t);
         i = i + 1;
     }
-    print(s);
-    print(t);
+    Console.WriteLog(s);
+    Console.WriteLog(t);
     return 0;
 }

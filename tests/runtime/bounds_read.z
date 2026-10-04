@@ -3,6 +3,6 @@
 int main() {
     var a = new int[3];
     a[0] = 10;
-    print(a[5]);
+    Console.WriteLog(a[5]);
     return 0;
 }

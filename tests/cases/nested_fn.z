@@ -30,55 +30,55 @@ int other() {
 }
 
 int main() {
-    print(outer());
-    print(other());
+    Console.WriteLog(outer());
+    Console.WriteLog(other());
 
     // ---- recursion ----
     int fact(int n) {
         if (n < 2) { return 1; }
         return n * fact(n - 1);
     }
-    print(fact(5));
+    Console.WriteLog(fact(5));
 
     // ---- struct parameters, by value and by pointer ----
     int sumFields(P q) { return q.x + q.y; }
     int bumpX(P* q, int by) { q.x = q.x + by; return q.x; }
     var p = new P(3, 4);
-    print(sumFields(p));
-    print(bumpX(&p, 10));
-    print(p.x);
+    Console.WriteLog(sumFields(p));
+    Console.WriteLog(bumpX(&p, 10));
+    Console.WriteLog(p.x);
 
     // ---- a float parameter and result ----
     float half(float v) { return v / 2.0; }
-    print(half(5.0));
+    Console.WriteLog(half(5.0));
 
     // ---- an expression body ----
     int square(int n) => n * n;
-    print(square(7));
+    Console.WriteLog(square(7));
 
     // ---- as a function pointer, and passed as one ----
     int dbl(int n) { return n * 2; }
     var fp = &dbl;
-    print(fp(21));
-    print(apply(&dbl, 5));
+    Console.WriteLog(fp(21));
+    Console.WriteLog(apply(&dbl, 5));
 
     // ---- calling a sibling declared before it ----
     int b(int n) { return n * 3; }
     int a(int n) { return b(n) + 1; }
-    print(a(2));
+    Console.WriteLog(a(2));
 
     // ---- declared inside a nested block ----
     {
         int scoped(int n) { return n + 100; }
-        print(scoped(1));
+        Console.WriteLog(scoped(1));
     }
 
     // ---- declared inside a method, a loop body, and a conditional ----
-    print(new Box(3).Scaled(5));
+    Console.WriteLog(new Box(3).Scaled(5));
     var i = 0;
     while (i < 2) {
         int step(int n) { return n + 1; }
-        print(step(i));
+        Console.WriteLog(step(i));
         i = i + 1;
     }
     if (true) {
@@ -86,14 +86,14 @@ int main() {
             if (a > b) { return a; }
             return b;
         }
-        print(pick(3, 9));
+        Console.WriteLog(pick(3, 9));
     }
 
     // ---- a function name and a variable of the same name coexist ----
     // They live in different namespaces, as in C.
     var f = 1;
     int f2(int n) { return n; }
-    print(f2(3));
-    print(f);
+    Console.WriteLog(f2(3));
+    Console.WriteLog(f);
     return 0;
 }

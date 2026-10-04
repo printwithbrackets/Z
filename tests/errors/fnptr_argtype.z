@@ -1,2 +1,2 @@
 int ident(int x) { return x; }
-int main() { var f = &ident; print(f("nope")); return 0; }
+int main() { var f = &ident; Console.WriteLog(f("nope")); return 0; }

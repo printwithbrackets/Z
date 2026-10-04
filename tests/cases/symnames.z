@@ -23,25 +23,25 @@ int rnd(int a) { return a + 1; }
 int z_rnd(int a) { return a * 2; }
 
 int main() {
-    print(rnd(3));        // 4
-    print(z_rnd(3));      // 6
-    print(near(1));       // 2
-    print(far(3));        // 6
-    print(byte(9));       // 8
-    print(word(4));       // 8
-    print(dword(5));      // 25
-    print(qword(7));      // -7
-    print(short(1));      // 101
-    print(offset(1));     // 201
-    print(size(1));       // 301
-    print(length(1));     // 401
-    print(seg(1));        // 501
+    Console.WriteLog(rnd(3));        // 4
+    Console.WriteLog(z_rnd(3));      // 6
+    Console.WriteLog(near(1));       // 2
+    Console.WriteLog(far(3));        // 6
+    Console.WriteLog(byte(9));       // 8
+    Console.WriteLog(word(4));       // 8
+    Console.WriteLog(dword(5));      // 25
+    Console.WriteLog(qword(7));      // -7
+    Console.WriteLog(short(1));      // 101
+    Console.WriteLog(offset(1));     // 201
+    Console.WriteLog(size(1));       // 301
+    Console.WriteLog(length(1));     // 401
+    Console.WriteLog(seg(1));        // 501
 
     /* a method and a virtual slot go through the same mangling */
     var s = new S(3);
-    print(s.v);           // 3
+    Console.WriteLog(s.v);           // 3
 
     /* recursion through a mangled name */
-    print(near(near(near(0))));  // 3
+    Console.WriteLog(near(near(near(0))));  // 3
     return 0;
 }

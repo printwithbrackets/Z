@@ -2,6 +2,6 @@ int main() {
     var a = new int[2];
     a[0] = 1;
     var i = -1;
-    print(a[i]);
+    Console.WriteLog(a[i]);
     return 0;
 }

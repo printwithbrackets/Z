@@ -10,7 +10,7 @@ int main() {
         b = b + 2;
         i = i + 1;
     }
-    print(a);
-    print(b);
+    Console.WriteLog(a);
+    Console.WriteLog(b);
     return 0;
 }

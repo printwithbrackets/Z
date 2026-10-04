@@ -1,2 +1,2 @@
-:9:28: error: expected ';' but found end of file
-print(greeting + ", its me")
+:9:39: error: expected ';' but found end of file
+Console.WriteLog(greeting + ", its me")

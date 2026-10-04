@@ -11,11 +11,11 @@ int twice(int n) => n * 2;
 
 int main() {
     var v = new Vec(3, 4);
-    print(v.Sum());
-    print(v.Scaled(10));
-    print(v.Mag2());
-    print(v.Sum2());
-    print(v.Sum() + v.Scaled(2));
-    print(twice(21));
+    Console.WriteLog(v.Sum());
+    Console.WriteLog(v.Scaled(10));
+    Console.WriteLog(v.Mag2());
+    Console.WriteLog(v.Sum2());
+    Console.WriteLog(v.Sum() + v.Scaled(2));
+    Console.WriteLog(twice(21));
     return 0;
 }

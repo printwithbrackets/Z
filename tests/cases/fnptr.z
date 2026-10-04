@@ -16,7 +16,7 @@ P mkpair(int a, int b) { var p = new P(a, b); return p; }
 
 struct Holder { fn(int) -> int f; int tag; }
 
-void apply_twice(fn(int) -> int f, int v) { print(f(f(v))); return; }
+void apply_twice(fn(int) -> int f, int v) { Console.WriteLog(f(f(v))); return; }
 int pick(int k, fn(int) -> int a, fn(int) -> int b) {
     if (k == 0) { return a(10); }
     return b(10);
@@ -26,54 +26,54 @@ int relay(fn(int) -> int g, int v) { return g(v); }
 int main() {
     var a = &add1;
     var b = &add2;
-    print(a(1)); print(b(1));               // 2 3
+    Console.WriteLog(a(1)); Console.WriteLog(b(1));               // 2 3
 
     /* a pointer to a function is a value like any other */
-    print(a == b ? 1 : 0);                 // 0
-    print(a == a ? 1 : 0);                 // 1
-    print(a != b ? 1 : 0);                 // 1
+    Console.WriteLog(a == b ? 1 : 0);                 // 0
+    Console.WriteLog(a == a ? 1 : 0);                 // 1
+    Console.WriteLog(a != b ? 1 : 0);                 // 1
 
     /* passed and returned through parameters */
     apply_twice(&dbl, 3);                  // 12
-    print(pick(0, &add1, &add2));          // 11
-    print(pick(1, &add1, &add2));          // 12
-    print(pick(1, &neg, &dbl));            // 20
-    print(relay(&ident, 1));               // 1
+    Console.WriteLog(pick(0, &add1, &add2));          // 11
+    Console.WriteLog(pick(1, &add1, &add2));          // 12
+    Console.WriteLog(pick(1, &neg, &dbl));            // 20
+    Console.WriteLog(relay(&ident, 1));               // 1
 
     /* a no-argument function */
     var z = &zero;
-    print(z());                            // 7
+    Console.WriteLog(z());                            // 7
 
     /* a non-int signature, including string */
     var gs = &greet;
-    print(gs("bob"));                      // hi bob
+    Console.WriteLog(gs("bob"));                      // hi bob
 
     /* recursion reached through the pointer */
     var fa = &fact;
-    print(fa(5));                          // 120
+    Console.WriteLog(fa(5));                          // 120
 
     /* a struct returned by value through the pointer */
     var mp = &mkpair;
     var pr = mp(3, 4);
-    print(pr.a + pr.b);                    // 7
+    Console.WriteLog(pr.a + pr.b);                    // 7
 
     /* an array of function pointers */
     var fs = new fn(int) -> int[3];
     fs[0] = &add1; fs[1] = &add2; fs[2] = &dbl;
     var s = 0;
     foreach (g in fs) { s = s + g(10); }
-    print(s);                              // 11 + 12 + 20 = 43
-    print(fs[0](1));                       // 2
+    Console.WriteLog(s);                              // 11 + 12 + 20 = 43
+    Console.WriteLog(fs[0](1));                       // 2
 
     /* a function pointer held in a struct field, called through the field */
     var h = new Holder(&ident, 9);
-    print(h.f(3));                         // 3
-    print(h.tag);                          // 9
+    Console.WriteLog(h.f(3));                         // 3
+    Console.WriteLog(h.tag);                          // 9
     h.f = &dbl;
-    print(h.f(4));                         // 8
+    Console.WriteLog(h.f(4));                         // 8
 
     /* reassignment */
     var g2 = &ident;
-    print(g2(2) + a(3));                   // 2 + 4 = 6
+    Console.WriteLog(g2(2) + a(3));                   // 2 + 4 = 6
     return 0;
 }

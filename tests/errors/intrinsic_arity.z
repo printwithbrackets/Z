@@ -1,1 +1,1 @@
-int main() { print(min(1)); return 0; }
+int main() { Console.WriteLog(min(1)); return 0; }

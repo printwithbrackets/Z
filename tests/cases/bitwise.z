@@ -20,44 +20,44 @@ int popcount(int v) {
 }
 
 int main() {
-    print(12 & 10);   // 8
-    print(12 | 10);   // 14
-    print(12 ^ 10);   // 6
-    print(~0);        // -1
-    print(~12);       // -13
-    print(1 << 10);   // 1024
-    print(1024 >> 3); // 128
-    print(-16 >> 2);  // -4 (arithmetic)
+    Console.WriteLog(12 & 10);   // 8
+    Console.WriteLog(12 | 10);   // 14
+    Console.WriteLog(12 ^ 10);   // 6
+    Console.WriteLog(~0);        // -1
+    Console.WriteLog(~12);       // -13
+    Console.WriteLog(1 << 10);   // 1024
+    Console.WriteLog(1024 >> 3); // 128
+    Console.WriteLog(-16 >> 2);  // -4 (arithmetic)
 
     /* Precedence: & binds tighter than |, both tighter than ==. */
-    print(1 | 2 & 3);   // 3
-    print(1 ^ 2 | 4);   // 7
-    print(7 & 3 | 8);   // 11
-    print((1 << 2) + 1); // 5
-    print(1 << 2 + 1);   // 8: + binds tighter than <<
+    Console.WriteLog(1 | 2 & 3);   // 3
+    Console.WriteLog(1 ^ 2 | 4);   // 7
+    Console.WriteLog(7 & 3 | 8);   // 11
+    Console.WriteLog((1 << 2) + 1); // 5
+    Console.WriteLog(1 << 2 + 1);   // 8: + binds tighter than <<
 
-    print(describe(F_ALIVE));                // 1: alive and not elite
-    print(describe(F_ALIVE | F_SHOOTER));    // 1: still alive and not elite
-    print(describe(F_ALIVE | F_ELITE));      // 3: elite wins
-    print(describe(F_ELITE));                // 3
-    print(popcount(0));                      // 0
-    print(popcount(255));                    // 8
-    print(popcount(61680));                 // 8
+    Console.WriteLog(describe(F_ALIVE));                // 1: alive and not elite
+    Console.WriteLog(describe(F_ALIVE | F_SHOOTER));    // 1: still alive and not elite
+    Console.WriteLog(describe(F_ALIVE | F_ELITE));      // 3: elite wins
+    Console.WriteLog(describe(F_ELITE));                // 3
+    Console.WriteLog(popcount(0));                      // 0
+    Console.WriteLog(popcount(255));                    // 8
+    Console.WriteLog(popcount(61680));                 // 8
 
     /* Compound forms, including through a pointer. */
-    var a = 12; a &= 10; print(a);   // 8
-    var b = 12; b |= 3;  print(b);   // 15
-    var c = 12; c ^= 10; print(c);   // 6
-    var d = 1;  d <<= 10; print(d);  // 1024
-    var e = 1024; e >>= 3; print(e); // 128
+    var a = 12; a &= 10; Console.WriteLog(a);   // 8
+    var b = 12; b |= 3;  Console.WriteLog(b);   // 15
+    var c = 12; c ^= 10; Console.WriteLog(c);   // 6
+    var d = 1;  d <<= 10; Console.WriteLog(d);  // 1024
+    var e = 1024; e >>= 3; Console.WriteLog(e); // 128
     var f = 0;
     f |= 1; f |= 2; f ^= 3;
-    print(f);                       // 0
-    var p = &a; *p |= 16; print(a); // 24
+    Console.WriteLog(f);                       // 0
+    var p = &a; *p |= 16; Console.WriteLog(a); // 24
 
     /* Constant folding agrees with the runtime path. */
     var g = (1 << 40) | 1;
-    print(g);            // 1099511627777
-    print(g >> 40);      // 1
+    Console.WriteLog(g);            // 1099511627777
+    Console.WriteLog(g >> 40);      // 1
     return 0;
 }

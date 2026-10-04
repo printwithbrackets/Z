@@ -1,17 +1,17 @@
 var n = 15;
 if (n > 10) {
-    print("big");
+    Console.WriteLog("big");
 } else {
-    print("small");
+    Console.WriteLog("small");
 }
 if (n < 10) {
-    print("nope");
+    Console.WriteLog("nope");
 } else if (n == 15) {
-    print("fifteen");
+    Console.WriteLog("fifteen");
 } else {
-    print("other");
+    Console.WriteLog("other");
 }
 if (n > 100) {
-    print("huge");
+    Console.WriteLog("huge");
 }
-print("done");
+Console.WriteLog("done");

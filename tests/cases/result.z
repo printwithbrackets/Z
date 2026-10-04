@@ -34,39 +34,39 @@ Result<int, string> constant() {
 
 int main() {
     // ---- the Ok and Err cases ----
-    print(match parse("42") { Ok(v) => v, Err(_) => -1 });
-    print(match parse("x") { Ok(_) => 0, Err(_) => 1 } + 0);
-    print(match parse("x") { Ok(_) => "ok", Err(e) => e });
+    Console.WriteLog(match parse("42") { Ok(v) => v, Err(_) => -1 });
+    Console.WriteLog(match parse("x") { Ok(_) => 0, Err(_) => 1 } + 0);
+    Console.WriteLog(match parse("x") { Ok(_) => "ok", Err(e) => e });
 
     // ---- `?` yields the payload ----
-    print(match positive("42") { Ok(v) => v ? 1 : 0, Err(_) => -1 });
-    print(match positive("nope") { Ok(_) => 0, Err(_) => 1 } + 0);
-    print(match positive("nope") { Ok(_) => "unexpected", Err(e) => e });
+    Console.WriteLog(match positive("42") { Ok(v) => v ? 1 : 0, Err(_) => -1 });
+    Console.WriteLog(match positive("nope") { Ok(_) => 0, Err(_) => 1 } + 0);
+    Console.WriteLog(match positive("nope") { Ok(_) => "unexpected", Err(e) => e });
 
     // ---- `?` in a chain, and a function that cannot fail ----
-    print(match twice("42") { Ok(v) => v, Err(_) => -1 });
-    print(match sum("42", "42") { Ok(v) => v, Err(_) => -1 });
-    print(match sum("42", "x") { Ok(_) => 0, Err(_) => 1 } + 0);
-    print(match constant() { Ok(v) => v, Err(_) => -1 });
+    Console.WriteLog(match twice("42") { Ok(v) => v, Err(_) => -1 });
+    Console.WriteLog(match sum("42", "42") { Ok(v) => v, Err(_) => -1 });
+    Console.WriteLog(match sum("42", "x") { Ok(_) => 0, Err(_) => 1 } + 0);
+    Console.WriteLog(match constant() { Ok(v) => v, Err(_) => -1 });
 
     // ---- the error value is the whole point: nothing was thrown ----
     // The error text names the input, so the caller can act on it.
     var bad = match parse("hello") { Ok(_) => "", Err(e) => e };
-    print(bad);
+    Console.WriteLog(bad);
 
     // ---- `?` on a Result held in a variable, not a call ----
     var held = parse("42");
-    print(match held { Ok(v) => v, Err(_) => -1 });
+    Console.WriteLog(match held { Ok(v) => v, Err(_) => -1 });
 
     // ---- a float payload ----
-    print(match half("nope") { Ok(v) => v * 100.0, Err(_) => -1.0 });
-    print(match half("42") { Ok(v) => v * 100.0, Err(_) => -1.0 });
+    Console.WriteLog(match half("nope") { Ok(v) => v * 100.0, Err(_) => -1.0 });
+    Console.WriteLog(match half("42") { Ok(v) => v * 100.0, Err(_) => -1.0 });
 
     // ---- a pointer payload ----
     // A struct by value does not fit in one word, so a Result cannot carry one;
     // a pointer to it can. The diagnostic says so rather than truncating.
-    print(match first("nope") { Ok(_) => 0, Err(_) => 1 } + 0);
-    print(match first("42") { Ok(v) => v.x, Err(_) => -1 });
+    Console.WriteLog(match first("nope") { Ok(_) => 0, Err(_) => 1 } + 0);
+    Console.WriteLog(match first("42") { Ok(v) => v.x, Err(_) => -1 });
 
     resultMethods();
     return 0;
@@ -131,20 +131,20 @@ void resultMethods() {
     var s = new Source("hello world");
 
     match (s.count()) {
-        Ok(n) => print(int_to_string(n)),
-        Err(e) => print("err " + e),
+        Ok(n) => Console.WriteLog(int_to_string(n)),
+        Err(e) => Console.WriteLog("err " + e),
     };
     match (s.slice(0, 5)) {
-        Ok(part) => print(part),
-        Err(e) => print("err " + e),
+        Ok(part) => Console.WriteLog(part),
+        Err(e) => Console.WriteLog("err " + e),
     };
     match (s.slice(8, 99)) {
-        Ok(part) => print(part),
-        Err(e) => print("err " + e),
+        Ok(part) => Console.WriteLog(part),
+        Err(e) => Console.WriteLog("err " + e),
     };
-    print(int_to_string(s.size()));
+    Console.WriteLog(int_to_string(s.size()));
 
     var b = s.boxed(7);
-    print(int_to_string(b.n));
-    print(b.tag);
+    Console.WriteLog(int_to_string(b.n));
+    Console.WriteLog(b.tag);
 }
