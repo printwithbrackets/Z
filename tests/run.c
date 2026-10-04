@@ -248,6 +248,7 @@ int main(int argc, char **argv) {
         "lambda_fn_return",
         "lambda_in_lambda",
         "nested_fn_capture",
+        "semicolon_at_eof",
         "hold_arity",
         "hold_argtype",
         "fn_reads_toplevel_var",

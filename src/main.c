@@ -345,16 +345,34 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         free(text);
         return 1;
     }
-    /* One terminator for the assembled unit. */
+/* One terminator for the assembled unit.
+     *
+     * It inherits the last real token's position rather than being zeroed, because
+     * a diagnostic whose expected token is the end of the file is reported at this
+     * token's span, and a zeroed span prints as `0:0` and quotes the file's first
+     * line. That is how a missing `;` at the end of the last line came to be
+     * reported on line 1, pointing at a comment that had nothing to do with it.
+     *
+     * Pointing at the last token rather than one byte past it is also the more
+     * useful answer: "expected ';' but found end of file" wants to show the token
+     * the semicolon should have followed. */
     if (ntoks == tcap) {
-        Token *bigger = arena_alloc_array(&arena, (size_t)ntoks + 1, sizeof(Token));
+        Token *bigger = arena_alloc_array(&arena, ntoks + 1, sizeof(Token));
         if (ntoks > 0)
             memcpy(bigger, toks, (size_t)ntoks * sizeof(Token));
         toks = bigger;
     }
     memset(&toks[ntoks], 0, sizeof toks[ntoks]);
-    toks[ntoks].kind = T_EOF;
-    toks[ntoks].span.file = src;
+    if (ntoks > 0) {
+        toks[ntoks] = toks[ntoks - 1];
+        toks[ntoks].kind = T_EOF;
+        toks[ntoks].span.len = 0;
+    } else {
+        toks[ntoks].kind = T_EOF;
+        toks[ntoks].span.file = src;
+        toks[ntoks].span.line = 1;
+        toks[ntoks].span.col = 1;
+    }
     ntoks++;
 
     Stmt *program = parse_program(&arena, toks, ntoks, &strings, opt_level);

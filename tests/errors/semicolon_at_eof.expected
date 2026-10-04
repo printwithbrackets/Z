@@ -1,0 +1,2 @@
+:9:28: error: expected ';' but found end of file
+print(greeting + ", its me")

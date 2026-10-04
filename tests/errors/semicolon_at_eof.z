@@ -1,0 +1,9 @@
+// The missing semicolon is on the last line, and that is where the diagnostic has
+// to point.
+//
+// The unit-wide terminator the parser reads at end of file used to be built by
+// zeroing a token, so its position was 0:0 and this came out as "line 0" quoting
+// the first line of the file -- which, in a file that opens with a comment, points
+// at the one line that has nothing to do with it.
+var greeting = "hi";
+print(greeting + ", its me")
