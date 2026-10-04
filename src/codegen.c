@@ -67,6 +67,12 @@ typedef struct {
     int file;
     int line;
     int slot;
+    /* The DWARF register number this variable is live in, or -1 when it is in its
+     * frame slot. The allocator either puts a local in memory or gives it a whole
+     * callee-saved register for its entire life, so one location describes it
+     * everywhere -- unlike a frame slot, which does not need a range list either.
+     * This is what stops an optimised -g build from having no locals at all. */
+    int reg;
     int type_code; /* dbg_type_of result, or 0 for untyped */
 } DbgVar;
 
@@ -98,6 +104,14 @@ typedef struct {
  * stack on every use. rax is the accumulator and r10/r11 are expression
  * scratch, so the pool excludes them. */
 static const char *const POOL_REGS[] = {"rbx", "r12", "r13", "r14", "r15"};
+
+/* The DWARF register numbers for the pool, in the same order.
+ *
+ * DWARF 64-bit numbers the general-purpose registers in the System V order, so
+ * this is not the same as anything in the source: rax is 0, rdx 1, rcx 2, rbx 3,
+ * rsi 4, rdi 5, rbp 6, rsp 7, and r8 through r15 are 8 through 15. Only the five
+ * the pool can hold are listed, since nothing else is ever described this way. */
+static const int POOL_DWARF_REGNUM[] = {3, 12, 13, 14, 15};
 #define NPOOL 5
 
 /* One (implementing type, interface) pair whose itab has to exist. Collected
@@ -4143,6 +4157,8 @@ static int align16(int n) { return (n + 15) & ~15; }
  * present" check, and reports a plausible-looking wrong value, which is the
  * worst way for this to fail. */
 #define DW_OP_breg6 0x76
+/* DW_OP_reg0 .. DW_OP_reg31, one per machine register. */
+#define DW_OP_reg0 0x50
 #define DW_OP_call_frame_cfa 0x9c
 /* DW_OP_fbreg, kept for reference: it is relative to the frame base, which a
  * reader can only resolve with unwind information. */
@@ -4387,7 +4403,8 @@ static int dbg_type_of(Type *t) {
 
 /* Records a described variable for a function, ignoring the ones that cannot be
  * described honestly or do not fit. */
-static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot, int type_code) {
+static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot, int reg,
+                        int type_code) {
     if (f->nvars >= DBUG_MAX_VARS)
         return;
     if (name == NULL || name[0] == '\0')
@@ -4400,6 +4417,7 @@ static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slo
     v->file = dbg_file(cg, span.file);
     v->line = span.line > 0 ? span.line : 0;
     v->slot = slot;
+    v->reg = reg;
     v->type_code = type_code;
 }
 
@@ -4428,10 +4446,15 @@ static void dbg_collect_locals(CG *cg, DbgFunc *f, Stmt *s) {
     case S_VAR: {
         if (s->name == NULL || s->slot <= 0)
             return;
+        /* A promoted local is described at its register rather than skipped. The
+         * register holds it for the whole of the declaration, so the one location
+         * is exact rather than approximate, and skipping it loses the variable
+         * from the debug info entirely -- which is what used to happen above -O0. */
         LocalInfo *li = li_lookup(cg, s->slot);
-        if (li != NULL && li->assigned >= 0)
-            return; /* promoted to a register: no address to name */
-        dbg_add_var(cg, f, s->name, s->span, s->slot, dbg_type_of(s->type));
+        int reg = -1;
+        if (li != NULL && li->assigned >= 0 && !li->is_float)
+            reg = POOL_DWARF_REGNUM[li->assigned];
+        dbg_add_var(cg, f, s->name, s->span, s->slot, reg, dbg_type_of(s->type));
         return;
     }
     default:
@@ -4602,10 +4625,17 @@ static void dbg_write_info(CG *cg) {
              * everywhere in the body, so every variable read back as whatever
              * happened to be on the stack. Addressing rbp directly needs no
              * unwind information at all. */
-            long o = -(long)v->slot;
-            dbg8(b, (unsigned)(1 + sleb128_len(o)));
-            dbg8(b, DW_OP_breg6);
-            sleb128_put(b, o);
+            if (v->reg >= 0) {
+                /* DW_OP_reg0+n is a single byte and takes no operand, which is
+                 * the whole of the location: the value is in that register. */
+                dbg8(b, 1);
+                dbg8(b, DW_OP_reg0 + (unsigned)v->reg);
+            } else {
+                long o = -(long)v->slot;
+                dbg8(b, (unsigned)(1 + sleb128_len(o)));
+                dbg8(b, DW_OP_breg6);
+                sleb128_put(b, o);
+            }
         }
         dbg8(b, 0); /* end of the subprogram's children */
     }
@@ -4735,7 +4765,7 @@ static void emit_function(CG *cg, Stmt *fn) {
         (void)npool_used;
         for (int i = fn->vis_start; i < fn->nparams && i < fn->vis_start + 8; i++) {
             Expr *pe = fn->params[i];
-            dbg_add_var(cg, df, pe->name, pe->span, pe->slot, dbg_type_of(pe->type));
+            dbg_add_var(cg, df, pe->name, pe->span, pe->slot, -1, dbg_type_of(pe->type));
         }
         df->nparams = df->nvars;
 

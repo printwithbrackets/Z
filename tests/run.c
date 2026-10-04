@@ -423,20 +423,24 @@ int main(int argc, char **argv) {
                     ok = 0;
                 }
             }
-            /* A local must be nameable at -O0. Every local lives in its frame
-             * slot there, so the debug info pass has an address to record, and it
-             * used to drop them: a local holding a register is taken to have no
-             * address, and the allocator was handing out registers at -O0 that
-             * `local_reg` then refused to read. Above -O0 a promoted local really
-             * is addressless, so this says nothing there -- describing those at
-             * their register is a separate piece of work. */
-            if (ok && strcmp(opt_flag(), "-O0") == 0) {
+            /* A local must be nameable at every level.
+             *
+             * It used to be dropped whenever the allocator gave it a register,
+             * which meant no locals at all in an optimised build -- the case -g
+             * exists for. A promoted local is now described at its register, and
+             * one in its frame slot at rbp minus the slot, so both are present and
+             * this check no longer has to be pinned to a level. */
+            if (ok) {
                 char out[1 << 16];
-                run_cmd_capture("readelf --debug-dump=info /tmp/z_test_dbg 2>&1", out,
-                                sizeof out);
+                run_cmd_capture("readelf --debug-dump=info /tmp/z_test_dbg 2>&1", out, sizeof out);
+                const char *lvl = opt_flag()[0] ? opt_flag() : "the default level";
                 if (strstr(out, "sum") == NULL) {
                     fprintf(stderr,
-                            "FAIL debuginfo (a local is missing from -O0 debug info)\n");
+                            "FAIL debuginfo (a local is missing from the debug info at %s)\n", lvl);
+                    ok = 0;
+                } else if (strcmp(opt_flag(), "-O0") != 0 && strstr(out, "DW_OP_reg") == NULL) {
+                    fprintf(stderr, "FAIL debuginfo (no local is described at a register at %s)\n",
+                            lvl);
                     ok = 0;
                 }
             }
