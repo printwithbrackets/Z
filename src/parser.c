@@ -3265,13 +3265,14 @@ static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
             r->ival = TK_VOID;
         else
             r->ival = type_kind_code(args[0]->type);
-        e->args = args;
-        e->nargs = n;
-        e->type = type_int(p->ty);
-        e->ival = r->ival;
-        e->args = NULL;
-        e->nargs = 0;
-        return e;
+        /* The answer is a property of the type, so it is already known here and
+         * the node to emit is an integer literal. This used to attach the
+         * argument to `e` and then clear it again, which left a call to a
+         * function named `typeof` with no arguments -- so every program that
+         * asked its type anything failed in the linker with an undefined
+         * reference to `z$typeof`, and nothing in the tree did, which is why it
+         * went unnoticed. */
+        return r;
     }
 
     /* Built-in print, reached only through a surface name.

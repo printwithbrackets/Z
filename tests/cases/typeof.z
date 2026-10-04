@@ -1,0 +1,72 @@
+// `typeof(e)` is the small integer naming the *static* type of `e`.
+//
+// It exists so a generic function can ask what it was handed. Monomorphization
+// re-parses a template with the parameter bound to a concrete type, so inside
+// the `Vec<string>` instance the element really is a `string` and `typeof`
+// really does answer TYPE_STRING. That is what lets one body serve every
+// element type without every type having to satisfy an interface.
+//
+// The answer is a property of the type rather than of the value, so it is known
+// while the expression is being parsed and reaches the code generator as a
+// constant.
+//
+// Both arms of a `typeof` test still have to type-check for the type the
+// function was instantiated with, which is the limit of the feature: a branch
+// that called `len` on the element would not compile in the `Vec<int>` instance.
+// So the branches here differ only in what they produce.
+
+struct Pair {
+    int a;
+    int b;
+}
+
+string describe<T>(T[] xs) {
+    var out = "";
+    for (var i = 0; i < 3; i++) {
+        var e = xs[i];
+        if (typeof(e) == TYPE_STRING) { out = out + "s"; } else { out = out + "n"; }
+    }
+    return out;
+}
+
+int main() {
+    var i = 5;
+    var b = true;
+    var f = 1.5;
+    var s = "hello";
+    Console.WriteLog(typeof(i));
+    Console.WriteLog(typeof(b));
+    Console.WriteLog(typeof(f));
+    Console.WriteLog(typeof(s));
+    Console.WriteLog(typeof("a literal"));
+    Console.WriteLog(typeof(1 + 2));
+
+    // An array's static type is the array, not its element. Reading the element
+    // into a local first is what makes the element's own type visible.
+    var a = new string[3];
+    Console.WriteLog(typeof(a));
+    var e0 = a[0];
+    Console.WriteLog(typeof(e0));
+
+    var pr = new Pair(1, 2);
+    Console.WriteLog(typeof(pr));
+
+    // The TYPE_* constants in the standard library are these numbers, so a
+    // program names them rather than hard-coding.
+    Console.WriteLog(typeof(s) == TYPE_STRING);
+    Console.WriteLog(typeof(i) == TYPE_STRING);
+
+    // One body, two instantiations, two answers.
+    var vs = new string[3];
+    vs[0] = "ab";
+    vs[1] = "cde";
+    vs[2] = "f";
+    Console.WriteLog(describe(vs));
+    var vi = new int[3];
+    vi[0] = 1;
+    vi[1] = 2;
+    vi[2] = 3;
+    Console.WriteLog(describe(vi));
+
+    return 0;
+}
