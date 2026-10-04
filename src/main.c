@@ -6,6 +6,7 @@
 #include "lexer.h"
 #include "parser.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,13 +69,36 @@ static int write_file(const char *path, const char *data) {
     return 1;
 }
 
-/* Runs a command, returning its exit status (or -1 on spawn failure). */
-static int run_command(const char *cmd) {
-    int rc = system(cmd);
-    if (rc == -1)
+/* Runs a program from an explicit argument vector, returning its exit status
+ * (or -1 if it could not be started).
+ *
+ * Nothing here goes through a shell, and that is the whole point. The output
+ * path and the caller's extra linker arguments are arbitrary text, so a shell
+ * reads an apostrophe or a semicolon in either of them as syntax: `z build
+ * main.z -o "x'; rm -rf ~; '"` used to end the quoted run at the apostrophe and
+ * run whatever followed. An argv array has no grammar to get wrong, which
+ * removes the whole class rather than asking each format string to escape
+ * correctly. */
+static int run_argv(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0)
         return -1;
-    if (WIFEXITED(rc))
-        return WEXITSTATUS(rc);
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        /* Only reached when exec failed. 127 is what a shell reports for a
+         * command it could not run, which is what this reported before. */
+        fprintf(stderr, "z: cannot run '%s'\n", argv[0]);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
     return 1;
 }
 
@@ -117,6 +141,11 @@ static void die_oom(void) {
 }
 
 static char *strdup_or_die(const char *s);
+
+/* How many unrecognized arguments may be handed on to the link step. Far more
+ * than any real link line needs, and a count rather than a byte budget, so a
+ * long path cannot quietly eat the space an argument after it needs. */
+#define MAX_LINK_ARGS 256
 
 #define MAX_FILES 64
 static const char *loaded_path[MAX_FILES];  /* paths already expanded (arena-owned) */
@@ -317,7 +346,8 @@ static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout, Stri
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
  * links an executable. Returns the process exit status. */
 static int compile(const char *src, const char *exe, const char *asm_path, int bounds_checks,
-                   int opt_level, int debug_info, int use_stdlib, const char *link_args) {
+                   int opt_level, int debug_info, int use_stdlib, char *const *link_args,
+                   int n_link_args) {
     long len = 0;
     char *text = read_file(src, &len);
     if (text == NULL)
@@ -431,20 +461,32 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         }
         fwrite(runtime_src_0, 1, strlen(runtime_src_0), rtf);
         fclose(rtf);
-        char cmd[4096];
         /* Anything the caller passed after the source file is handed straight
          * to the linker, so `z build main.z -o main -lm -L/opt/lib` works and an
-         * extern symbol can be satisfied by a plain .c or .o path. */
-        snprintf(cmd, sizeof cmd, "cc -no-pie -o '%s' '%s' '%s' %s 2>&1", exe, apath, rt_path,
-                 link_args != NULL ? link_args : "");
-        status = run_command(cmd);
+         * extern symbol can be satisfied by a plain .c or .o path. Each one
+         * becomes one argv entry, so a path with a space or a quote in it
+         * survives without being quoted, escaped or truncated. */
+        char *argv[6 + MAX_LINK_ARGS + 1];
+        int n = 0;
+        argv[n++] = (char *)"cc";
+        argv[n++] = (char *)"-no-pie";
+        argv[n++] = (char *)"-o";
+        argv[n++] = (char *)exe;
+        argv[n++] = (char *)apath;
+        argv[n++] = (char *)rt_path;
+        for (int i = 0; i < n_link_args; i++)
+            argv[n++] = link_args[i];
+        argv[n] = NULL;
+        status = run_argv(argv);
         remove(rt_path);
         if (status != 0)
             fprintf(stderr, "z: assembling/linking failed\n");
     } else {
-        char cmd[1024];
-        snprintf(cmd, sizeof cmd, "cc -c -o '/tmp/z_%ld.o' '%s' 2>&1", (long)getpid(), apath);
-        status = run_command(cmd);
+        char obj_path[256];
+        snprintf(obj_path, sizeof obj_path, "/tmp/z_%ld.o", (long)getpid());
+        char *argv[] = {(char *)"cc", (char *)"-c", (char *)"-o", obj_path, (char *)apath, NULL};
+        status = run_argv(argv);
+        remove(obj_path);
     }
 
     remove(apath);
@@ -472,10 +514,12 @@ int main(int argc, char **argv) {
      * always done, so an invocation without a flag behaves exactly as before. */
     int opt_level = Z_OPT_DEFAULT;
     /* Everything the compiler does not recognize is collected verbatim and
-     * handed to the link step. */
-    char link_args[3072];
-    size_t la_len = 0;
-    link_args[0] = 0;
+     * handed to the link step. These are the caller's own pointers rather than
+     * copies, so there is no fixed buffer to overflow and no length at which an
+     * argument starts being dropped without a word. The count is still bounded,
+     * and the bound is reported rather than silently truncating the list. */
+    char *link_args[MAX_LINK_ARGS];
+    int n_link_args = 0;
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
@@ -508,23 +552,12 @@ int main(int argc, char **argv) {
             /* -O0..-O3. Anything else starting -O is not ours, so it falls
              * through to the linker untouched. */
             opt_level = argv[i][2] - '0';
+        } else if (n_link_args == MAX_LINK_ARGS) {
+            fprintf(stderr, "z: at most %d linker arguments, and %d were given\n", MAX_LINK_ARGS,
+                    n_link_args + 1);
+            return 2;
         } else {
-            const char *a = argv[i];
-            size_t need = strlen(a) + 1;
-            /* Single-quote so paths with spaces survive the shell. */
-            if (la_len + need + 3 < sizeof link_args) {
-                link_args[la_len++] = ' ';
-                if (strchr(a, '\'') == NULL) {
-                    link_args[la_len++] = '\'';
-                    memcpy(link_args + la_len, a, strlen(a));
-                    la_len += strlen(a);
-                    link_args[la_len++] = '\'';
-                } else {
-                    memcpy(link_args + la_len, a, strlen(a));
-                    la_len += strlen(a);
-                }
-                link_args[la_len] = 0;
-            }
+            link_args[n_link_args++] = argv[i];
         }
     }
 
@@ -546,7 +579,7 @@ int main(int argc, char **argv) {
             out = default_out;
         }
         int rc = compile(src, out, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
-                         link_args) == 0
+                         link_args, n_link_args) == 0
                      ? 0
                      : 1;
         free(default_out);
@@ -556,12 +589,11 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, link_args) !=
-            0)
+        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, link_args,
+                    n_link_args) != 0)
             return 1;
-        char run_cmd[512];
-        snprintf(run_cmd, sizeof run_cmd, "'%s'", exe);
-        int rc = run_command(run_cmd);
+        char *run_it[] = {exe, NULL};
+        int rc = run_argv(run_it);
         remove(exe);
         return rc;
     }
@@ -569,7 +601,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
         return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info, use_stdlib,
-                       link_args) == 0
+                       link_args, n_link_args) == 0
                    ? 0
                    : 1;
     }

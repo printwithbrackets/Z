@@ -1159,6 +1159,11 @@ z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
 | `--bounds` | **[cut]** replaced by `--no-bounds`. Bounds checks are on by default in v2. |
 | `-g` | emit DWARF: a line table, and a symbol table naming every function, its parameters and its frame-resident locals. |
 
+The output path and every pass-through linker argument reach the C toolchain as
+one argument each, with no shell in between. A value containing a quote, a
+semicolon or a space is therefore a name, not syntax. At most 256 arguments are
+passed through, and asking for more is a usage error rather than a silent drop.
+
 A level only gates passes; it never changes what a program means, and the test
 suite runs at all four levels (`make test-all`) because a pass that only runs at
 a higher level can miscompile while the default level shows nothing wrong.

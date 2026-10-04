@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -37,6 +38,33 @@ static int slurp(const char *path, char *out, int cap) {
 static const char *opt_flag(void) {
     const char *o = getenv("Z_TEST_OPT");
     return (o != NULL && *o != '\0') ? o : "";
+}
+
+/* Quotes a value for the harness's own shell. The driver tests hand the
+ * compiler paths containing an apostrophe and a semicolon, and those have to
+ * arrive as one argument rather than as shell syntax, so the harness cannot
+ * paste them into a command string raw. An embedded apostrophe ends the quoted
+ * run, contributes an escaped one, and opens a new run. */
+static void shell_quote(const char *s, char *out, int cap) {
+    int n = 0;
+    if (cap < 4) {
+        if (cap > 0)
+            out[0] = '\0';
+        return;
+    }
+    out[n++] = '\'';
+    /* The bound leaves room for the closing quote and the terminator even when
+     * the loop stops on it rather than on the end of the string. */
+    for (; *s != '\0' && n + 8 < cap; s++) {
+        if (*s == '\'') {
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else {
+            out[n++] = *s;
+        }
+    }
+    out[n++] = '\'';
+    out[n] = '\0';
 }
 
 static int run_cmd_capture(const char *cmd, char *out, int cap) {
@@ -618,6 +646,143 @@ int main(int argc, char **argv) {
                 pass++;
             }
         }
+    }
+
+    /* The output path and any extra linker arguments reach the C toolchain as
+     * data, never as shell syntax.
+     *
+     * The driver used to interpolate both into one single-quoted shell command
+     * string, so a value containing an apostrophe closed the quote and the rest
+     * of the value was read as a command. Each is checked here on its own,
+     * because one broken value makes the whole command a syntax error and hides
+     * what the other one would have done.
+     *
+     * Both carry an apostrophe, a semicolon and a `touch` of a marker file that
+     * nothing else removes. Read as data, the link succeeds, the executable
+     * appears at exactly the path that was asked for and prints 42. Read as
+     * shell syntax, the marker appears and nothing is built. */
+    {
+        const char *dir = "/tmp/z_test_shell";
+        /* The markers are bare names in the working directory rather than paths
+         * under `dir`, because a slash inside the payload would make it an
+         * invalid file name component and the payload could never be written in
+         * the first place. Both are removed before and after. */
+        const char *marker_out = "z_injected_out";
+        const char *marker_arg = "z_injected_arg";
+        char out_path[256], plain_out[256], helper[256], plain_z[256], main_z[256];
+        snprintf(out_path, sizeof out_path, "%s/o'; touch %s; '.out", dir, marker_out);
+        snprintf(plain_out, sizeof plain_out, "%s/plain.out", dir);
+        /* The trailing argument's payload carries an even number of apostrophes
+         * and ends in a comment, because an odd number would leave the shell
+         * with an unterminated quote and it would refuse the whole line without
+         * running anything. A payload that has to be balanced to get as far as
+         * executing still proves the point: the marker appears and the driver
+         * reports success, having linked nothing at all. The name ends in .c
+         * because cc picks the compiler by extension, so anything else would be
+         * handed to the linker as a script and fail for the wrong reason. */
+        snprintf(helper, sizeof helper, "%s/a'b';touch %s;#x'.c", dir, marker_arg);
+        snprintf(plain_z, sizeof plain_z, "%s/plain.z", dir);
+        snprintf(main_z, sizeof main_z, "%s/main.z", dir);
+        remove(marker_out);
+        remove(marker_arg);
+        mkdir(dir, 0700);
+
+        static const char plain_src[] = "int main() { print(42); return 0; }\n";
+        static const char link_src[] = "extern int c_scale(int v, int k);\n"
+                                       "int main() { print(c_scale(7, 6)); return 0; }\n";
+        static const char csrc[] = "long c_scale(long v, long k) { return v * k; }\n";
+        remove(plain_out);
+        remove(out_path);
+        FILE *pf = fopen(plain_z, "wb");
+        FILE *sf = fopen(main_z, "wb");
+        FILE *cf = fopen(helper, "wb");
+        if (pf == NULL || sf == NULL || cf == NULL ||
+            fwrite(plain_src, 1, sizeof plain_src - 1, pf) != sizeof plain_src - 1 ||
+            fwrite(link_src, 1, sizeof link_src - 1, sf) != sizeof link_src - 1 ||
+            fwrite(csrc, 1, sizeof csrc - 1, cf) != sizeof csrc - 1) {
+            if (pf)
+                fclose(pf);
+            if (sf)
+                fclose(sf);
+            if (cf)
+                fclose(cf);
+            fprintf(stderr, "FAIL drivershell (cannot write the test sources)\n");
+            fail++;
+        } else {
+            fclose(pf);
+            fclose(sf);
+            fclose(cf);
+
+            /* label, output path, trailing argument, source, marker. The marker
+             * is checked before the exit status because a shell that misread a
+             * value reports a syntax error rather than a build failure, so the
+             * status alone would not say why. */
+            const struct {
+                const char *label;
+                const char *out;
+                const char *arg;
+                const char *src;
+                const char *marker;
+            } dcases[] = {
+                {"output path", out_path, "", plain_z, marker_out},
+                {"linker argument", plain_out, helper, main_z, marker_arg},
+            };
+            for (size_t i = 0; i < sizeof dcases / sizeof(*dcases); i++) {
+                char qout[600], qarg[600], qsrc[600];
+                shell_quote(dcases[i].out, qout, sizeof qout);
+                shell_quote(dcases[i].src, qsrc, sizeof qsrc);
+                snprintf(cmd, sizeof cmd, "%s build %s -o %s", zc, qsrc, qout);
+                if (dcases[i].arg[0] != 0) {
+                    shell_quote(dcases[i].arg, qarg, sizeof qarg);
+                    strncat(cmd, " ", sizeof cmd - strlen(cmd) - 1);
+                    strncat(cmd, qarg, sizeof cmd - strlen(cmd) - 1);
+                }
+                strncat(cmd, " ", sizeof cmd - strlen(cmd) - 1);
+                strncat(cmd, opt_flag(), sizeof cmd - strlen(cmd) - 1);
+                strncat(cmd, " 2>&1", sizeof cmd - strlen(cmd) - 1);
+
+                char actual[1 << 16];
+                int rc = run_cmd_capture(cmd, actual, sizeof actual);
+                int touched = access(dcases[i].marker, F_OK) == 0;
+                int built = access(dcases[i].out, X_OK) == 0;
+                char printed[256] = "";
+                if (built)
+                    /* The quoted path is also what running the executable needs,
+                     * because the output path has a space in it. */
+                    run_cmd_capture(qout, printed, sizeof printed);
+                if (touched) {
+                    fprintf(stderr,
+                            "FAIL drivershell %s (the value was run as shell syntax: '%s' "
+                            "exists)\n",
+                            dcases[i].label, dcases[i].marker);
+                    fail++;
+                } else if (!built) {
+                    fprintf(stderr,
+                            "FAIL drivershell %s (nothing was written to '%s', rc=%d)\n"
+                            "--- actual ---\n%s\n",
+                            dcases[i].label, dcases[i].out, rc, actual);
+                    fail++;
+                } else if (strcmp(printed, "42\n") != 0) {
+                    fprintf(stderr,
+                            "FAIL drivershell %s (the value did not arrive as one argument)\n"
+                            "--- actual ---\n%s\n",
+                            dcases[i].label, printed);
+                    fail++;
+                } else if (rc != 0) {
+                    fprintf(stderr, "FAIL drivershell %s (the link reported failure, rc=%d)\n%s\n",
+                            dcases[i].label, rc, actual);
+                    fail++;
+                } else {
+                    printf("ok   drivershell %s (an apostrophe and a semicolon stayed data)\n",
+                           dcases[i].label);
+                    pass++;
+                }
+            }
+        }
+        remove(plain_out);
+        remove(out_path);
+        remove(marker_out);
+        remove(marker_arg);
     }
 
     /* Runtime-abort cases: compiled with --bounds, the program must exit

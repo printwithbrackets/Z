@@ -89,6 +89,11 @@ loop-invariant code motion. `--bounds` range-checks array *and string* indexing,
 `-w` silences warnings, and `-Werror` makes them fail the build. Anything the
 compiler does not recognize is passed through to the linker.
 
+The output path and those pass-through arguments are handed to the C toolchain
+as a real argument vector, never through a shell, so a path containing a quote,
+a semicolon or a space is just a path. There is a limit of 256 pass-through
+arguments, and going past it is reported rather than quietly dropping the rest.
+
 Diagnostics come in three shapes with `--error-format=human|gcc|json`, and take
 colour on a terminal (`--color=auto|always|never`, and never under `NO_COLOR`).
 `gcc` is one line per problem and per note, which is what an editor's error
