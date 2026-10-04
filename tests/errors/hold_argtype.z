@@ -1,6 +1,6 @@
-// The wait is a count of seconds, so it has to be an int. A string is not a
-// number of seconds however it is spelled, and a float is not one either: the
-// duration literal is an integer, so there is no sub-second hold to ask for.
+// A wait is a number of seconds, so it has to be a number. A string is not one
+// however it is spelled -- `hold("2h")` is the mistake of reaching for a duration
+// where the builtin wants a quantity -- and neither is a bool.
 int main() {
     hold("2h");
     return 0;

@@ -3322,6 +3322,16 @@ static Expr *parse_call(Parser *p, char *name, Span span) {
                                i + 1, name, type_name(p->ty, wt), type_name(p->ty, args[i]->type));
                 }
             }
+            /* `hold` is declared `any` so that it can take a whole or a fractional
+             * number of seconds, and `any` matches whatever it is handed -- which
+             * would let a string through as a wait. It takes a number and nothing
+             * else, and the gap is closed here, where the caller's own text is
+             * still in hand to point at. */
+            if (strcmp(name, "hold") == 0 && n == 1 && !is_unk(args[0]->type) &&
+                !is_kind(args[0]->type, TK_INT) && !is_kind(args[0]->type, TK_F64))
+                diag_error(args[0]->span,
+                           "argument 1 of 'hold' expects a number of seconds but got '%s'",
+                           type_name(p->ty, args[0]->type));
             /* is_extern makes codegen call the symbol verbatim, which is what
              * reaches the runtime instead of the z$ namespaced name. */
             e->name = arena_strdup(p->arena, sym);

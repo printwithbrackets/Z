@@ -328,26 +328,50 @@ static void skip_trivia(Lexer *lx) {
     }
 }
 
-/* The multiplier a duration unit letter stands for, or 0 for anything else.
+/* The unit starting at `c0`, with `c1` the character after it, as a length in
+ * characters and a value in microseconds via `out`. Returns 0 for anything that
+ * is not a unit, which is what ends a duration literal.
  *
- * h, m and s are the whole vocabulary: hours, minutes and seconds. A number with
- * one of them stuck to it is a duration, and a number with none is not, which is
- * what keeps `37` and `37s` the same length of time while leaving every other
- * integer literal exactly as it was. */
-static int duration_unit(int c) {
-    switch (c) {
+ * h, m and s are the whole vocabulary: hours, minutes and seconds. ms and us are
+ * there for a wait shorter than one, and they are two characters where the other
+ * three are one, so the length has to travel with the value. `m` on its own is a
+ * minute and `ms` is not, which is the one place the pair has to be read
+ * together rather than letter by letter.
+ *
+ * A number with a unit stuck to it is a duration, and a number with none is not,
+ * which is what keeps `37` and `37s` the same length of time while leaving every
+ * other integer literal exactly as it was. */
+static int duration_unit_us(int c0, int c1, long long *out) {
+    if ((c0 == 'm' || c0 == 'M') && (c1 == 's' || c1 == 'S')) {
+        *out = 1000;
+        return 2;
+    }
+    if ((c0 == 'u' || c0 == 'U') && (c1 == 's' || c1 == 'S')) {
+        *out = 1;
+        return 2;
+    }
+    switch (c0) {
     case 'h':
     case 'H':
-        return 3600;
+        *out = 3600LL * 1000000LL;
+        return 1;
     case 'm':
     case 'M':
-        return 60;
+        *out = 60LL * 1000000LL;
+        return 1;
     case 's':
     case 'S':
+        *out = 1000000LL;
         return 1;
     default:
         return 0;
     }
+}
+
+/* True if a duration unit starts at `c0`. */
+static int is_duration_unit(int c0, int c1) {
+    long long us = 0;
+    return duration_unit_us(c0, c1, &us) > 0;
 }
 
 /* Tokenizes the entire source into an arena array. */
@@ -456,21 +480,50 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
              * exactly the one thing that may follow a digit run without being the
              * typo the check further down calls it. */
             int is_duration = 0;
-            if (base == 10 && duration_unit(peek_char(&lx, 0)) > 0) {
+            long long dur_frac_us = 0;
+            if (base == 10 && is_duration_unit(peek_char(&lx, 0), peek_char(&lx, 1))) {
                 is_duration = 1;
                 unsigned long long total = 0;
+                /* The sub-second part, in microseconds, kept below a second by
+                 * carrying into `total` as it grows. A literal with any of it is
+                 * not a whole number of seconds, and there is no integer to
+                 * hand back for that, so the two are tracked apart until the end
+                 * and the token is only decided once. */
+                long long frac_us = 0;
                 int dur_overflow = overflow;
                 long long part = (long long)val;
                 for (;;) {
-                    int mult = duration_unit(peek_char(&lx, 0));
-                    bump(&lx); /* a unit is here on entry, which is what invited us in */
+                    long long uus = 0;
+                    int ulen = duration_unit_us(peek_char(&lx, 0), peek_char(&lx, 1), &uus);
+                    for (int u = 0; u < ulen; u++)
+                        bump(&lx); /* a unit is here on entry, which invited us in */
                     if (!dur_overflow) {
-                        unsigned long long room =
-                            (unsigned long long)Z_INT_MAX / (unsigned long long)mult;
-                        if (total > room || (unsigned long long)part > room - total)
-                            dur_overflow = 1;
-                        else
-                            total += (unsigned long long)part * (unsigned long long)mult;
+                        if (uus >= 1000000) {
+                            unsigned long long mult = (unsigned long long)(uus / 1000000);
+                            unsigned long long room = (unsigned long long)Z_INT_MAX / mult;
+                            if (total > room || (unsigned long long)part > room - total)
+                                dur_overflow = 1;
+                            else
+                                total += (unsigned long long)part * mult;
+                        } else {
+                            if (part > ((long long)Z_INT_MAX - frac_us) / uus)
+                                dur_overflow = 1;
+                            else {
+                                frac_us += part * uus;
+                                /* Whole seconds out of the fraction, so a vast
+                                 * number of milliseconds is caught by the same
+                                 * guard as a vast number of hours instead of
+                                 * needing a limit of its own. */
+                                unsigned long long carry = (unsigned long long)(frac_us / 1000000);
+                                unsigned long long room = (unsigned long long)Z_INT_MAX;
+                                if (total > room - carry)
+                                    dur_overflow = 1;
+                                else {
+                                    total += carry;
+                                    frac_us %= 1000000;
+                                }
+                            }
+                        }
                     }
                     /* Another component only if digits follow. A letter that is not
                      * a unit ends the literal and is left for the caller to name. */
@@ -494,7 +547,7 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                     if (part_overflow || ndv == 0)
                         dur_overflow = 1;
                     part = (long long)v;
-                    if (duration_unit(peek_char(&lx, 0)) == 0) {
+                    if (!is_duration_unit(peek_char(&lx, 0), peek_char(&lx, 1))) {
                         /* A trailing number with no unit is seconds. */
                         unsigned long long room = (unsigned long long)Z_INT_MAX;
                         if (!dur_overflow && total > room - (unsigned long long)part)
@@ -514,6 +567,9 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
                 if (is_alnum(peek_char(&lx, 0)))
                     diag_error(nspan, "unexpected '%c' after a duration literal",
                                peek_char(&lx, 0));
+                /* A sub-second part survives to the emit below, which is where the
+                 * token's kind is finally settled. */
+                dur_frac_us = frac_us;
                 tk.kind = T_INT;
                 tk.ival = (long long)total;
             }
@@ -577,7 +633,18 @@ Token *lex_all_file(Arena *arena, const char *src, int len, StringTable *strings
             }
             if (is_duration) {
                 /* Already resolved above: the value is a count of seconds, and any
-                 * complaint about it has been made. */
+                 * complaint about it has been made.
+                 *
+                 * A literal with a sub-second part is the exception, and it becomes an
+                 * ordinary float of seconds rather than a third representation of its
+                 * own: `500ms` is 0.5 and `hold` takes a number either way. There is
+                 * no integer to give for half a second, so `1m500ms` is not 1500 of
+                 * anything. Set here rather than above because the fraction and
+                 * exponent paths below overwrite dval, whether or not they ran. */
+                if (dur_frac_us != 0) {
+                    tk.kind = T_F64;
+                    tk.dval = (double)tk.ival + (double)dur_frac_us / 1000000.0;
+                }
             } else if (is_float) {
                 /* Not a `break`: this branch sits directly in the lexing loop,
                  * so a break here would end the file rather than the number. */

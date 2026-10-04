@@ -171,11 +171,13 @@ bool ok = 3 > 2 && !false;
 print(ok);                            // true
 print("count = " + 42);               // count = 42
 
-// Durations: a number with a unit stuck to it — h, m, s. They run together,
-// and a bare trailing number is seconds.
+// Durations: a number with a unit stuck to it — h, m, s, ms, us. They run
+// together, and a bare trailing number is seconds.
 hold(2h21m37);                        // wait for 2h 21m 37s
 hold(37);                             // same as hold(37s)
-print(2h + 21m + 37);                 // 8497 — a duration is an int of seconds
+hold(500ms);                          // half a second
+print(2h + 21m + 37);                 // 8497 — a whole duration is an int of seconds
+print(1m500ms);                       // 60.5 — a sub-second part makes it a float
 ```
 
 ## How it works

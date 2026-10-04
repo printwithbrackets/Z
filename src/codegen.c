@@ -1623,6 +1623,19 @@ static int is_hash_of_call(Expr *e) {
            e->args[0]->type->kind != TK_ANY && strcmp(e->name, "z_hash_of") == 0;
 }
 
+/* True if this is `hold` with a fractional number of seconds, which the runtime
+ * has to be told about separately because the argument arrives in xmm rather than
+ * in rdi and is a double rather than a whole count of seconds.
+ *
+ * Recognised by its declared parameter being TK_ANY rather than by the name alone,
+ * so a user function that happens to be called `hold` is not mistaken for it --
+ * a user function's parameters are real types, and one whose parameter is
+ * literally `any` is not writable. */
+static int is_holdf_call(Expr *e) {
+    return e->nargs == 1 && e->args[0] != NULL && is_kind(e->args[0]->type, TK_F64) &&
+           strcmp(e->name, "z_hold") == 0;
+}
+
 /* The runtime entry `to_text(x)` lowers to for a value of type `t`. */
 static const char *to_text_symbol(Type *t) {
     switch (t->kind) {
@@ -1713,6 +1726,14 @@ static void gen_call(CG *cg, Expr *e) {
     }
     if (is_hash_of_call(e)) {
         gen_hash_of(cg, e);
+        return;
+    }
+    if (is_holdf_call(e)) {
+        /* `hold(500ms)` is a wait of half a second, so it takes a different entry
+         * from `hold(5)`: the count of seconds is a double here, and the argument
+         * marshalling that follows the ordinary path would leave it in rdi. */
+        gen_float(cg, e->args[0]);
+        buf_printf(cg->out, "  call z_holdf\n");
         return;
     }
     int sret = is_aggregate(e->type);

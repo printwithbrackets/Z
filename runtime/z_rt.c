@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
@@ -473,42 +474,105 @@ void z_exit(long code) { z_die(code); }
 
 /* Waits for `seconds` and returns nothing.
  *
- * nanosleep rather than sleep, for two reasons that both matter here: sleep
- * takes an unsigned int, so a wait longer than 49 days is not expressible and a
- * negative one wraps to an enormous positive one, and sleep cannot be resumed
- * after a signal.
+ * The deadline is absolute and taken from CLOCK_REALTIME once, before the first
+ * sleep, and every slice is measured against it. A countdown re-derived from each
+ * nanosleep would drift by whatever the kernel rounded each one by, and a clock
+ * stepped forwards mid-wait -- which an NTP correction does routinely -- would
+ * silently shorten the wait to nothing, because the sleep would be interrupted
+ * with nothing left on the clock. Asking for a wait and getting a shorter one is
+ * the failure that matters, so nothing here reads the clock as an authority on how
+ * much is left.
  *
- * The wait is taken in slices for the same overflow reason one size down. tv_sec
- * is a time_t, which is 32 bits on plenty of targets, and a single nanosleep
- * whose tv_sec does not fit fails with EINVAL instead of waiting -- so a caller
- * asking to hold for a year would get an instant return on one of those targets
- * and no error at all. Slicing keeps every call inside what any time_t can hold.
+ * nanosleep rather than sleep, for two reasons that both matter here: sleep takes
+ * an unsigned int, so a wait longer than 49 days is not expressible and a negative
+ * one wraps to an enormous positive one, and sleep cannot be resumed after a signal.
  *
- * A signal does not shorten the wait. nanosleep rewrites the timespec it was
- * given with the part it did not sleep, so resuming from that is exact rather
- * than approximate, and it is what a caller means by asking to hold: returning
- * early would make a retry loop spin instead of waiting.
+ * The wait is taken in slices for the same overflow reason one size down. tv_sec is
+ * a time_t, which is 32 bits on plenty of targets, and a single nanosleep whose
+ * tv_sec does not fit fails with EINVAL instead of waiting -- so a caller asking to
+ * hold for a year would get an instant return on one of those targets and no error
+ * at all. Slicing keeps every call inside what any time_t can hold.
  *
- * A non-positive argument returns at once rather than reporting anything. Zero
- * is a reasonable thing to compute and pass -- `hold(0)` from an empty queue is
- * not a mistake -- and a negative one has no meaning to report, since there is
- * nothing the caller could do differently with the answer. */
-void z_hold(long seconds) {
-    if (seconds <= 0)
+ * A signal does not shorten the wait. nanosleep rewrites the timespec it was given
+ * with the part it did not sleep, so resuming from that is exact rather than
+ * approximate, and it is what a caller means by asking to hold: returning early
+ * would make a retry loop spin instead of waiting.
+ *
+ * An argument that is not a wait at all returns at once rather than reporting
+ * anything. Zero is a reasonable thing to compute and pass -- `hold(0)` from an
+ * empty queue is not a mistake -- and a negative one has no meaning to report,
+ * since there is nothing the caller could do differently with the answer. NaN and
+ * an infinity are the same: both are what dividing by a zero that was not meant to
+ * be one leaves behind, and neither is a length of time. An infinity in particular
+ * has to be caught here rather than treated as the very longest wait, or a
+ * `hold(1.0 / 0.0)` on a value that was never meant to reach it would hang for
+ * good instead of returning.
+ *
+ * A finite wait past what the clock can show is capped rather than refused. Such a
+ * caller has made an arithmetic mistake, but one that cannot be reported usefully
+ * -- `hold` returns nothing, so there is no error to hand back -- and a wait that
+ * ends is closer to what was meant than an instant return. */
+#define Z_HOLD_MAX_SECONDS 315576000000.0 /* ten thousand years, in seconds */
+
+static void z_hold_until(double seconds) {
+    /* Written to exclude NaN along with zero and the negatives, which is what
+     * makes this the only test those need. */
+    if (!(seconds > 0.0))
         return;
-    long left = seconds;
-    while (left > 0) {
-        long slice = left > 3600 ? 3600 : left;
-        left -= slice;
+    /* DBL_MAX is the largest finite double there is, so being above it is exactly
+     * being an infinity. Checked before the cap rather than folded into it,
+     * because an infinity is not the longest wait, it is not a wait at all. */
+    if (seconds > DBL_MAX)
+        return;
+    if (seconds > Z_HOLD_MAX_SECONDS)
+        seconds = Z_HOLD_MAX_SECONDS;
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0)
+        return; /* no clock to measure against, so no wait it can honour */
+    long whole = (long)seconds;
+    struct timespec deadline;
+    deadline.tv_sec = now.tv_sec + (time_t)whole;
+    deadline.tv_nsec = now.tv_nsec + (long)((seconds - (double)whole) * 1e9);
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_nsec -= 1000000000L;
+        deadline.tv_sec++;
+    }
+
+    for (;;) {
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0)
+            return;
+        /* What is left of the wait, as a double so that the sub-second part of the
+         * deadline survives the subtraction. */
+        double left = (double)(deadline.tv_sec - now.tv_sec) +
+                      (double)(deadline.tv_nsec - now.tv_nsec) / 1e9;
+        if (left <= 0.0)
+            return;
+        double slice = left > 3600.0 ? 3600.0 : left;
+        long slice_whole = (long)slice;
         struct timespec ts;
-        ts.tv_sec = (time_t)slice;
-        ts.tv_nsec = 0;
+        ts.tv_sec = (time_t)slice_whole;
+        ts.tv_nsec = (long)((slice - (double)slice_whole) * 1e9);
+        /* The truncation above can land a nanosecond outside the range nanosleep
+         * accepts, and it answers that with EINVAL rather than sleeping. */
+        if (ts.tv_nsec < 0)
+            ts.tv_nsec = 0;
+        else if (ts.tv_nsec > 999999999L)
+            ts.tv_nsec = 999999999L;
         while (nanosleep(&ts, &ts) != 0) {
             if (errno != EINTR)
-                break; /* nothing useful to do, and spinning would be worse */
+                return; /* nothing useful to do, and spinning would be worse */
         }
     }
 }
+
+/* A whole number of seconds. `hold(2h21m37)` arrives here as 8497, and takes the
+ * same path as `hold(500ms)` rather than a second implementation of the same wait
+ * that would have to be tested separately. */
+void z_hold(long seconds) { z_hold_until((double)seconds); }
+
+/* A fractional number of seconds, for a duration literal with a sub-second part. */
+void z_holdf(double seconds) { z_hold_until(seconds); }
 
 char *z_char_str(long b) {
     char *out = zstr_alloc_impl(1);

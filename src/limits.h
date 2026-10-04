@@ -123,7 +123,7 @@
     X("write_bytes", "z_write", 'i', "is")                                                         \
     X("io_errno", "z_io_errno", 'i', "")                                                           \
     X("io_eof", "z_io_eof", 'i', "")                                                               \
-    X("hold", "z_hold", 'v', "i")                                                                  \
+    X("hold", "z_hold", 'v', "a")                                                                  \
     X("die", "z_die", 'i', "i")                                                                    \
     X("exit", "z_exit", 'i', "i")                                                                  \
     X("to_text", "z_to_text", 's', "a")                                                            \

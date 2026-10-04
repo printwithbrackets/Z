@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static char buf[1 << 20];
@@ -446,6 +447,66 @@ int main(int argc, char **argv) {
             }
             if (ok) {
                 printf("ok   debuginfo (DWARF)\n");
+                pass++;
+            } else {
+                fail++;
+            }
+        }
+    }
+
+    /* A wait has to actually wait, which is the one property of `hold` that no
+     * golden output can show: a program that ignored its argument would print
+     * exactly what the durations case prints and be otherwise indistinguishable
+     * from one that waited.
+     *
+     * The bound is a lower one on purpose. The runtime promises never to return
+     * early -- that is what resuming an interrupted nanosleep is for -- so
+     * "at least this long" cannot be flaky however busy the machine is, while
+     * "at most this long" could be. The upper bound is there only to catch a wait
+     * that overshoots by orders of magnitude, and is loose enough not to care
+     * about scheduling.
+     *
+     * The wait is sub-second because the fraction is the part with the edges: a
+     * double converted to a whole count of seconds would turn 200ms into nothing,
+     * and this is what would notice. */
+    {
+        static const char src[] = "int main() { hold(200ms); return 0; }\n";
+        snprintf(path, sizeof path, "/tmp/z_test_hold.z");
+        FILE *hf = fopen(path, "wb");
+        if (hf == NULL || fwrite(src, 1, sizeof src - 1, hf) != sizeof src - 1) {
+            if (hf)
+                fclose(hf);
+            fprintf(stderr, "FAIL hold (cannot write the test source)\n");
+            fail++;
+        } else {
+            fclose(hf);
+            snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_hold %s 2>&1", zc, path,
+                     opt_flag());
+            char actual[1 << 16];
+            int rc = run_cmd_capture(cmd, actual, sizeof actual);
+            struct timespec t0, t1;
+            long long ms = -1;
+            if (rc == 0 && clock_gettime(CLOCK_MONOTONIC, &t0) == 0 &&
+                run_cmd_capture("/tmp/z_test_hold", actual, sizeof actual) == 0 &&
+                clock_gettime(CLOCK_MONOTONIC, &t1) == 0)
+                ms =
+                    (long long)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+            int ok = 1;
+            if (rc != 0) {
+                fprintf(stderr, "FAIL hold (build failed)\n%s\n", actual);
+                ok = 0;
+            } else if (ms < 190) {
+                fprintf(stderr,
+                        "FAIL hold (200ms returned after %lldms: the fraction of a "
+                        "duration was dropped)\n",
+                        ms);
+                ok = 0;
+            } else if (ms > 3000) {
+                fprintf(stderr, "FAIL hold (200ms took %lldms)\n", ms);
+                ok = 0;
+            }
+            if (ok) {
+                printf("ok   hold (waited %lldms for 200ms)\n", ms);
                 pass++;
             } else {
                 fail++;
