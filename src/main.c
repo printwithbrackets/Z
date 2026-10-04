@@ -379,7 +379,7 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         free(text);
         return 1;
     }
-/* One terminator for the assembled unit.
+    /* One terminator for the assembled unit.
      *
      * It inherits the last real token's position rather than being zeroed, because
      * a diagnostic whose expected token is the end of the file is reported at this
@@ -619,8 +619,8 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         char exe[256];
         snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
-                    no_surface, surface_path, link_args, n_link_args) != 0)
+        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, no_surface,
+                    surface_path, link_args, n_link_args) != 0)
             return 1;
         char *run_it[] = {exe, NULL};
         int rc = run_argv(run_it);
@@ -631,8 +631,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "asm") == 0) {
         /* Debugging aid: emit the generated assembly to stdout. */
         return compile(src, NULL, "/dev/stdout", bounds_checks, opt_level, debug_info, use_stdlib,
-                       no_surface, surface_path,
-                       link_args, n_link_args) == 0
+                       no_surface, surface_path, link_args, n_link_args) == 0
                    ? 0
                    : 1;
     }

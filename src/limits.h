@@ -123,14 +123,14 @@
     X("write_bytes", "z_write", 'i', "is")                                                         \
     X("io_errno", "z_io_errno", 'i', "")                                                           \
     X("io_eof", "z_io_eof", 'i', "")                                                               \
-    /* Reading a line, as opposed to a byte at a time. `read_string` is the one a
-     * program actually wants -- its own input, from descriptor 0 -- and
-     * `read_line` is the general form, which is also what makes the pair
-     * testable without a terminal. `input` is the prompt-then-read that every
-     * console program opens with. */                                               \
+    /* Reading a line, as opposed to a byte at a time. `read_string` is the one a                  \
+     * program actually wants -- its own input, from descriptor 0 -- and                           \
+     * `read_line` is the general form, which is also what makes the pair                          \
+     * testable without a terminal. `input` is the prompt-then-read that every                     \
+     * console program opens with. */                                                              \
     X("read_line", "z_read_line", 's', "i")                                                        \
     X("read_string", "z_read_string", 's', "")                                                     \
-    X("input", "z_input", 's', "s")                                                               \
+    X("input", "z_input", 's', "s")                                                                \
     X("hold", "z_hold", 'v', "a")                                                                  \
     X("die", "z_die", 'i', "i")                                                                    \
     X("exit", "z_exit", 'i', "i")                                                                  \

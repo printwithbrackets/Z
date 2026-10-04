@@ -145,8 +145,7 @@ int surface_load(Surface *s, const char *path) {
         while (ll > 0 && (lhs[ll - 1] == ' ' || lhs[ll - 1] == '\t'))
             lhs[--ll] = '\0';
         if (ll == 0 || rl == 0) {
-            fprintf(stderr, "%s:%d: a mapping needs a name on both sides of '='\n", path,
-                    lineno);
+            fprintf(stderr, "%s:%d: a mapping needs a name on both sides of '='\n", path, lineno);
             rc = -1;
             break;
         }

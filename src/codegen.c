@@ -2645,9 +2645,9 @@ static void gen_expr_body(CG *cg, Expr *e) {
              *
              * This is the same hole as a ternary's untaken arm, and it was live
              * for the whole of the temporary-release work: `match (r) { Ok(n) =>
-             * Console.WriteLog("ok " + itoa(n)), Err(e) => Console.WriteLog("e " + e) }` on a Result
-             * whose Ok payload is an int freed an int as a string pointer. A
-             * match was the one conditional form not covered. */
+             * Console.WriteLog("ok " + itoa(n)), Err(e) => Console.WriteLog("e " + e) }` on a
+             * Result whose Ok payload is an int freed an int as a string pointer. A match was the
+             * one conditional form not covered. */
             cg->no_str_temp++;
             gen_expr(cg, arm->body);
             cg->no_str_temp--;

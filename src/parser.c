@@ -281,9 +281,7 @@ typedef struct {
 
 /* The internal name for `name`, or `name` itself. See the surface rules in
  * surface.h; the short version is that this is a fallback, not a claim. */
-static const char *surf(Parser *p, const char *name) {
-    return surface_name(p->surf, name);
-}
+static const char *surf(Parser *p, const char *name) { return surface_name(p->surf, name); }
 
 /* A method lookup that falls back to the dialect.
  *
@@ -439,8 +437,6 @@ static void skip_braced_block(Parser *p);
 static ConstDef *const_find(Parser *p, const char *name);
 static Expr *const_expr(Parser *p, ConstDef *c, Span span);
 static int const_fold_static(Parser *p, Expr *e, long long *out);
-
-
 
 /* ---- token helpers ---- */
 
@@ -3809,8 +3805,8 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                  * was never defined. */
                 const char *iname = bm->name;
                 char *mang = arena_alloc(p->arena, strlen(st->sdef->name) + strlen(iname) + 3);
-                snprintf(mang, strlen(st->sdef->name) + strlen(iname) + 3, "%s__%s",
-                         st->sdef->name, iname);
+                snprintf(mang, strlen(st->sdef->name) + strlen(iname) + 3, "%s__%s", st->sdef->name,
+                         iname);
                 Expr *mp = new_expr(p, E_MPTR, span);
                 mp->name = mang;
                 mp->lhs = rcv;
