@@ -1,0 +1,21 @@
+// A downward loop with a non-unit stride has to be closed.
+//
+// `i > 0` with `i = i - 4` walks down towards zero. The stride is negative and
+// the comparison is a downward one, so the two agree and the loop has a closed
+// form: 25 iterations, 75 added.
+//
+// The pass used to negate the stride for a downward comparison, which made the
+// sign check reject every genuinely downward loop, so this one ran. The answer
+// was right either way, which is why the answer is not the assertion. This file
+// is only ever compiled, never run, and the harness checks that the loop is gone
+// from the generated code.
+int main() {
+    var sum = 0;
+    var i = 100;
+    while (i > 0) {
+        sum = sum + 3;
+        i = i - 4;
+    }
+    Console.WriteLog(sum);
+    return 0;
+}

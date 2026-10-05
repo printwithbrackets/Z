@@ -1,0 +1,26 @@
+// A call in the accumulate amount, whose result changes every iteration.
+//
+// The closed form for an accumulate is `amount * trip count`, which is exact
+// when the amount really is the same on every iteration. A call is where that
+// assumption is worth nothing, and the pass has no way to check it: it can see
+// the *arguments* of a call, so `n = n + scaled(i)` is rejected because `i` is
+// visible, but it cannot see inside `read_string()`, and a function that returns
+// a different answer each time is the ordinary case for anything that reads
+// input, a clock, or a random source.
+//
+// The harness feeds three lines, so the loop sees 1, 2 and 3. Closed, the pass
+// would call `read_string` once and multiply by three, which is 3.
+//
+// The pass is not the only thing that could get this wrong, so the expectation
+// here is the sum the loop computes, not a claim about the shape of the code.
+
+int main() {
+    var n = 0;
+    var i = 0;
+    while (i < 3) {
+        n = n + len(read_string());
+        i = i + 1;
+    }
+    Console.WriteLog(n);
+    return 0;
+}

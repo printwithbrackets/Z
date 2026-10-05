@@ -168,6 +168,98 @@ static char test_dbg[128];
  * exist rather than anything unsafe. No real path is close. */
 static char zq[1024];
 
+/* The body of the program's own first function, from its label to the next
+ * function label: everything from `z_main` up to the next line that starts in
+ * column zero, is not a local label, and carries a colon.
+ *
+ * `z_main` and not `main`, because the driver wraps the program in a `main` that
+ * does nothing but call it. Reading that wrapper finds no jumps at all, which
+ * would report every case as closed. */
+static int asm_first_function(const char *asm_text, char *out, size_t cap) {
+    const char *line = asm_text;
+    size_t used = 0;
+    int in_body = 0;
+    out[0] = 0;
+    for (; *line != '\0';) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol != NULL ? (size_t)(eol - line) : strlen(line);
+        char buf[512];
+        if (len >= sizeof buf)
+            len = sizeof buf - 1;
+        memcpy(buf, line, len);
+        buf[len] = 0;
+        char *t = buf;
+        while (*t == ' ' || *t == '\t')
+            t++;
+        if (!in_body) {
+            if (strncmp(t, "z_main:", 7) != 0)
+                goto next;
+            in_body = 1;
+        } else if (t[0] != '.' && t[0] != ' ' && t[0] != '#' && strchr(t, ':') != NULL) {
+            break; /* the next function */
+        }
+        /* The stripped text, so `strlen` and not the raw line length: copying the
+         * raw length would drag the terminator and whatever followed it in the
+         * scratch buffer along, and the embedded NUL would truncate every line
+         * after this one. */
+        size_t tl = strlen(t);
+        if (used + tl + 2 < cap) {
+            memcpy(out + used, t, tl);
+            used += tl;
+            out[used++] = '\n';
+            out[used] = 0;
+        }
+    next:
+        line = eol != NULL ? eol + 1 : line + strlen(line);
+    }
+    return in_body;
+}
+
+/* Whether a function's assembly jumps back to a label defined above it, which is
+ * what a loop is.
+ *
+ * Read as one pass with a list of the labels seen so far, because a jump names
+ * its target above the jump itself and a second pass over the text would be more
+ * code for the same answer. */
+static int asm_has_backward_jump(const char *body) {
+    char seen[512][64];
+    int nseen = 0;
+    for (const char *line = body; *line != '\0';) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol != NULL ? (size_t)(eol - line) : strlen(line);
+        char buf[512];
+        if (len >= sizeof buf)
+            len = sizeof buf - 1;
+        memcpy(buf, line, len);
+        buf[len] = 0;
+        char *t = buf;
+        while (*t == ' ' || *t == '\t')
+            t++;
+        size_t tl = strlen(t);
+        if (tl > 1 && t[0] == '.' && t[tl - 1] == ':') {
+            char name[64];
+            snprintf(name, sizeof name, "%s", t);
+            name[strcspn(name, ":")] = 0;
+            if (nseen < (int)(sizeof seen / sizeof *seen))
+                snprintf(seen[nseen++], sizeof seen[0], "%s", name);
+        } else if (t[0] == 'j') {
+            char *sp = strchr(t, ' ');
+            if (sp != NULL) {
+                while (*++sp == ' ')
+                    ;
+                char name[64];
+                snprintf(name, sizeof name, "%s", sp);
+                name[strcspn(name, " \t\r")] = 0;
+                for (int k = 0; k < nseen; k++)
+                    if (strcmp(seen[k], name) == 0)
+                        return 1;
+            }
+        }
+        line = eol != NULL ? eol + 1 : line + strlen(line);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     const char *zc = argv[1];
@@ -202,7 +294,7 @@ int main(int argc, char **argv) {
         "onearg_call",   "durations",      "stackargs",    "closedform",  "licm_bigframe",
         "inliner",       "result",         "interfaces",   "cxxsyntax",   "rangefor",
         "addrof_field",  "destructors",    "strreturn",    "stdin",       "surface",
-        "typeof",        "vcall_struct",   "icall_struct", "var_init",
+        "typeof",        "vcall_struct",   "icall_struct", "var_init",    "closedform_call",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -1089,6 +1181,64 @@ int main(int argc, char **argv) {
     } else {
         for (size_t i = 0; i < sizeof leaks / sizeof *leaks; i++)
             printf("skip %s (no AddressSanitizer)\n", leaks[i]);
+    }
+
+    /* Closed-form gate: whether the loop is still in the generated code.
+     *
+     * The pass replaces a counted accumulate loop with its arithmetic, and that
+     * is invisible in the program's output, so the only ways to assert on it are
+     * to read the assembly or to time it. This reads the assembly: a loop leaves
+     * a label that is jumped to from below it, and a closed form has none.
+     *
+     * Both cases here are compiled and never run, which is the point of one of
+     * them. `sign_mismatch` counts up towards a bound below it and cannot
+     * terminate, so the test that matters is that the pass declines to give it a
+     * finite answer, and the only way to ask that is not to wait for it.
+     */
+    {
+        static const char *cf_gates[] = {"down_closed", "sign_mismatch"};
+        const char *cf_dir = "tests/closedform";
+        for (size_t i = 0; i < sizeof cf_gates / sizeof *cf_gates; i++) {
+            snprintf(path, sizeof path, "%s/%s.z", cf_dir, cf_gates[i]);
+            snprintf(exp_path, sizeof exp_path, "%s/%s.expected", cf_dir, cf_gates[i]);
+            char expected[1 << 16];
+            if (!slurp(exp_path, expected, sizeof expected)) {
+                fprintf(stderr, "FAIL closedformgate %s (missing .expected)\n", cf_gates[i]);
+                fail++;
+                continue;
+            }
+            expected[strcspn(expected, "\n")] = 0;
+            /* --no-std so the listing holds one function. The standard library is
+             * spliced in ahead of the program and has loops of its own, and this
+             * is asking about one loop in one function. */
+            snprintf(cmd, sizeof cmd, "%s asm %s -O2 --no-std 2>&1", zq, path);
+            if (run_cmd_capture(cmd, asm_buf, sizeof asm_buf) != 0) {
+                fprintf(stderr, "FAIL closedformgate %s (asm failed)\n%s\n", cf_gates[i], asm_buf);
+                fail++;
+                continue;
+            }
+            /* A backward jump is a jump to a label defined earlier in the file.
+             * Collected in one pass because the two halves are in the other
+             * order: the jump is read before the label it names, if at all. */
+            char body[1 << 16];
+            if (!asm_first_function(asm_buf, body, sizeof body)) {
+                fprintf(stderr, "FAIL closedformgate %s (no function in the listing)\n",
+                        cf_gates[i]);
+                fail++;
+                continue;
+            }
+            int backward = asm_has_backward_jump(body);
+            int got = backward ? 1 : 0;
+            int want = strcmp(expected, "ran") == 0;
+            if (got != want) {
+                fprintf(stderr, "FAIL closedformgate %s (expected %s, %s)\n", cf_gates[i], expected,
+                        got ? "the loop is still there" : "the loop was closed");
+                fail++;
+                continue;
+            }
+            printf("ok   closedformgate %s (%s)\n", cf_gates[i], expected);
+            pass++;
+        }
     }
 
     /* Interop cases: a Z program plus the C file that satisfies its extern

@@ -8752,10 +8752,32 @@ static int close_form_match(Parser *p, Stmt *st, CloseFormAcc *acc) {
     return 1;
 }
 
+/* 1 when `e` contains a call anywhere, including inside a nested expression.
+ *
+ * The counterpart to `expr_reads_any`, which sees a call's arguments and nothing
+ * below them. A pass that multiplies a contribution by a trip count needs to know
+ * the contribution is the same every iteration, and a call is where that cannot
+ * be established. */
+static int expr_has_call(Expr *e) {
+    if (e == NULL)
+        return 0;
+    if (e->kind == E_CALL)
+        return 1;
+    if (expr_has_call(e->lhs) || expr_has_call(e->rhs) || expr_has_call(e->env))
+        return 1;
+    for (int i = 0; i < e->nargs; i++)
+        if (expr_has_call(e->args[i]))
+            return 1;
+    for (int i = 0; i < e->narms; i++)
+        if (expr_has_call(e->arms[i].body))
+            return 1;
+    return 0;
+}
+
 /* The induction variable, its stride, and the bound, from a loop's step and
  * condition. Returns 1 on a match. */
 static int close_form_trip(Parser *p, Stmt *loop, Expr *step_in, int *ivar, long long *stride,
-                           Expr **bound, int *strict) {
+                           Expr **bound, int *strict, int *downward) {
     /* A `for` carries its step in the header; a `while` carries it as the last
      * statement of its body, which the caller peels off and passes in. */
     Expr *step = step_in != NULL ? step_in : loop->for_step;
@@ -8815,7 +8837,18 @@ static int close_form_trip(Parser *p, Stmt *loop, Expr *step_in, int *ivar, long
         cv = cond->lhs;
         cb = cond->rhs;
         *strict = cond->op == T_GT;
-        c = -c; /* a downward loop, so the stride is negative */
+        /* A downward comparison. The stride is *not* negated to suit it: the
+         * point of the direction is that the stride has to agree with it. A
+         * loop counting down towards a bound below it has a negative stride, and
+         * negating here made every one of them look like a sign mismatch, so
+         * none of them was ever closed.
+         *
+         * The disagreement is not a missed speedup. `i < 5` with `i = i - 1`
+         * counts up towards a bound below it and cannot terminate, and the trip
+         * count arithmetic below will happily return a finite number of
+         * iterations for it, which is a program that returns from a loop that
+         * does not. The check that refuses it is below. */
+        *downward = 1;
         break;
     default:
         return 0;
@@ -8826,6 +8859,24 @@ static int close_form_trip(Parser *p, Stmt *loop, Expr *step_in, int *ivar, long
     *stride = c;
     *bound = cb;
     return 1;
+}
+
+/* True when `st` writes `slot`, which for this pass means mentioning it on the
+ * left of an assignment in any spelling.
+ *
+ * One function because the start-of-loop search has to agree with itself about
+ * what a write is: the nearest write wins, and a write it did not recognise
+ * would let the search step over it and take an earlier one instead, which is a
+ * different loop's start. */
+static int stmt_writes_slot(Stmt *st, int slot) {
+    if (st == NULL)
+        return 0;
+    if (st->kind == S_VAR)
+        return st->slot == slot;
+    if (st->kind != S_EXPR || st->expr == NULL)
+        return 0;
+    Expr *e = st->expr;
+    return e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->slot == slot;
 }
 
 /* Applies close_form_loop to every loop in a function body, innermost first, so
@@ -8886,7 +8937,8 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
     long long stride;
     Expr *bound = NULL;
     int strict = 0;
-    if (!close_form_trip(p, loop, step_expr, &ivar, &stride, &bound, &strict))
+    int downward = 0;
+    if (!close_form_trip(p, loop, step_expr, &ivar, &stride, &bound, &strict, &downward))
         return loop;
     long long limit;
     if (!const_fold_static(p, bound, &limit))
@@ -8950,6 +9002,20 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
             return loop;
         if (expr_reads_any(accs[k].amount, written, nwritten))
             return loop;
+        /* And it may not be a call.
+         *
+         * `expr_reads_any` sees a call's *arguments*, so `n = n + scaled(i)` is
+         * rejected, because `i` is right there in the argument list. It cannot
+         * see inside the callee, and a function that answers differently each time
+         * is the ordinary case for anything reading input, a clock, or a random
+         * source. Multiplying one answer by the trip count is then not an
+         * approximation, it is a different number: three lines of input gave 1 + 2
+         * + 3 = 6 from the loop and 1 * 3 = 3 from the closed form.
+         *
+         * This is a refusal rather than a proof, which is the honest kind. There
+         * is no way to know from here that a callee is pure. */
+        if (expr_has_call(accs[k].amount))
+            return loop;
     }
 
     /* Trip count. The start has to be a constant: it is the one number this
@@ -8963,6 +9029,19 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
         start = loop->for_init->init->ival;
         have_start = 1;
     }
+    /* A `for` may also *assign* its loop variable rather than declare it, and that
+     * is the same claim about where the count starts. It used to be missed, and
+     * missing it was not a refusal: the search below fell through to the nearest
+     * write it could see, which was a `var i = 0` somewhere above, and the closed
+     * form then counted from there. `for (i = 5; i < 9; ...)` became nine
+     * iterations instead of four. */
+    if (!have_start && stmt_writes_slot(loop->for_init, ivar) && loop->for_init->kind == S_EXPR) {
+        Expr *a = loop->for_init->expr;
+        if (a != NULL && !a->compound && a->rhs != NULL && a->rhs->kind == E_INT) {
+            start = a->rhs->ival;
+            have_start = 1;
+        }
+    }
     if (!have_start && siblings != NULL) {
         /* Only the *nearest* write counts. An earlier one whose value is not a
          * constant would make any guess wrong, so the search stops there. The
@@ -8970,25 +9049,24 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
          * know it latched onto whichever local it saw first. */
         for (int k = sib_index - 1; k >= 0 && !have_start; k--) {
             Stmt *prev = siblings[k];
-            if (prev == NULL)
+            if (!stmt_writes_slot(prev, ivar))
                 continue;
-            if (prev->kind == S_VAR && prev->slot == ivar) {
+            /* The nearest write wins, and the search stops either way. A write
+             * whose value is not a constant leaves the start unknown, which
+             * refuses the rewrite rather than guessing. */
+            if (prev->kind == S_VAR) {
                 if (prev->init != NULL && prev->init->kind == E_INT) {
                     start = prev->init->ival;
                     have_start = 1;
                 }
-                break;
-            }
-            if (prev->kind == S_EXPR && prev->expr != NULL && prev->expr->kind == E_ASSIGN &&
-                prev->expr->lhs != NULL && prev->expr->lhs->kind == E_VAR &&
-                prev->expr->lhs->slot == ivar) {
-                if (!prev->expr->compound && prev->expr->rhs != NULL &&
-                    prev->expr->rhs->kind == E_INT) {
-                    start = prev->expr->rhs->ival;
+            } else {
+                Expr *a = prev->expr;
+                if (a != NULL && !a->compound && a->rhs != NULL && a->rhs->kind == E_INT) {
+                    start = a->rhs->ival;
                     have_start = 1;
                 }
-                break;
             }
+            break;
         }
     }
     if (!have_start)
@@ -8996,12 +9074,22 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
 
     long long span = limit - start;
     long long n;
-    if (stride > 0) {
+    if (!downward) {
+        /* Upwards: the stride has to be positive and the bound above the start.
+         * A non-positive stride here is a loop that counts away from its bound,
+         * which never terminates, and returning a trip count for it would be a
+         * finite answer for an infinite loop. */
+        if (stride <= 0)
+            return loop;
         if (span <= 0)
             return loop; /* the loop never runs: the trip count is 0, and the
                           * code below assumes at least one iteration */
         n = strict ? (span + stride - 1) / stride : span / stride + 1;
     } else {
+        /* Downwards: the mirror image. A positive stride counts up past a bound
+         * it is being compared against with `>`, and never terminates either. */
+        if (stride >= 0)
+            return loop;
         if (span >= 0)
             return loop;
         long long d = -stride;
@@ -9033,6 +9121,40 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
         Stmt *st = new_stmt(p, S_EXPR, loop->span);
         st->expr = asg;
         items[nitems++] = st;
+    }
+    /* The induction variable ends where the loop left it.
+     *
+     * The replacement used to assign the accumulators and nothing else, so a read
+     * of the loop variable after the loop saw the value from *before* it. That is
+     * the one thing about this rewrite that is observable, and it is observable
+     * exactly where a loop is normally invisible: a counter that is printed after
+     * it, or handed to something else. The loop's own step ran last, so this does
+     * too.
+     *
+     * The step's own left-hand side is reused as the target rather than looked up,
+     * for the reason the accumulators' is: this pass runs after the scope is
+     * gone, so a name would not resolve. */
+    {
+        Expr *step = step_expr != NULL ? step_expr : loop->for_step;
+        if (step != NULL && step->lhs != NULL && step->lhs->kind == E_VAR) {
+            Expr *st0 = new_expr(p, E_INT, loop->span);
+            st0->type = type_int(p->ty);
+            st0->ival = start;
+            Expr *st1 = new_expr(p, E_INT, loop->span);
+            st1->type = type_int(p->ty);
+            st1->ival = stride;
+            Expr *adv = make_binary(p, T_STAR, count, st1, loop->span);
+            Expr *fin = make_binary(p, T_PLUS, st0, adv, loop->span);
+            if (fin->type == NULL)
+                fin->type = type_int(p->ty);
+            Expr *asg = new_expr(p, E_ASSIGN, loop->span);
+            asg->lhs = step->lhs;
+            asg->rhs = fin;
+            asg->type = type_int(p->ty);
+            Stmt *st = new_stmt(p, S_EXPR, loop->span);
+            st->expr = asg;
+            items[nitems++] = st;
+        }
     }
     if (nitems == 0)
         return loop;

@@ -738,6 +738,30 @@ Recorded because each was invisible at the default optimization level, and
   arise. Only `TK_MPTR` is refused, in two places in `parse_postfix` and
   `parse_primary`. A closure and an interface were never refused, which is why the
   combination sat there unexercised and the comment read as a reason it was safe.
+- **The closed-form loop rewrite returned wrong answers at `-O2`, four ways.**
+  A counted accumulate loop is replaced by `amount * trip count`, and four things
+  had to be true that the pass did not check. It did not write the induction
+  variable's final value, so a read after the loop saw the value from *before* it
+  -- the one observable consequence of a rewrite that is otherwise invisible, and
+  it shows up exactly where a loop is normally invisible, on a counter printed
+  after it. It negated the stride for a downward comparison, which made every
+  genuinely downward loop look like a sign mismatch, so none was ever closed, and
+  a loop whose sign disagrees with its comparison -- which is a loop that cannot
+  terminate -- was given a finite trip count and a program that returned from it.
+  It missed a `for` that *assigns* its loop variable rather than declaring it, fell
+  through to the nearest write it could see, and counted from there: nine
+  iterations where there were four. And it let a call stand as the amount, because
+  it sees a call's arguments and nothing below them, so a function that answers
+  differently each time was multiplied by the trip count: three lines of input gave
+  6 from the loop and 3 from the closed form. The first, third and fourth are in
+  `closedform`, the fourth alone in `closedform_call`, and the second in
+  `down_closed` and `sign_mismatch`, which are only ever compiled.
+- **Two comments in `closedform.z` described the pass by what it did rather than
+  what it decided.** One said a downward loop was solved when no downward loop was
+  ever closed. The other said a call in the body was not solved when a call was
+  accepted for the wrong reason: it was rejected by an accident of the shape check
+  rather than by a decision about calls. Both are corrected, and the tests they
+  describe now hold.
 - **A declaration with a written-out type never checked its initializer.**
   `parse_var_decl` recorded the declared type and kept the initializer, and
   nothing in between converted one to the other or compared them. `float f = 3;`
