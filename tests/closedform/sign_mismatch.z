@@ -1,0 +1,20 @@
+// A stride whose sign disagrees with the comparison must not be closed.
+//
+// `i < 5` with `i = i - 1` counts *up* towards a bound below it, so the loop
+// never ends. The closed form computed a finite answer for it anyway: five
+// iterations, five added, and a program that returned from a loop that cannot.
+//
+// This is only ever compiled, never run, because running it hangs. That is the
+// point of the test: the honest answer for a loop that does not terminate is
+// that the pass declines to rewrite it, and the way to assert that is to look at
+// the code rather than wait for it.
+int main() {
+    var sum = 0;
+    var i = 10;
+    while (i < 5) {
+        sum = sum + 1;
+        i = i - 1;
+    }
+    Console.WriteLog(sum);
+    return 0;
+}
