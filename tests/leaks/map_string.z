@@ -1,0 +1,74 @@
+// A Map releases the strings in its keys and its values.
+//
+// Both arrays are walked, and only the slots the map still holds: `state` is
+// what says a slot is live, so a removed entry's key and value are already
+// gone and releasing them again would be a double free. That is the whole
+// reason the map keeps a separate state array rather than a sentinel value, and
+// it is what a destructor has to respect.
+//
+// Four shapes, because each is a different way to be wrong:
+//   - a string key and a string value, the case the others are variations of
+//   - a string key and an int value, so the two arrays are walked differently
+//   - an int key and a string value, the other way round
+//   - neither, which must be left alone
+//
+// Plus a rehash, because that is where the keys and values are moved from one
+// pair of arrays into another, and a map that releases the old arrays' contents
+// would free what the new ones now hold.
+
+int main() {
+    {
+        var m = new Map<string, string>();
+        m.set("one", "first");
+        m.set("two", "second");
+        Console.WriteLog(m.size());
+        Console.WriteLog(m.get("one", "missing"));
+    }
+
+    {
+        var m = new Map<string, int>();
+        for (var i = 0; i < 30; i++) {
+            m.set("key " + int_to_string(i), i);
+        }
+        Console.WriteLog(m.size());
+        Console.WriteLog(m.get("key 7", -1));
+    }
+
+    {
+        var m = new Map<int, string>();
+        m.set(1, "one");
+        m.set(2, "two");
+        Console.WriteLog(m.get(2, "missing"));
+    }
+
+    {
+        var m = new Map<int, int>();
+        m.set(1, 10);
+        m.set(2, 20);
+        Console.WriteLog(m.get(1, -1));
+    }
+
+    // Rehash past the first sixteen slots.
+    {
+        var m = new Map<string, string>();
+        for (var i = 0; i < 50; i++) {
+            m.set("k" + int_to_string(i), "v" + int_to_string(i));
+        }
+        Console.WriteLog(m.size());
+        Console.WriteLog(m.get("k49", "missing"));
+    }
+
+    // A removed entry's key and value are gone already, so the destructor must
+    // skip its slot rather than release it a second time.
+    {
+        var m = new Map<string, string>();
+        m.set("keep", "kept");
+        m.set("drop", "dropped");
+        m.remove("drop");
+        Console.WriteLog(m.size());
+        Console.WriteLog(m.get("keep", "missing"));
+    }
+
+    Console.WriteLog("done");
+    return 0;
+}

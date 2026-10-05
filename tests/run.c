@@ -87,6 +87,44 @@ static int run_cmd_capture(const char *cmd, char *out, int cap) {
     return (status >> 8) & 0xff;
 }
 
+/* Whether AddressSanitizer can be built into and run from a program here.
+ *
+ * Probed rather than assumed, because the leak cases are the only ones that need
+ * it and a toolchain without it should report them as skipped rather than fail
+ * the suite for a reason that has nothing to do with the compiler.
+ *
+ * The probe deliberately leaks a string, so a build where the flag was accepted
+ * but silently ignored does not read as available: the run has to produce a
+ * LeakSanitizer report, which means the instrumentation is linked, the leak
+ * detector is on, and this process can execute the result. */
+static int asan_available(const char *zc) {
+    char src[256], bin[256], cmd[2048], out[1 << 16];
+    snprintf(src, sizeof src, "/tmp/z_asan_probe_%ld.z", (long)getpid());
+    snprintf(bin, sizeof bin, "/tmp/z_asan_probe_%ld", (long)getpid());
+    FILE *f = fopen(src, "w");
+    if (f == NULL)
+        return 0;
+    /* The temporary in the return expression is never released, so the string
+     * allocator shows up in the leak report if and only if it is instrumented.
+     * A temporary that is stored into a local would not do: the compiler
+     * releases that one when the scope ends. */
+    fputs("int main() { return len(\"probe \" + int_to_string(42)) > 0 ? 0 : 1; }\n", f);
+    fclose(f);
+    snprintf(cmd, sizeof cmd, "./%s build %s -o %s -fsanitize=address -g >/dev/null 2>&1", zc, src,
+             bin);
+    int ok = run_cmd_capture(cmd, out, sizeof out) == 0;
+    if (ok) {
+        /* LeakSanitizer makes the process exit nonzero when it reports, so the
+         * status says nothing here and the report is the assertion. */
+        snprintf(cmd, sizeof cmd, "ASAN_OPTIONS=detect_leaks=1 %s 2>&1", bin);
+        run_cmd_capture(cmd, out, sizeof out);
+        ok = strstr(out, "LeakSanitizer") != NULL && strstr(out, "zstr_alloc_impl") != NULL;
+    }
+    remove(src);
+    remove(bin);
+    return ok;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     const char *zc = argv[1];
@@ -795,6 +833,73 @@ int main(int argc, char **argv) {
         } else {
             fail++;
         }
+    }
+
+    /* Leak cases: built with AddressSanitizer and run with leak detection on,
+     * and required to report no leaked block that came from the string
+     * allocator.
+     *
+     * The assertion is on the allocation stack rather than on a count or a byte
+     * total, because what is being tested is a property rather than a number:
+     * "no string allocation was still live at exit". A count would have to
+     * change whenever an unrelated allocation moved, and would then fail for a
+     * reason that has nothing to do with the thing under test.
+     *
+     * Asserting on the stack catches the other direction too, which is the one
+     * that bites: a destructor that frees an element it does not own shows up as
+     * an AddressSanitizer double-free rather than as a leak.
+     *
+     * A heap array cannot be released from Z yet, so the `new T[n]` behind a
+     * container is still live at exit and the report is not empty. Only the
+     * string blocks are asserted about, which is the part a container's
+     * destructor is responsible for. */
+    static const char *leaks[] = {"vec_string", "map_string"};
+    const char *lk_dir = "tests/leaks";
+    if (asan_available(zc)) {
+        char leak_out[256];
+        for (size_t i = 0; i < sizeof leaks / sizeof *leaks; i++) {
+            snprintf(path, sizeof path, "%s/%s.z", lk_dir, leaks[i]);
+            snprintf(leak_out, sizeof leak_out, "/tmp/z_leak_%ld_%s", (long)getpid(), leaks[i]);
+            snprintf(cmd, sizeof cmd, "./%s build %s -o %s %s -fsanitize=address -g 2>&1", zc, path,
+                     leak_out, opt_flag());
+            char build_err[1 << 16];
+            int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
+            if (rc != 0) {
+                fprintf(stderr, "FAIL %s (compile failed)\n%s\n", leaks[i], build_err);
+                fail++;
+                continue;
+            }
+            char actual[1 << 16];
+            snprintf(cmd, sizeof cmd, "ASAN_OPTIONS=detect_leaks=1 %s 2>&1", leak_out);
+            rc = run_cmd_capture(cmd, actual, sizeof actual);
+            /* Exit 1 is LeakSanitizer's report and is expected, so the status is
+             * not the assertion. What matters is whether any leaked block names
+             * the string allocator. */
+            if (strstr(actual, "zstr_alloc_impl") != NULL) {
+                fprintf(stderr, "FAIL %s (a string allocation was not released)\n%s\n", leaks[i],
+                        actual);
+                fail++;
+                continue;
+            }
+            if (strstr(actual, "ERROR: AddressSanitizer") != NULL) {
+                fprintf(stderr, "FAIL %s (AddressSanitizer reported an error)\n%s\n", leaks[i],
+                        actual);
+                fail++;
+                continue;
+            }
+            if (strstr(actual, "LeakSanitizer") == NULL) {
+                fprintf(stderr, "FAIL %s (no leak report at all, so nothing was checked)\n%s\n",
+                        leaks[i], actual);
+                fail++;
+                continue;
+            }
+            printf("ok   %s (leaks)\n", leaks[i]);
+            pass++;
+            remove(leak_out);
+        }
+    } else {
+        for (size_t i = 0; i < sizeof leaks / sizeof *leaks; i++)
+            printf("skip %s (no AddressSanitizer)\n", leaks[i]);
     }
 
     /* Interop cases: a Z program plus the C file that satisfies its extern

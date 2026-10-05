@@ -1,0 +1,103 @@
+// A Vec of strings releases what it holds when it goes out of scope.
+//
+// `push` copies, so every element is an allocation this vector owns outright,
+// which is what makes releasing them on scope end correct rather than a double
+// free waiting for the right alias. `Vec<int>` must be untouched by any of it,
+// because releasing an int as if it were a string header is exactly the bug a
+// container destructor invites.
+//
+// The array itself is still live at exit. There is no way to release a heap
+// array from Z yet, so this asserts about the strings only, and it asserts that
+// way deliberately: a leak is the safe direction to be wrong in, so what matters
+// is that nothing is freed twice and nothing is read after it is freed.
+
+int main() {
+    {
+        var v = new Vec<string>();
+        v.push("alpha");
+        v.push("beta");
+        v.push("gamma");
+        Console.WriteLog(v.size());
+        Console.WriteLog(v.at(1));
+    }
+
+    // A vector that grew past its first buffer, so the released set is the
+    // grown one rather than the eight slots the constructor allocated.
+    {
+        var big = new Vec<string>();
+        for (var i = 0; i < 40; i++) {
+            big.push("element number " + int_to_string(i));
+        }
+        Console.WriteLog(big.size());
+    }
+
+    // A copy is a copy: `slice` and `reversed` build their own elements
+    // through `push`, so each vector owns what it holds and releasing both is
+    // two releases rather than one of shared bytes.
+    {
+        var src = new Vec<string>();
+        src.push("one");
+        src.push("two");
+        var half = src.slice(0, 1);
+        var rev = src.reversed();
+        Console.WriteLog(half.at(0));
+        Console.WriteLog(rev.at(0));
+    }
+
+    // `pop` and `removeAt` hand an element to the caller, so the vector must
+    // stop owning it. If the destructor walked the whole capacity rather than
+    // the length, these would be freed twice.
+    {
+        var v = new Vec<string>();
+        v.push("kept");
+        v.push("handed back");
+        var got = v.pop();
+        Console.WriteLog(got);
+        Console.WriteLog(v.size());
+    }
+    {
+        var v = new Vec<string>();
+        v.push("first");
+        v.push("middle");
+        v.push("last");
+        var got = v.removeAt(1);
+        Console.WriteLog(got);
+        Console.WriteLog(v.at(1));
+    }
+
+    // A vector of a type that is not a string is left alone entirely.
+    {
+        var ints = new Vec<int>();
+        for (var i = 0; i < 20; i++) {
+            ints.push(i * 3);
+        }
+        Console.WriteLog(ints.at(7));
+    }
+    {
+        var pairs = new Vec<Pair>();
+        pairs.push(new Pair(1, 2));
+        Console.WriteLog(pairs.at(0).sum());
+    }
+
+    // An empty vector has nothing to release, and one that was emptied has
+    // already given its elements back.
+    {
+        var e = new Vec<string>();
+        Console.WriteLog(e.size());
+    }
+    {
+        var c = new Vec<string>();
+        c.push("gone");
+        c.clear();
+        Console.WriteLog(c.size());
+    }
+
+    Console.WriteLog("done");
+    return 0;
+}
+
+struct Pair {
+    int a;
+    int b;
+    int sum() { return a + b; }
+}

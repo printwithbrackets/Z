@@ -1849,6 +1849,59 @@ static int prescan_struct_members(Parser *p, StructDef *sd, int j, const char *c
     while (j < p->ntoks) {
         if (p->toks[j].kind == T_RBRACE)
             break;
+        /* `~Type() { ... }`: a destructor registers no signature here, because
+         * the real parse reaches it through parse_method. The form still has to
+         * be recognised, or this pass stops dead.
+         *
+         * It used to stop, and that is worse than it sounds: `~` is not a member
+         * the two scanners below know, the pass gave up rather than stepping
+         * over one token, and every member written after a destructor went
+         * unregistered. A `Vec<T>` with a destructor could not call its own
+         * `Grow`, because the pass that exists so a method can call a method
+         * declared later had never heard of the destructor sitting in front of
+         * it. */
+        if (p->toks[j].kind == T_TILDE) {
+            int k = j + 1;
+            if (k < p->ntoks && p->toks[k].kind == T_IDENT)
+                k++;
+            /* Past the parameter list, which a destructor spells empty. */
+            if (k < p->ntoks && p->toks[k].kind == T_LPAREN) {
+                int d = 0;
+                while (k < p->ntoks) {
+                    if (p->toks[k].kind == T_LPAREN) {
+                        d++;
+                    } else if (p->toks[k].kind == T_RPAREN) {
+                        d--;
+                        if (d == 0) {
+                            k++;
+                            break;
+                        }
+                    } else if (p->toks[k].kind == T_EOF) {
+                        break;
+                    }
+                    k++;
+                }
+            }
+            if (k < p->ntoks && p->toks[k].kind == T_LBRACE) {
+                Parser sub = *p;
+                sub.pos = k;
+                skip_braced_block(&sub);
+                k = sub.pos;
+            } else if (k < p->ntoks && p->toks[k].kind == T_FATARROW) {
+                while (k < p->ntoks && p->toks[k].kind != T_SEMI && p->toks[k].kind != T_EOF)
+                    k++;
+                if (k < p->ntoks)
+                    k++;
+            }
+            if (k == j + 1) {
+                /* A `~` that is not the start of a destructor, so leave it to
+                 * the real parse to report. */
+                j++;
+                continue;
+            }
+            j = k;
+            continue;
+        }
         int next = scan_plain_field(p, j, sd);
         if (next != j) {
             j = next;
@@ -5469,6 +5522,17 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
     int k = 0;
     for (int i = 0; i < n; i++) {
         Var *v = sc->drops[n - 1 - i];
+        /* A moved-from local is not owned by anything. `move` is how a value is
+         * handed on rather than shared, and the handover empties the source, so
+         * running a destructor on it afterwards destroys the caller's value.
+         *
+         * For a string that happened to be harmless, because `z_str_free` on an
+         * empty pointer returns and the source was already emptied. For a class
+         * it was not: `move` clears the pointer and the destructor call was
+         * still emitted, so `return move out;` called `~Vec` on null and the
+         * read of the vtable took the process down. */
+        if (v->is_moved)
+            continue;
         v->needs_drop = type_needs_drop(v->type);
         if (v->needs_drop)
             v->used = 1; /* existing is a use: see the unused-local warning */
@@ -5733,6 +5797,34 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
                 }
             }
             s->owns_drops = emitted > 0;
+            continue;
+        }
+        if (s->kind == S_STRUCT || s->kind == S_UNION) {
+            /* A method body is where every local a method owns lives, and a
+             * method is not an item of the program list: it hangs off the
+             * StructDef, which is all `sdef` names. So the S_FUNC arm below never
+             * sees one, and a local string a method returned was never released.
+             * Walking the methods here is what puts them in the pass.
+             *
+             * The body is reached through `m->body`, which is the same S_FUNC
+             * node code generation emits, so the drops land in the one function
+             * that runs rather than in a copy. */
+            StructDef *sd = s->sdef;
+            if (sd == NULL)
+                continue;
+            for (int mi = 0; mi < sd->nmethods; mi++) {
+                Stmt *mfn = sd->methods[mi]->body;
+                if (mfn == NULL || mfn->fbody == NULL)
+                    continue;
+                if (mfn->fbody->kind == S_BLOCK) {
+                    emitted += emit_drops_in(p, mfn->fbody->items, mfn->fbody->nitems);
+                    Stmt *d = build_drops(p, mfn->fbody->own_scope, mfn->fbody->span);
+                    if (d != NULL) {
+                        list_append(p, &mfn->fbody->items, &mfn->fbody->nitems, d);
+                        emitted += d->nitems;
+                    }
+                }
+            }
             continue;
         }
         if (s->kind == S_IF || s->kind == S_WHILE || s->kind == S_FOR) {
@@ -7307,6 +7399,12 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     StructDef *saved_msd = p->cur_msd;
     Expr *saved_this = p->cur_this;
     scope_push(p);
+    /* A method body is a frame of its own, exactly as a function body is, and
+     * the flag is what says so. Without it two things go wrong, and they are the
+     * same thing seen twice: name lookup walks past the method into whatever
+     * enclosed it, and the destructor pass builds its chain to the same
+     * boundary, so a local string a method returns was never released. */
+    p->scope->is_fn_body = 1;
     p->next_offset = 0;
     p->cur_ret = ret;
 
@@ -7828,7 +7926,13 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
             }
             char *dname = cur(p)->text;
             advance(p);
-            if (sd == NULL || strcmp(dname, name) != 0) {
+            /* A generic template is written with its own name, so `~Vec()` is
+             * what the source says while `name` is the mangled instance the
+             * method is registered on. Both spellings are therefore accepted,
+             * and the note names the instance so the message is still the one
+             * that identifies the type. */
+            int name_mismatch = strcmp(dname, name) != 0 && strcmp(dname, written) != 0;
+            if (sd == NULL || name_mismatch) {
                 diag_error(dspan,
                            "a destructor is named after its type: expected '~%s' but got '~%s'",
                            name, dname);

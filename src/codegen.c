@@ -1623,6 +1623,11 @@ static int is_hash_of_call(Expr *e) {
            e->args[0]->type->kind != TK_ANY && strcmp(e->name, "z_hash_of") == 0;
 }
 
+static int is_drop_value_call(Expr *e) {
+    return e->nargs == 1 && e->args[0] != NULL && e->args[0]->type != NULL &&
+           e->args[0]->type->kind != TK_ANY && strcmp(e->name, "z_drop_value") == 0;
+}
+
 /* True if this is `hold` with a fractional number of seconds, which the runtime
  * has to be told about separately because the argument arrives in xmm rather than
  * in rdi and is a double rather than a whole count of seconds.
@@ -1719,6 +1724,46 @@ static void gen_hash_of(CG *cg, Expr *e) {
     cg->temp_top = t;
 }
 
+static void gen_drop_value(CG *cg, Expr *e) {
+    Type *at = e->args[0]->type;
+    /* Only a string owns something today, so every other type lowers to
+     * nothing at all rather than to a call. The element is not even read: an
+     * `int` in an array is four bytes of whatever was there before, and loading
+     * it would be a read the program never asked for. */
+    if (!is_kind(at, TK_STRING))
+        return;
+    Expr *arg = e->args[0];
+    int is_slot = arg->kind == E_INDEX || arg->kind == E_FIELD;
+    if (!is_slot) {
+        gen_expr(cg, arg);
+        buf_printf(cg->out, "  mov rdi, rax\n  call z_str_free\n");
+        return;
+    }
+    /* A slot is released *and* blanked, and the order is the whole point.
+     *
+     * An assignment to an array element already releases the value that was
+     * there, so the slot a released element leaves behind is not inert: the next
+     * push into it frees the bytes this call just freed. Releasing by hand and
+     * walking away is therefore not a way to write this, it is a double free
+     * waiting for the vector to be refilled. Storing `.Lstrempty` over the slot
+     * leaves a zero-capacity string there, which is exactly what the runtime's
+     * free is a no-op on, so the slot can be written again safely.
+     *
+     * The address and the old value both go to frame slots rather than to
+     * registers because `call` clobbers every caller-saved one. */
+    gen_addr(cg, arg);
+    int a = temp_alloc(cg);
+    store_temp(cg, a);
+    load_temp(cg, a, "rdi");
+    buf_printf(cg->out, "  mov rax, QWORD PTR [rdi]\n");
+    int v = temp_alloc(cg);
+    store_temp(cg, v);
+    buf_printf(cg->out, "  lea rax, [rip + .Lstrempty + 16]\n");
+    buf_printf(cg->out, "  mov QWORD PTR [rdi], rax\n");
+    load_temp(cg, v, "rdi");
+    buf_printf(cg->out, "  call z_str_free\n");
+}
+
 static void gen_call(CG *cg, Expr *e) {
     if (is_to_text_call(e)) {
         gen_to_text(cg, e);
@@ -1726,6 +1771,10 @@ static void gen_call(CG *cg, Expr *e) {
     }
     if (is_hash_of_call(e)) {
         gen_hash_of(cg, e);
+        return;
+    }
+    if (is_drop_value_call(e)) {
+        gen_drop_value(cg, e);
         return;
     }
     if (is_holdf_call(e)) {

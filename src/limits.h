@@ -36,14 +36,14 @@
  * `a` is the one that needs explaining. A generic function cannot ask what it
  * was instantiated with in a way its branches can use: `typeof` answers, but
  * every branch after the test still has to type-check, and a branch that calls
- * int_to_string on a string does not. So the two questions that genuinely depend
- * on the type -- a value's text form, and a value's hash -- are asked of the code
- * generator through a parameter declared `any`. The generator knows the static
- * type at the call site and lowers the call accordingly, so `to_text(x)` and
- * `hash_of(x, cap)` mean the right thing for every element and key type a Map or
- * a Set can be instantiated with, and neither the standard library nor a user has
- * to declare an interface that `int` and `string` would then both have to
- * satisfy.
+ * int_to_string on a string does not. So the questions that genuinely depend
+ * on the type -- a value's text form, a value's hash, and whether a value owns
+ * anything -- are asked of the code generator through a parameter declared
+ * `any`. The generator knows the static type at the call site and lowers the
+ * call accordingly, so `to_text(x)`, `hash_of(x, cap)` and `drop_value(x)` mean
+ * the right thing for every element and key type a Map or a Set can be
+ * instantiated with, and neither the standard library nor a user has to declare
+ * an interface that `int` and `string` would then both have to satisfy.
  *
  * These are checked like any other call. The parser builds real types from the
  * signature and reports an ordinary argument-type error, and the call carries a
@@ -136,6 +136,14 @@
     X("exit", "z_exit", 'i', "i")                                                                  \
     X("to_text", "z_to_text", 's', "a")                                                            \
     X("hash_of", "z_hash_of", 'i', "ai")                                                           \
+    /* Releases a value that owns something, and does nothing to one that does not.                \
+     * This is the third question that depends on the type rather than on the value, and           \
+     * the reason a container can have a destructor at all. `str_free(x)` inside a                 \
+     * `Vec<T>` body does not compile: in the `Vec<int>` instance the argument is an               \
+     * int, and every branch after a `typeof` test still has to type-check. Asking the             \
+     * generator, which knows the static type at the call site, is what makes one body             \
+     * serve every element type. */                                                                \
+    X("drop_value", "z_drop_value", 'v', "a")                                                      \
     X("pow", "z_pow", 'i', "ii")                                                                   \
     X("gcd", "z_gcd", 'i', "ii")                                                                   \
     X("lcm", "z_lcm", 'i', "ii")                                                                   \

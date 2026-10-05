@@ -88,6 +88,26 @@ class Vec<T> {
         len = 0;
     }
 
+    /* Releases the elements this vector owns when it goes out of scope.
+     *
+     * `push` copies, so every element is an allocation this vector owns outright
+     * and releasing it here is correct rather than a double free. That is the
+     * property the whole thing rests on, and it is why `drop_value` asks the
+     * code generator rather than being a `str_free` call: in the `Vec<int>`
+     * instance the element is an int, so the call would not type-check.
+     *
+     * The loop stops at `len`, not at `cap`. `pop` and `removeAt` hand an
+     * element to the caller and drop the length, so the slots past the end hold
+     * values this vector no longer owns, and walking them would free what the
+     * caller is holding.
+     *
+     * The buffer itself is still live at exit. There is no way to release a heap
+     * array from Z yet, and that is the safe direction to be wrong in: a leak
+     * costs memory, a double free costs the program. */
+    ~Vec() {
+        for (var i = 0; i < len; i++) { drop_value(data[i]); }
+    }
+
     int size() { return len; }
     int capacity() { return cap; }
     bool isEmpty() { return len == 0; }
@@ -142,7 +162,11 @@ class Vec<T> {
             die(1);
         }
         len--;
-        return data[len];
+        /* Read out before the slot is given up, because `drop_value` blanks the
+         * slot as it releases it. The copy is what the caller owns. */
+        var out = data[len];
+        drop_value(data[len]);
+        return out;
     }
 
     /* The C++ name for `pop`. See `push_back`: an alias, not a second body. */
@@ -160,7 +184,12 @@ class Vec<T> {
             die(1);
         }
         var out = data[i];
+        /* The shift's own stores release each element they overwrite. The last
+         * slot needs releasing of its own: the shift copied the element below it
+         * upward, so the tail holds a second reference to one this vector is
+         * about to stop owning. */
         for (var k = i; k + 1 < len; k++) { data[k] = data[k + 1]; }
+        drop_value(data[len - 1]);
         len--;
         return out;
     }
@@ -178,11 +207,21 @@ class Vec<T> {
 
     /* Empties the vector, keeping the buffer. The one to reach for in a loop: a
      * vector that is refilled should not give back its allocation each time
-     * round. Release is for one that is finished. */
-    void clear() { len = 0; }
+     * round. Release is for one that is finished.
+     *
+     * `drop_value` rather than a store of an empty literal, because the element
+     * type is a parameter and `""` is not assignable to a `Vec<int>`. It blanks
+     * each slot as it releases it, which is what makes the refill safe: a push
+     * into a released slot would otherwise free memory this vector already
+     * freed. */
+    void clear() {
+        for (var i = 0; i < len; i++) { drop_value(data[i]); }
+        len = 0;
+    }
 
-    /* Empties the vector and drops the buffer, so the collector can have it. */
+    /* Empties the vector and drops the buffer. */
     void release() {
+        for (var i = 0; i < len; i++) { drop_value(data[i]); }
         cap = 8;
         len = 0;
         data = new T[8];
@@ -193,7 +232,18 @@ class Vec<T> {
         var out = new Vec<T>();
         out.reserve(len);
         for (var i = len - 1; i >= 0; i--) { out.push(data[i]); }
-        return out;
+        /* `move` hands this vector to the caller rather than sharing it.
+         *
+         * The destructor pass reaches a method body, so a `~Vec()` runs on the way
+         * out of the scope that owns the value, and a returned local is in a
+         * scope the `return` leaves. Returning one without handing it over
+         * destroys the object the caller was just given, which is the hazard the
+         * README records for exactly this shape. `move` empties the source, and
+         * `build_drops` skips a moved local, so nothing runs on it here.
+         *
+         * A returned `string` needs none of this, because the return already
+         * copies it and the original is then correctly released. */
+        return move out;
     }
 
     /* The elements in `from`..`to` -- either end optional, both clamped, an
@@ -208,7 +258,8 @@ class Vec<T> {
         var out = new Vec<T>();
         out.reserve(to - from);
         for (var i = from; i < to; i++) { out.push(data[i]); }
-        return out;
+        /* Handed over rather than destroyed on the way out. See `reversed`. */
+        return move out;
     }
 
     Vec<T>* sliceFrom(int from) { return this.slice(from, len); }
@@ -231,6 +282,9 @@ class Vec<T> {
         if (n <= 0) { return; }
         if (n >= len) { this.clear(); return; }
         for (var i = 0; i + n < len; i++) { data[i] = data[i + n]; }
+        /* The elements the shift copied from are still in the last `n` slots,
+         * duplicated into the slots below them, so those are the ones left. */
+        for (var t = len - n; t < len; t++) { drop_value(data[t]); }
         len = len - n;
     }
 
@@ -267,6 +321,15 @@ class Vec<T> {
         if (next < want) { next = want; }
         var bigger = new T[next];
         for (var i = 0; i < len; i++) { bigger[i] = data[i]; }
+        /* The line above is a copy, not a move, so the elements it copied from
+         * are still live and still this vector's to release. They used to be
+         * simply abandoned, which leaked the whole buffer's worth of strings on
+         * every doubling -- and it left the destructor at scope end with nothing
+         * worth releasing, because the elements it walks are the newer copies
+         * and the older ones are gone. Releasing here is what makes "one
+         * allocation per element, owned by the vector" true at every size rather
+         * than only at the ones that never grew. */
+        for (var k = 0; k < len; k++) { drop_value(data[k]); }
         data = bigger;
         cap = next;
     }
@@ -313,6 +376,26 @@ class Map<K,V> {
         state = new int[cap];
         len = 0;
         used = 0;
+    }
+
+    /* Releases the keys and values this map still holds.
+     *
+     * `state` is what says a slot is live, so the loop walks capacity and tests
+     * each slot rather than walking `len`, because the two are not the same
+     * range: a removed entry leaves state 2 behind, and its key and value were
+     * released when it was removed. Releasing those again is the double free a
+     * separate state array exists to make avoidable.
+     *
+     * Rehash is why the two arrays are walked separately. It moves the keys and
+     * values out of one pair of arrays into another, so after it the old arrays
+     * hold nothing this map owns and the new ones hold everything it does. */
+    ~Map() {
+        for (var i = 0; i < cap; i++) {
+            if (state[i] == 1) {
+                drop_value(keys[i]);
+                drop_value(vals[i]);
+            }
+        }
     }
 
     /* Room for `n` entries, rounded up to a power of two. The single-constructor
@@ -365,6 +448,9 @@ class Map<K,V> {
          * free slot on the probe run without looking. */
         var s = this.Find(k);
         if (s >= 0) {
+            /* No `drop_value` here, unlike the sites that own a slot outright:
+             * a store releases the value it finds in the slot, so writing over it
+             * is what releases it. */
             vals[s] = v;
             return;
         }
@@ -388,12 +474,26 @@ class Map<K,V> {
     bool remove(K k) {
         var i = this.Find(k);
         if (i < 0) { return false; }
+        /* A removed slot is reused by a later insert, and an insert stores into
+         * it, and a store releases what it finds there. So the key and value are
+         * released *and* blanked here rather than just freed, or the next insert
+         * to land on this slot frees bytes this map has already freed. */
+        drop_value(keys[i]);
+        drop_value(vals[i]);
         state[i] = 2;
         len--;
         return true;
     }
 
     void clear() {
+        /* The three arrays are about to be replaced, so nothing will store into
+         * these slots again and blanking them would be wasted work. What matters
+         * is only that the entries still live in them are released. */
+        for (var i = 0; i < cap; i++) {
+            if (state[i] != 1) { continue; }
+            drop_value(keys[i]);
+            drop_value(vals[i]);
+        }
         cap = 16;
         keys = new K[cap];
         vals = new V[cap];
@@ -416,7 +516,8 @@ class Map<K,V> {
         for (var i = 0; i < cap; i++) {
             if (state[i] == 1) { out.push(keys[i]); }
         }
-        return out;
+        /* Handed over rather than destroyed on the way out. See `reversed`. */
+        return move out;
     }
 
     /* The values, in slot order. */
@@ -426,7 +527,8 @@ class Map<K,V> {
         for (var i = 0; i < cap; i++) {
             if (state[i] == 1) { out.push(vals[i]); }
         }
-        return out;
+        /* Handed over rather than destroyed on the way out. See `reversed`. */
+        return move out;
     }
 
     string join(string sep) {
@@ -514,6 +616,16 @@ class Map<K,V> {
             vals[j] = oldV[i];
             len++;
             used++;
+        }
+        /* The keys and values moved above are copies, so the ones they were
+         * copied from are still live. They are released here for the same reason
+         * `Grow` releases them: a rehash that abandoned them leaked every entry
+         * it moved, and left the destructor walking the new arrays while the old
+         * ones still pointed at strings nothing would ever release. */
+        for (var f = 0; f < oldCap; f++) {
+            if (oldS[f] != 1) { continue; }
+            drop_value(oldK[f]);
+            drop_value(oldV[f]);
         }
         if (keep != len) {
             Console.WriteLog("Map.rehash lost an entry: kept " + keep + ", rehashed " + len);
