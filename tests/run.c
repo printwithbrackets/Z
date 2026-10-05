@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,6 +85,16 @@ static int run_cmd_capture(const char *cmd, char *out, int cap) {
     int status = pclose(p);
     if (status == -1)
         return -1;
+    /* A child killed by a signal is not an exit code, and folding the raw wait
+     * status into `(status >> 8) & 0xff` turns a crash into a success: a
+     * program that died on SIGSEGV reads as 0 here. That is why a golden case
+     * could segfault and still be reported `ok`, because its output matched and
+     * the status was never consulted.
+     *
+     * Reported the way a shell reports it, 128 plus the signal, so a caller that
+     * already checks for nonzero sees the crash without having to ask again. */
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
     return (status >> 8) & 0xff;
 }
 
@@ -125,9 +136,22 @@ static int asan_available(const char *zc) {
     return ok;
 }
 
+/* The two artifacts every group builds.
+ *
+ * Suffixed with the pid because the names used to be fixed. Two suites running at
+ * once, which is what `make test` in one shell and `make test-all` in another is,
+ * both write /tmp/z_test_bin, so whichever got there second replaced the binary
+ * the first was halfway through running. The symptom is a golden case failing
+ * with output from a different program, which reads as a compiler bug and is not
+ * one. The names stay predictable so `make clean` can remove them. */
+static char test_bin[128];
+static char test_dbg[128];
+
 int main(int argc, char **argv) {
     (void)argc;
     const char *zc = argv[1];
+    snprintf(test_bin, sizeof test_bin, "/tmp/z_test_bin_%ld", (long)getpid());
+    snprintf(test_dbg, sizeof test_dbg, "/tmp/z_test_dbg_%ld", (long)getpid());
     const char *case_dir = "tests/cases";
     const char *err_dir = "tests/errors";
     const char *rt_dir = "tests/runtime";
@@ -139,35 +163,24 @@ int main(int argc, char **argv) {
     /* Golden cases. */
     char path[512], exp_path[512], cmd[2048];
     static const char *cases[] = {
-        "hello",         "arith",          "vars",
-        "bools",         "ifelse",         "loops",
-        "funcs",         "recursion",      "strings",
-        "compound",      "mainfunc",       "nested_calls",
-        "manyargs",      "scopes",         "shadows",
-        "mainret",       "forloop",        "pointers",
-        "arrays",        "foreach",        "strconcat",
-        "structs",       "structs_nested", "interp",
-        "methods",       "props",          "ext",
-        "fatarrow",      "opoverload",     "tern",
-        "ownership",     "files",          "strings_owned",
-        "temporaries",   "enum_match",     "match_arms",
-        "constfold",     "regalloc",       "divmod",
-        "boolstr",       "generics",       "generics2",
-        "classes",       "classes2",       "integration",
-        "strings2",      "collections",    "collections2",
-        "frame_layout",  "bitwise",        "consts",
-        "breakcontinue", "nested_loops",   "null",
-        "strcmp",        "intrinsics",     "trig",
-        "symnames",      "bigconst",       "fnptr",
-        "methodptr",     "literals",       "stdlib",
-        "floats",        "closures",       "closures_toplevel",
-        "nested_fn",     "typed_locals",   "local_types",
-        "unroll",        "unroll_dep",     "onearg_call",
-        "durations",     "stackargs",      "closedform",
-        "licm_bigframe", "inliner",        "result",
-        "interfaces",    "cxxsyntax",      "rangefor",
-        "addrof_field",  "destructors",    "strreturn",
-        "stdin",         "surface",        "typeof",
+        "hello",         "arith",          "vars",         "bools",       "ifelse",
+        "loops",         "funcs",          "recursion",    "strings",     "compound",
+        "mainfunc",      "nested_calls",   "manyargs",     "scopes",      "shadows",
+        "forloop",       "pointers",       "arrays",       "foreach",     "strconcat",
+        "structs",       "structs_nested", "interp",       "methods",     "props",
+        "ext",           "fatarrow",       "opoverload",   "tern",        "ownership",
+        "files",         "strings_owned",  "temporaries",  "enum_match",  "match_arms",
+        "constfold",     "regalloc",       "divmod",       "boolstr",     "generics",
+        "generics2",     "classes",        "classes2",     "integration", "strings2",
+        "collections",   "collections2",   "frame_layout", "bitwise",     "consts",
+        "breakcontinue", "nested_loops",   "null",         "strcmp",      "intrinsics",
+        "trig",          "symnames",       "bigconst",     "fnptr",       "methodptr",
+        "literals",      "stdlib",         "floats",       "closures",    "closures_toplevel",
+        "nested_fn",     "typed_locals",   "local_types",  "unroll",      "unroll_dep",
+        "onearg_call",   "durations",      "stackargs",    "closedform",  "licm_bigframe",
+        "inliner",       "result",         "interfaces",   "cxxsyntax",   "rangefor",
+        "addrof_field",  "destructors",    "strreturn",    "stdin",       "surface",
+        "typeof",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -192,8 +205,8 @@ int main(int argc, char **argv) {
         char dialect_flag[600] = "";
         if (access(dialect_path, R_OK) == 0)
             snprintf(dialect_flag, sizeof dialect_flag, "--surface=%s", dialect_path);
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s %s 2>&1", zc, path,
-                 dialect_flag, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zc, path, test_bin, dialect_flag,
+                 opt_flag());
         char build_err[1 << 16];
         int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
         if (rc != 0) {
@@ -210,11 +223,24 @@ int main(int argc, char **argv) {
         snprintf(stdin_path, sizeof stdin_path, "%s/%s.stdin", case_dir, cases[i]);
         char run_cmd[1024];
         if (access(stdin_path, R_OK) == 0)
-            snprintf(run_cmd, sizeof run_cmd, "/tmp/z_test_bin < %s", stdin_path);
+            snprintf(run_cmd, sizeof run_cmd, "%s < %s", test_bin, stdin_path);
         else
-            snprintf(run_cmd, sizeof run_cmd, "/tmp/z_test_bin");
+            snprintf(run_cmd, sizeof run_cmd, "%s", test_bin);
         int prc = run_cmd_capture(run_cmd, actual, sizeof actual);
-        (void)prc; /* the program's own exit code is not part of golden output */
+        /* The program's own exit status is asserted, not just its output. A case
+         * that printed the right thing and then died is a failing case, and
+         * until this was checked nothing in the suite could tell the difference
+         * between a program that finished and a program that crashed halfway
+         * through printing.
+         *
+         * 139 is SIGSEGV and 134 is SIGABRT, so the two common ones read as
+         * themselves rather than as a generic failure. */
+        if (prc != 0) {
+            fprintf(stderr, "FAIL %s (exited %d)\n--- expected ---\n%s--- actual ---\n%s\n",
+                    cases[i], prc, expected, actual);
+            fail++;
+            continue;
+        }
         if (strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
                     cases[i], expected, actual);
@@ -223,6 +249,69 @@ int main(int argc, char **argv) {
             printf("ok   %s\n", cases[i]);
             pass++;
         }
+    }
+
+    /* Exit-status cases: the sibling .expected holds the expected exit code on
+     * its first line and the expected stdout below it.
+     *
+     * A separate group because the golden cases all require status zero, and
+     * these are the two things that cannot be expressed as "printed the right
+     * thing and finished". `mainret` returns a value out of main, which is a
+     * thing the language has to get right. `stack_overflow` dies on SIGSEGV,
+     * which is the case that made the golden group unsafe: it printed exactly
+     * what its golden file said, and the old harness reported it `ok`, because
+     * the status was never read. Keeping it here rather than deleting it is what
+     * stops that fix from being undone silently, because a harness that folded a
+     * signal back into a success would fail this case and nothing else. */
+    static const char *exits[] = {"mainret", "stack_overflow"};
+    const char *ex_dir = "tests/exits";
+    char exit_out[256];
+    for (size_t i = 0; i < sizeof exits / sizeof *exits; i++) {
+        snprintf(path, sizeof path, "%s/%s.z", ex_dir, exits[i]);
+        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", ex_dir, exits[i]);
+        char expected[1 << 16];
+        if (!slurp(path, buf, sizeof buf) || !slurp(exp_path, expected, sizeof expected)) {
+            fprintf(stderr, "FAIL %s (missing test file or .expected)\n", exits[i]);
+            fail++;
+            continue;
+        }
+        snprintf(exit_out, sizeof exit_out, "/tmp/z_exit_%ld_%s", (long)getpid(), exits[i]);
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, exit_out, opt_flag());
+        char build_err[1 << 16];
+        if (run_cmd_capture(cmd, build_err, sizeof build_err) != 0) {
+            fprintf(stderr, "FAIL %s (compile failed)\n%s\n", exits[i], build_err);
+            fail++;
+            continue;
+        }
+        /* The first line is the code, and the rest is the output. Split on the
+         * first newline rather than the last, so the code is the one number the
+         * case is about. */
+        char *nl = strchr(expected, '\n');
+        if (nl == NULL) {
+            fprintf(stderr, "FAIL %s (.expected has no exit code line)\n", exits[i]);
+            fail++;
+            continue;
+        }
+        int want = atoi(expected);
+        char *want_out = nl + 1;
+        char actual[1 << 16];
+        snprintf(cmd, sizeof cmd, "%s 2>&1", exit_out);
+        int got = run_cmd_capture(cmd, actual, sizeof actual);
+        if (got != want) {
+            fprintf(stderr, "FAIL %s (exited %d, expected %d)\n--- actual ---\n%s\n", exits[i], got,
+                    want, actual);
+            fail++;
+            continue;
+        }
+        if (strcmp(want_out, actual) != 0) {
+            fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
+                    exits[i], want_out, actual);
+            fail++;
+            continue;
+        }
+        printf("ok   %s (exit %d)\n", exits[i], got);
+        pass++;
+        remove(exit_out);
     }
 
     /* Diagnostic cases. */
@@ -320,7 +409,7 @@ int main(int argc, char **argv) {
         }
         /* Send the output somewhere outside the tree: without -o the compiler
          * writes an executable named after the test into the repo root. */
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -368,7 +457,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -406,8 +495,7 @@ int main(int argc, char **argv) {
      * silently unusable binary. */
     {
         snprintf(path, sizeof path, "%s/debuginfo.z", case_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_dbg %s -g 2>&1", zc, path,
-                 opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s -g 2>&1", zc, path, test_dbg, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -416,23 +504,23 @@ int main(int argc, char **argv) {
         } else {
             static const struct {
                 const char *label;
-                const char *readelf;
+                const char *reader;
+                const char *args;
                 const char *must_contain;
             } checks[] = {
-                {"has .debug_info", "readelf -S /tmp/z_test_dbg", ".debug_info"},
-                {"has .debug_line", "readelf -S /tmp/z_test_dbg", ".debug_line"},
-                {"has .debug_abbrev", "readelf -S /tmp/z_test_dbg", ".debug_abbrev"},
-                {"unit is well-formed", "readelf --debug-dump=info /tmp/z_test_dbg",
-                 "DW_TAG_compile_unit"},
-                {"names a function", "readelf --debug-dump=info /tmp/z_test_dbg",
-                 "DW_TAG_subprogram"},
-                {"locates a function", "readelf --debug-dump=info /tmp/z_test_dbg", "DW_AT_low_pc"},
-                {"has a line table", "objdump --dwarf=decodedline /tmp/z_test_dbg", "line"},
+                {"has .debug_info", "readelf", "-S", ".debug_info"},
+                {"has .debug_line", "readelf", "-S", ".debug_line"},
+                {"has .debug_abbrev", "readelf", "-S", ".debug_abbrev"},
+                {"unit is well-formed", "readelf", "--debug-dump=info", "DW_TAG_compile_unit"},
+                {"names a function", "readelf", "--debug-dump=info", "DW_TAG_subprogram"},
+                {"locates a function", "readelf", "--debug-dump=info", "DW_AT_low_pc"},
+                {"has a line table", "objdump", "--dwarf=decodedline", "line"},
             };
             int ok = 1;
             for (size_t i = 0; i < sizeof checks / sizeof(*checks); i++) {
                 char out[1 << 16];
-                snprintf(cmd, sizeof cmd, "%s 2>&1", checks[i].readelf);
+                snprintf(cmd, sizeof cmd, "%s %s %s 2>&1", checks[i].reader, checks[i].args,
+                         test_dbg);
                 run_cmd_capture(cmd, out, sizeof out);
                 if (!strstr(out, checks[i].must_contain)) {
                     fprintf(stderr, "FAIL debuginfo (%s)\n", checks[i].label);
@@ -451,7 +539,8 @@ int main(int argc, char **argv) {
             /* -g must not change what the program does. */
             if (ok) {
                 char out[1 << 16];
-                run_cmd_capture("/tmp/z_test_dbg", out, sizeof out);
+                snprintf(cmd, sizeof cmd, "%s 2>&1", test_dbg);
+                run_cmd_capture(cmd, out, sizeof out);
                 if (strstr(out, "debug info: ok") == NULL) {
                     fprintf(stderr, "FAIL debuginfo (-g changed the program's output)\n%s\n", out);
                     ok = 0;
@@ -466,7 +555,8 @@ int main(int argc, char **argv) {
              * this check no longer has to be pinned to a level. */
             if (ok) {
                 char out[1 << 16];
-                run_cmd_capture("readelf --debug-dump=info /tmp/z_test_dbg 2>&1", out, sizeof out);
+                snprintf(cmd, sizeof cmd, "readelf --debug-dump=info %s 2>&1", test_dbg);
+                run_cmd_capture(cmd, out, sizeof out);
                 const char *lvl = opt_flag()[0] ? opt_flag() : "the default level";
                 if (strstr(out, "sum") == NULL) {
                     fprintf(stderr,
@@ -504,7 +594,15 @@ int main(int argc, char **argv) {
      * and this is what would notice. */
     {
         static const char src[] = "int main() { hold(200ms); return 0; }\n";
-        snprintf(path, sizeof path, "/tmp/z_test_hold.z");
+        /* Pid-suffixed like every other path this harness builds. The binary
+         * used to be a fixed name, so two suites running at once had one
+         * replacing the file the other was about to exec, and the half-written
+         * executable is what made the run fail -- which then reported itself as
+         * a wait that returned after -1ms rather than as the collision it was. */
+        char hold_z[128], hold_bin[128];
+        snprintf(hold_z, sizeof hold_z, "/tmp/z_test_hold_%ld.z", (long)getpid());
+        snprintf(hold_bin, sizeof hold_bin, "/tmp/z_test_hold_%ld", (long)getpid());
+        snprintf(path, sizeof path, "%s", hold_z);
         FILE *hf = fopen(path, "wb");
         if (hf == NULL || fwrite(src, 1, sizeof src - 1, hf) != sizeof src - 1) {
             if (hf)
@@ -513,20 +611,28 @@ int main(int argc, char **argv) {
             fail++;
         } else {
             fclose(hf);
-            snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_hold %s 2>&1", zc, path,
-                     opt_flag());
+            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, hold_bin, opt_flag());
             char actual[1 << 16];
             int rc = run_cmd_capture(cmd, actual, sizeof actual);
             struct timespec t0, t1;
             long long ms = -1;
-            if (rc == 0 && clock_gettime(CLOCK_MONOTONIC, &t0) == 0 &&
-                run_cmd_capture("/tmp/z_test_hold", actual, sizeof actual) == 0 &&
-                clock_gettime(CLOCK_MONOTONIC, &t1) == 0)
-                ms =
-                    (long long)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+            int run_rc = -1;
+            if (rc == 0 && clock_gettime(CLOCK_MONOTONIC, &t0) == 0) {
+                snprintf(cmd, sizeof cmd, "%s 2>&1", hold_bin);
+                run_rc = run_cmd_capture(cmd, actual, sizeof actual);
+                if (run_rc == 0 && clock_gettime(CLOCK_MONOTONIC, &t1) == 0)
+                    ms = (long long)(t1.tv_sec - t0.tv_sec) * 1000 +
+                         (t1.tv_nsec - t0.tv_nsec) / 1000000;
+            }
             int ok = 1;
             if (rc != 0) {
                 fprintf(stderr, "FAIL hold (build failed)\n%s\n", actual);
+                ok = 0;
+            } else if (run_rc != 0) {
+                /* Reported as what it is. Folded into the timing arm it used to
+                 * print "returned after -1ms", which reads as a wait that was too
+                 * short rather than as a program that did not run. */
+                fprintf(stderr, "FAIL hold (the program exited %d)\n%s\n", run_rc, actual);
                 ok = 0;
             } else if (ms < 190) {
                 fprintf(stderr,
@@ -544,6 +650,8 @@ int main(int argc, char **argv) {
             } else {
                 fail++;
             }
+            remove(hold_z);
+            remove(hold_bin);
         }
     }
 
@@ -553,7 +661,7 @@ int main(int argc, char **argv) {
      * user never wrote is being reported as their code. */
     {
         snprintf(path, sizeof path, "%s/clean.z", warn_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -587,7 +695,7 @@ int main(int argc, char **argv) {
         };
         snprintf(path, sizeof path, "%s/all.z", warn_dir);
         for (size_t i = 0; i < sizeof flagcases / sizeof(*flagcases); i++) {
-            snprintf(cmd, sizeof cmd, "%s build %s -o /tmp/z_test_bin %s %s 2>&1", zc, path,
+            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zc, path, test_bin,
                      opt_flag(), flagcases[i].flag);
             char actual[1 << 16];
             int rc = run_cmd_capture(cmd, actual, sizeof actual);
@@ -667,13 +775,20 @@ int main(int argc, char **argv) {
      * appears at exactly the path that was asked for and prints 42. Read as
      * shell syntax, the marker appears and nothing is built. */
     {
-        const char *dir = "/tmp/z_test_shell";
+        /* Both the directory and the markers carry the pid, for the same reason
+         * the built binaries do. Two suites running at once shared this
+         * directory, so one removed the other's markers and the other's payloads
+         * then had nothing to create, which failed as "the payload was not
+         * injected" -- a pass, for the wrong reason. */
+        char dir[128];
+        snprintf(dir, sizeof dir, "/tmp/z_test_shell_%ld", (long)getpid());
         /* The markers are bare names in the working directory rather than paths
          * under `dir`, because a slash inside the payload would make it an
          * invalid file name component and the payload could never be written in
          * the first place. Both are removed before and after. */
-        const char *marker_out = "z_injected_out";
-        const char *marker_arg = "z_injected_arg";
+        char marker_out[64], marker_arg[64];
+        snprintf(marker_out, sizeof marker_out, "z_injected_out_%ld", (long)getpid());
+        snprintf(marker_arg, sizeof marker_arg, "z_injected_arg_%ld", (long)getpid());
         char out_path[256], plain_out[256], helper[256], plain_z[256], main_z[256];
         snprintf(out_path, sizeof out_path, "%s/o'; touch %s; '.out", dir, marker_out);
         snprintf(plain_out, sizeof plain_out, "%s/plain.out", dir);
@@ -789,6 +904,18 @@ int main(int argc, char **argv) {
         remove(out_path);
         remove(marker_out);
         remove(marker_arg);
+        /* The sources and the C helper went in too. Leaving them is what made
+         * the directory survive, since an rmdir only succeeds on an empty one,
+         * and a directory left behind per run is a directory left behind per run
+         * forever. */
+        remove(helper);
+        remove(main_z);
+        remove(plain_z);
+        /* The directory goes too. Every file in it has been removed above, so
+         * this only succeeds on a clean run, and it is here because a directory
+         * left behind per run is a directory left behind per run forever. A run
+         * that died mid-way leaves one, which is what `make clean` is for. */
+        rmdir(dir);
     }
 
     /* Runtime-abort cases: compiled with --bounds, the program must exit

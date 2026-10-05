@@ -82,8 +82,8 @@ tests/run: tests/run.c
 
 clean:
 	rm -f $(BIN) $(OBJ) $(DEP) tests/run src/runtime_src.h src/std_src.h
-	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c /tmp/z_test_bin /tmp/z_test_dbg
-	rm -f /tmp/z_leak_* /tmp/z_asan_probe_*
+	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c
+	rm -rf /tmp/z_test_* /tmp/z_exit_* /tmp/z_leak_* /tmp/z_asan_probe_*
 
 -include $(DEP)
 

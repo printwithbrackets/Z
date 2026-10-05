@@ -1,0 +1,25 @@
+// Overflowing the stack, after printing the right thing.
+//
+// This case exists to be caught, not to pass. A program that dies on a signal
+// has no output problem and no compile problem: it printed exactly what the
+// golden file says and then crashed. The harness used to read that as a pass, so
+// any case in this directory could segfault and the suite would say `ok`.
+//
+// The output goes out through `write_bytes` rather than `Console.WriteLog`
+// because that is the point of the case. stdout is a pipe here, so it is
+// block-buffered, and a process killed by a signal never gets to flush it. A
+// case written with `Console.WriteLog` would produce no output at all and would
+// look like an output mismatch rather than the crash it is.
+//
+// `boom` is not a tail call on purpose: `boom(n + 1) + 1` cannot become a jump,
+// so it recurses until the guard page is hit at every optimization level rather
+// than looping forever at the ones that would otherwise turn it into one.
+
+int boom(int n) {
+    return boom(n + 1) + 1;
+}
+
+int main() {
+    write_bytes(1, "printed before the crash\n");
+    return boom(0);
+}
