@@ -108,7 +108,9 @@ static int run_cmd_capture(const char *cmd, char *out, int cap) {
  * but silently ignored does not read as available: the run has to produce a
  * LeakSanitizer report, which means the instrumentation is linked, the leak
  * detector is on, and this process can execute the result. */
-static int asan_available(const char *zc) {
+/* Takes the quoted path, not the raw one, so it builds its command the same way
+ * every other group does. */
+static int asan_available(const char *zq) {
     char src[256], bin[256], cmd[2048], out[1 << 16];
     snprintf(src, sizeof src, "/tmp/z_asan_probe_%ld.z", (long)getpid());
     snprintf(bin, sizeof bin, "/tmp/z_asan_probe_%ld", (long)getpid());
@@ -121,7 +123,7 @@ static int asan_available(const char *zc) {
      * releases that one when the scope ends. */
     fputs("int main() { return len(\"probe \" + int_to_string(42)) > 0 ? 0 : 1; }\n", f);
     fclose(f);
-    snprintf(cmd, sizeof cmd, "./%s build %s -o %s -fsanitize=address -g >/dev/null 2>&1", zc, src,
+    snprintf(cmd, sizeof cmd, "%s build %s -o %s -fsanitize=address -g >/dev/null 2>&1", zq, src,
              bin);
     int ok = run_cmd_capture(cmd, out, sizeof out) == 0;
     if (ok) {
@@ -147,9 +149,29 @@ static int asan_available(const char *zc) {
 static char test_bin[128];
 static char test_dbg[128];
 
+/* The compiler path, quoted once.
+ *
+ * Every command this harness builds goes through a shell, because it pipes and
+ * redirects, so the path has to survive one. `shell_quote` is the helper for
+ * that and it was applied in exactly one place, so a path with a space or an
+ * apostrophe in it worked there and nowhere else.
+ *
+ * Quoting it once here rather than at seventeen call sites is what keeps the
+ * seventeen from disagreeing. It is also why nothing prepends `./`: that turned
+ * an absolute path into `.//home/.../z`, which does not exist, so passing one
+ * broke the runtime-abort, interop and module groups and nothing else. The path
+ * is used verbatim instead, which works for a relative path and an absolute one
+ * alike. */
+/* Sized to leave room inside the command buffers this harness builds, which are
+ * 2 KiB each. A longer path would be truncated, and `shell_quote` closes its
+ * quote when it stops, so that produces a command naming a file that does not
+ * exist rather than anything unsafe. No real path is close. */
+static char zq[1024];
+
 int main(int argc, char **argv) {
     (void)argc;
     const char *zc = argv[1];
+    shell_quote(zc, zq, (int)sizeof zq);
     snprintf(test_bin, sizeof test_bin, "/tmp/z_test_bin_%ld", (long)getpid());
     snprintf(test_dbg, sizeof test_dbg, "/tmp/z_test_dbg_%ld", (long)getpid());
     const char *case_dir = "tests/cases";
@@ -205,7 +227,7 @@ int main(int argc, char **argv) {
         char dialect_flag[600] = "";
         if (access(dialect_path, R_OK) == 0)
             snprintf(dialect_flag, sizeof dialect_flag, "--surface=%s", dialect_path);
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zc, path, test_bin, dialect_flag,
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zq, path, test_bin, dialect_flag,
                  opt_flag());
         char build_err[1 << 16];
         int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
@@ -276,7 +298,7 @@ int main(int argc, char **argv) {
             continue;
         }
         snprintf(exit_out, sizeof exit_out, "/tmp/z_exit_%ld_%s", (long)getpid(), exits[i]);
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, exit_out, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zq, path, exit_out, opt_flag());
         char build_err[1 << 16];
         if (run_cmd_capture(cmd, build_err, sizeof build_err) != 0) {
             fprintf(stderr, "FAIL %s (compile failed)\n%s\n", exits[i], build_err);
@@ -409,7 +431,7 @@ int main(int argc, char **argv) {
         }
         /* Send the output somewhere outside the tree: without -o the compiler
          * writes an executable named after the test into the repo root. */
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zq, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -457,7 +479,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zq, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -495,7 +517,7 @@ int main(int argc, char **argv) {
      * silently unusable binary. */
     {
         snprintf(path, sizeof path, "%s/debuginfo.z", case_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s -g 2>&1", zc, path, test_dbg, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s -g 2>&1", zq, path, test_dbg, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -611,7 +633,7 @@ int main(int argc, char **argv) {
             fail++;
         } else {
             fclose(hf);
-            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, hold_bin, opt_flag());
+            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zq, path, hold_bin, opt_flag());
             char actual[1 << 16];
             int rc = run_cmd_capture(cmd, actual, sizeof actual);
             struct timespec t0, t1;
@@ -661,7 +683,7 @@ int main(int argc, char **argv) {
      * user never wrote is being reported as their code. */
     {
         snprintf(path, sizeof path, "%s/clean.z", warn_dir);
-        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zc, path, test_bin, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s build %s -o %s %s 2>&1", zq, path, test_bin, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc != 0) {
@@ -695,7 +717,7 @@ int main(int argc, char **argv) {
         };
         snprintf(path, sizeof path, "%s/all.z", warn_dir);
         for (size_t i = 0; i < sizeof flagcases / sizeof(*flagcases); i++) {
-            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zc, path, test_bin,
+            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s %s 2>&1", zq, path, test_bin,
                      opt_flag(), flagcases[i].flag);
             char actual[1 << 16];
             int rc = run_cmd_capture(cmd, actual, sizeof actual);
@@ -739,7 +761,7 @@ int main(int argc, char **argv) {
         };
         snprintf(path, sizeof path, "%s/suggest_var.z", err_dir);
         for (size_t i = 0; i < sizeof shape / sizeof(*shape); i++) {
-            snprintf(cmd, sizeof cmd, "%s build %s -o /dev/null %s %s 2>&1", zc, path, opt_flag(),
+            snprintf(cmd, sizeof cmd, "%s build %s -o /dev/null %s %s 2>&1", zq, path, opt_flag(),
                      shape[i].flag);
             char actual[1 << 16];
             int rc = run_cmd_capture(cmd, actual, sizeof actual);
@@ -849,21 +871,24 @@ int main(int argc, char **argv) {
                 {"linker argument", plain_out, helper, main_z, marker_arg},
             };
             for (size_t i = 0; i < sizeof dcases / sizeof(*dcases); i++) {
+                /* Three quoted payloads plus the compiler path do not fit in the
+                 * shared 2 KiB command buffer, so this group builds its own. */
                 char qout[600], qarg[600], qsrc[600];
+                char bcmd[3072];
                 shell_quote(dcases[i].out, qout, sizeof qout);
                 shell_quote(dcases[i].src, qsrc, sizeof qsrc);
-                snprintf(cmd, sizeof cmd, "%s build %s -o %s", zc, qsrc, qout);
+                snprintf(bcmd, sizeof bcmd, "%s build %s -o %s", zq, qsrc, qout);
                 if (dcases[i].arg[0] != 0) {
                     shell_quote(dcases[i].arg, qarg, sizeof qarg);
-                    strncat(cmd, " ", sizeof cmd - strlen(cmd) - 1);
-                    strncat(cmd, qarg, sizeof cmd - strlen(cmd) - 1);
+                    strncat(bcmd, " ", sizeof bcmd - strlen(bcmd) - 1);
+                    strncat(bcmd, qarg, sizeof bcmd - strlen(bcmd) - 1);
                 }
-                strncat(cmd, " ", sizeof cmd - strlen(cmd) - 1);
-                strncat(cmd, opt_flag(), sizeof cmd - strlen(cmd) - 1);
-                strncat(cmd, " 2>&1", sizeof cmd - strlen(cmd) - 1);
+                strncat(bcmd, " ", sizeof bcmd - strlen(bcmd) - 1);
+                strncat(bcmd, opt_flag(), sizeof bcmd - strlen(bcmd) - 1);
+                strncat(bcmd, " 2>&1", sizeof bcmd - strlen(bcmd) - 1);
 
                 char actual[1 << 16];
-                int rc = run_cmd_capture(cmd, actual, sizeof actual);
+                int rc = run_cmd_capture(bcmd, actual, sizeof actual);
                 int touched = access(dcases[i].marker, F_OK) == 0;
                 int built = access(dcases[i].out, X_OK) == 0;
                 char printed[256] = "";
@@ -933,7 +958,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s %s --bounds 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s run %s %s --bounds 2>&1", zq, path, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -982,12 +1007,12 @@ int main(int argc, char **argv) {
      * destructor is responsible for. */
     static const char *leaks[] = {"vec_string", "map_string"};
     const char *lk_dir = "tests/leaks";
-    if (asan_available(zc)) {
+    if (asan_available(zq)) {
         char leak_out[256];
         for (size_t i = 0; i < sizeof leaks / sizeof *leaks; i++) {
             snprintf(path, sizeof path, "%s/%s.z", lk_dir, leaks[i]);
             snprintf(leak_out, sizeof leak_out, "/tmp/z_leak_%ld_%s", (long)getpid(), leaks[i]);
-            snprintf(cmd, sizeof cmd, "./%s build %s -o %s %s -fsanitize=address -g 2>&1", zc, path,
+            snprintf(cmd, sizeof cmd, "%s build %s -o %s %s -fsanitize=address -g 2>&1", zq, path,
                      leak_out, opt_flag());
             char build_err[1 << 16];
             int rc = run_cmd_capture(cmd, build_err, sizeof build_err);
@@ -1050,7 +1075,7 @@ int main(int argc, char **argv) {
             continue;
         }
         char link[4096];
-        snprintf(link, sizeof link, "./%s run %s %s 2>&1", zc, path, cmd);
+        snprintf(link, sizeof link, "%s run %s %s 2>&1", zq, path, cmd);
         char actual[1 << 16];
         if (run_cmd_capture(link, actual, sizeof actual) != 0 || strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
@@ -1076,7 +1101,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "./%s run %s %s 2>&1", zc, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s run %s %s 2>&1", zq, path, opt_flag());
         char actual[1 << 16];
         if (run_cmd_capture(cmd, actual, sizeof actual) != 0 || strcmp(expected, actual) != 0) {
             fprintf(stderr, "FAIL %s (output mismatch)\n--- expected ---\n%s--- actual ---\n%s\n",
@@ -1129,7 +1154,7 @@ int main(int argc, char **argv) {
             static const char *levels[2] = {"-O2", "-O3"};
             int insns[2] = {-1, -1};
             for (int lvl = 0; lvl < 2; lvl++) {
-                snprintf(cmd, sizeof cmd, "%s asm %s %s 2>&1", zc, path, levels[lvl]);
+                snprintf(cmd, sizeof cmd, "%s asm %s %s 2>&1", zq, path, levels[lvl]);
                 if (run_cmd_capture(cmd, asm_buf, sizeof asm_buf) != 0) {
                     fprintf(stderr, "FAIL unrollgate %s (asm failed)\n%s\n", gates[i], asm_buf);
                     insns[0] = insns[1] = -1;
