@@ -762,6 +762,22 @@ Recorded because each was invisible at the default optimization level, and
   accepted for the wrong reason: it was rejected by an accident of the shape check
   rather than by a decision about calls. Both are corrected, and the tests they
   describe now hold.
+- **The register allocator used statement index zero inside an addressed
+  expression.** `mark_addr_taken` walked the subtree it was given at a hardcoded
+  index of 0 rather than the statement's own, and the index is what the allocator
+  colours `[def, use]` intervals from. A local defined at statement zero whose only
+  use was inside an addressed subtree therefore had that use recorded at zero too,
+  so its range was `[0, 0]`, which is a valid range, and it was given a register.
+  The addressed expression then went on reading the frame slot that the register
+  had made unreachable, so the index an assignment used was whatever the slot
+  happened to hold. In `addr_index` that was another local's value, and
+  `a[i] = t` wrote to the wrong element. The index is now the statement's own, at
+  all five sites that walk an addressed subtree.
+
+  Only the assignment site can do this. The other four also mark the subtree
+  ineligible for a register, which is what keeps a variable under them in memory
+  whichever index the walk used, and `addr_index` covers the two other forms an
+  assignment can take to say they still work.
 - **A declaration with a written-out type never checked its initializer.**
   `parse_var_decl` recorded the declared type and kept the initializer, and
   nothing in between converted one to the other or compared them. `float f = 3;`

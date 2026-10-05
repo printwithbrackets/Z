@@ -846,19 +846,27 @@ static LocalInfo *li_for(CG *cg, int slot) {
 
 /* Marks every local referenced in a subtree as ineligible for a register,
  * because the expression takes its address (gen_addr would need the real
- * memory location). */
-static void mark_addr_taken(CG *cg, Expr *e);
+ * memory location).
+ *
+ * `idx` is the statement the subtree sits in, and it is the statement's own index
+ * rather than a constant. It used to be a constant, and the index is what the
+ * allocator colours intervals from, so a local whose only use was inside an
+ * addressed subtree had that use recorded at statement zero. A local defined at
+ * statement zero then had the range `[0, 0]`, which is a valid range, and was
+ * given a register -- and the addressed expression went on reading the frame slot
+ * that the register had made unreachable. */
+static void mark_addr_taken(CG *cg, Expr *e, int idx);
 
 static void walk_alloc_expr(CG *cg, Expr *e, int idx);
 
-static void mark_addr_taken(CG *cg, Expr *e) {
+static void mark_addr_taken(CG *cg, Expr *e, int idx) {
     if (e == NULL)
         return;
     if (e->kind == E_VAR) {
         li_for(cg, e->slot)->eligible = 0;
         return;
     }
-    walk_alloc_expr(cg, e, 0);
+    walk_alloc_expr(cg, e, idx);
 }
 
 /* Records a use of a local at statement index idx. */
@@ -893,17 +901,17 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
     case E_ADDR:
         /* `&x` materializes the value of x; for a scalar that is a load, but
          * conservatively treat it as address-taken. */
-        mark_addr_taken(cg, e->lhs);
+        mark_addr_taken(cg, e->lhs, idx);
         break;
     case E_INDEX:
-        mark_addr_taken(cg, e->lhs); /* base is addressed */
+        mark_addr_taken(cg, e->lhs, idx); /* base is addressed */
         walk_alloc_expr(cg, e->rhs, idx);
         break;
     case E_POSTINC:
         /* The variable is written, so an element or field operand is addressed
          * and its base is marked. Without this a `d[n++]++` would allocate no
          * slot for the base it has to compute an address from. */
-        mark_addr_taken(cg, e->lhs);
+        mark_addr_taken(cg, e->lhs, idx);
         walk_alloc_expr(cg, e->lhs, idx);
         break;
     case E_STRLEN:
@@ -917,7 +925,7 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         walk_alloc_expr(cg, e->env, idx);
         break;
     case E_FIELD:
-        mark_addr_taken(cg, e->lhs); /* base is addressed */
+        mark_addr_taken(cg, e->lhs, idx); /* base is addressed */
         break;
     case E_DEREF:
         walk_alloc_expr(cg, e->lhs, idx); /* pointer value */
@@ -927,7 +935,12 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
             li_def(cg, e->lhs->slot, idx);
             li_for(cg, e->lhs->slot)->reassigned = 1;
         } else {
-            mark_addr_taken(cg, e->lhs);
+            /* The one that shows. Unlike the four above, this walks the
+             * destination without marking it ineligible, because the
+             * destination is written rather than read. So the index of
+             * `a[i] = t` was the only local here whose range could be invented,
+             * and it is the one whose address the assignment has to compute. */
+            mark_addr_taken(cg, e->lhs, idx);
         }
         walk_alloc_expr(cg, e->rhs, idx);
         break;

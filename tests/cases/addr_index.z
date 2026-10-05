@@ -1,0 +1,69 @@
+// A local whose only use is inside an addressed expression.
+//
+// The register allocator colours `[def, use]` statement intervals and hands a
+// local a register when nothing else overlaps that range. Recording a use at the
+// wrong statement index therefore does not cost a little optimisation, it
+// invents a range: a local defined at statement zero and used once, as the index
+// of an assignment, had that one use recorded at zero as well, so its range was
+// `[0, 0]`, which is valid, and it was given a register.
+//
+// The damage is at the use. `a[i] = t` computes the address of `a[i]`, which
+// means reading `i` out of its frame slot -- and that slot is never written,
+// because the value went to a register. So the index the assignment used was
+// whatever the slot happened to hold. Here that was `t`.
+//
+// Two symptoms, and the second is the worse one. With the index landing past the
+// end, the bounds check caught it and the program died with a message. With the
+// stale value in range, it wrote to the wrong element and returned quietly,
+// which is why this case is shaped to keep the wrong index inside the array: a
+// test that only saw the crash would be satisfied by a bounds check.
+//
+// Only the assignment shape can do this. The other four places the walk hands a
+// subtree to `mark_addr_taken` also mark it ineligible for a register, so a
+// variable under one of them is in memory whichever index the walk used. The
+// assignment is the one that walks the subtree without marking it, because the
+// destination is written rather than read.
+
+int fill(int n) {
+    var i = n - 1;
+    var a = new int[4];
+    var t = a[0] + 1;
+    a[i] = 9;
+    return a[2] * 100 + a[1] + t;
+}
+
+// A post-increment on the same element, which is the other form that addresses
+// its operand.
+int fillPost() {
+    var a = new int[4];
+    var i = 2;
+    var t = a[0] + 1;
+    a[i] = 7;
+    a[i]++;
+    return a[2] * 10 + t;
+}
+
+// A field base, which reaches `mark_addr_taken` through the E_FIELD arm rather
+// than the E_ASSIGN one. This one does not go wrong today, because the E_FIELD
+// arm marks the base ineligible before walking it, so the index ends up in memory
+// whichever index the walk used. It is here because the fix touches that arm too,
+// and a case that only covered the arm that breaks would not say the others still
+// work.
+class Box {
+    int[] slots;
+    Box() { slots = new int[4]; }
+}
+
+int fillField(Box* b, int n) {
+    var i = n - 2;
+    var t = b.slots[0] + 1;
+    b.slots[i] = 5;
+    return b.slots[1] * 10 + t;
+}
+
+int main() {
+    Console.WriteLog(fill(3));
+    Console.WriteLog(fillField(new Box(), 3));
+    Console.WriteLog(fillPost());
+    return 0;
+}
