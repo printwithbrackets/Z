@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
         "onearg_call",   "durations",      "stackargs",    "closedform",  "licm_bigframe",
         "inliner",       "result",         "interfaces",   "cxxsyntax",   "rangefor",
         "addrof_field",  "destructors",    "strreturn",    "stdin",       "surface",
-        "typeof",
+        "typeof",        "vcall_struct",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);

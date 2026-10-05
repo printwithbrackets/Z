@@ -1,0 +1,101 @@
+// A virtual method that returns a struct.
+//
+// A struct larger than a register is returned through memory: the caller
+// reserves a buffer, passes its address as a hidden first argument in `rdi`, and
+// the callee writes the value there. That is the whole of the convention, and a
+// virtual call has to honour it like any other.
+//
+// It did not. The call site told the argument-assignment pass that there was a
+// hidden argument, so the first declared argument went to `rsi` rather than
+// `rdi`, and then nothing ever put the buffer in `rdi`. The callee wrote the
+// struct through whatever `rdi` happened to hold, and the caller read its own
+// buffer, which nothing had written. So the first word came out right by luck
+// and the rest was whatever the frame had in it.
+//
+// The `lea` that loads the buffer into `rdi` was emitted, but after the `return`
+// that ends the path, so it was dead code. The tail it sat in is gone.
+//
+// The bigger struct is the case that crashes rather than answering wrongly. It
+// holds a string and a float as well as three ints, because the callee then
+// writes further from the start of the buffer and the stray write reaches
+// something that matters.
+
+// An ordinary struct return, for contrast. This path was always right, and a
+// case that only exercised the broken one would not say which is which.
+struct Pt {
+    int x;
+    int y;
+    Pt Shift(int dx, int dy) { return new Pt(x + dx, y + dy); }
+}
+
+struct Big {
+    int a;
+    int b;
+    int c;
+    string s;
+    float d;
+}
+
+class Square {
+    int side;
+    Square(int s) { this.side = s; }
+    virtual Pt Corner() { return new Pt(side, side * 10); }
+    /* Declared arguments as well as a result, so the hidden one has to be
+     * counted: the receiver goes to rsi and these start at rdx. */
+    virtual Pt Offset(int dx, int dy) { return new Pt(side + dx, side + dy); }
+    virtual Big Make() {
+        return new Big(side, side + 1, side + 2, "tag" + int_to_string(side), 1.5);
+    }
+}
+
+class Dot {
+    int r;
+    Dot(int v) { this.r = v; }
+    virtual Pt Corner() { return new Pt(r, r * 100); }
+    virtual Pt Offset(int dx, int dy) { return new Pt(r - dx, r - dy); }
+    virtual Big Make() { return new Big(r, r * 100, 0, "dot" + int_to_string(r), 0.5); }
+}
+
+int main() {
+    // The ordinary path, which worked and still does.
+    var p = new Pt(3, 4);
+    var q = p.Shift(10, 20);
+    Console.WriteLog(q.x);
+    Console.WriteLog(q.y);
+
+    // The smallest struct a virtual call can return, stored in a local.
+    var s = new Square(7);
+    var c = s.Corner();
+    Console.WriteLog(c.x);
+    Console.WriteLog(c.y);
+
+    // Read straight out of the call, with no local in between.
+    Console.WriteLog(s.Corner().y);
+
+    // With declared arguments, so the hidden one is not the only thing in play.
+    var o = s.Offset(100, 200);
+    Console.WriteLog(o.x);
+    Console.WriteLog(o.y);
+
+    // The bigger struct, which is the shape that used to take the process down.
+    var b = s.Make();
+    Console.WriteLog(b.a);
+    Console.WriteLog(b.b);
+    Console.WriteLog(b.c);
+    Console.WriteLog(b.s);
+    Console.WriteLog(b.d);
+    Console.WriteLog(s.Make().c);
+
+    // A second class, so the vtable slot is genuinely per-type.
+    var dot = new Dot(7);
+    var dc = dot.Corner();
+    Console.WriteLog(dc.x);
+    Console.WriteLog(dc.y);
+    var db = dot.Make();
+    Console.WriteLog(db.a);
+    Console.WriteLog(db.b);
+    Console.WriteLog(db.s);
+    Console.WriteLog(db.d);
+
+    return 0;
+}

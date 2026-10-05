@@ -703,6 +703,20 @@ Recorded because each was invisible at the default optimization level, and
   `ownership` is the test. The lesson is the one the zeroed-array comment beside
   `z_newarray` already made: a hidden dependency on allocator slack is not a
   safety property, it is a bug that has not been reached yet.
+- **A virtual method returning a struct never passed the result buffer.** A
+  struct larger than a register is returned through memory, so the caller
+  reserves a buffer and passes its address as a hidden first argument in `rdi`.
+  The virtual call site told the argument-assignment pass that a hidden argument
+  was there, so the first declared argument went to `rsi` rather than `rdi`, and
+  then nothing put the buffer in the register it had vacated. The callee wrote
+  the struct through whatever `rdi` happened to hold and the caller read a buffer
+  nothing had written, so the first word came out right by luck and the rest was
+  whatever the frame had in it. The `lea` that should have loaded the buffer was
+  emitted, but after the `return` that ends that path, which made it dead code.
+  `vcall_struct` is the test, and the bigger struct in it is the shape that took
+  the process down rather than answering wrongly: with a string and a float
+  beside the ints, the callee writes far enough from the start of the buffer for
+  the stray write to reach something that matters.
 
 ## Performance
 

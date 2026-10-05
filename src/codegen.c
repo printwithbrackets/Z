@@ -2049,26 +2049,37 @@ static void gen_vcall(CG *cg, Expr *e) {
          * come back for it. */
         ArgAssign aa;
         args_prologue(cg, e, base, sret ? 1 : 0, &aa);
+        /* The result buffer goes in rdi, after the arguments have been placed and
+         * before the call.
+         *
+         * `args_prologue` was told there is a hidden argument, so the first
+         * declared one went to rsi, which is right, and nothing then put the
+         * buffer in the register it had vacated. The callee wrote the struct
+         * through whatever rdi happened to hold and the caller read a buffer
+         * nothing had written, so a virtual method returning a struct answered
+         * with whatever was in the frame, or wrote far enough through the stray
+         * pointer to take the process down.
+         *
+         * The `lea` that did this was emitted, but below the `return` that ends
+         * this path, which made it dead code. It is here now and the tail it was
+         * in is gone. */
+        if (sret) {
+            buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
+        }
         load_temp(cg, vt, "r11");
         cg->temp_top = vt;
         buf_printf(cg->out, "  call r11\n");
         args_epilogue(cg, &aa);
         if (sret) {
+            /* The result value is the address of the buffer, and the buffer stays
+             * reserved for the rest of the statement so a later nested call does
+             * not clobber it. The argument temps above it are freed. */
             buf_printf(cg->out, "  lea rax, [rbp - %d]\n", rt_addr);
             cg->temp_top = rt_base + rt_nt;
         } else {
             cg->temp_top = vt;
         }
         return;
-    }
-    if (sret)
-        buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
-    buf_printf(cg->out, "  call r11\n");
-    if (sret) {
-        buf_printf(cg->out, "  lea rax, [rbp - %d]\n", rt_addr);
-        cg->temp_top = rt_base + rt_nt;
-    } else {
-        cg->temp_top = base;
     }
 }
 
