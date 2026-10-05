@@ -5445,6 +5445,33 @@ static Stmt *parse_var_decl(Parser *p) {
             t = init->type;
         if (!infer && is_kind(t, TK_IFACE))
             init = to_iface(p, init, t, start);
+        /* A written-out type is a claim about what the variable holds, and an
+         * unchecked claim is worse than none: `int x = "hello";` compiled, and
+         * reading `x` read the pointer's own bytes back as an integer.
+         *
+         * This is the same check an assignment makes, in the same order and with
+         * the same two exceptions: an int widens to a float because that cannot
+         * lose a value, and a value going to an interface boxes, which is the
+         * conversion just above. `var` skips it, because there the type came from
+         * the value and there is nothing to disagree with.
+         *
+         * An unknown type on either side means something upstream already failed,
+         * and saying anything here would be a second complaint about one mistake. */
+        if (!infer && !is_unk(t) && !is_unk(init->type)) {
+            if (type_widens_to(t, init->type)) {
+                init = make_cvt(p, t, init, start);
+            } else if (!type_assignable(t, init->type)) {
+                if (is_kind(t, TK_INT) && is_kind(init->type, TK_F64))
+                    diag_error(start,
+                               "cannot initialize 'int' with 'float' without losing precision; "
+                               "write '(int)' if that is what you want");
+                else {
+                    note_missing_class_pointer(p, t, init->type);
+                    diag_error_code(start, "type_mismatch", "cannot assign '%s' to '%s'",
+                                    type_name(p->ty, init->type), type_name(p->ty, t));
+                }
+            }
+        }
         init = own_string_copy(p, init);
         init = claim_string_value(init);
         if (t == NULL)

@@ -1,0 +1,11 @@
+// A declaration with an explicit type has to agree with its initializer.
+//
+// `var` infers the type from the initializer, so there is nothing to check. A
+// written-out type is a claim about what the variable holds, and a claim that is
+// not checked is worse than no claim: `int x = "hello";` compiled, and reading
+// `x` gave back the pointer's own bytes as an integer.
+//
+// The one conversion Z makes is an int widening to a float, which cannot lose a
+// value, and a concrete value going to an interface, which boxes it. Everything
+// else has to match exactly, exactly as an assignment does.
+int x = "hello";

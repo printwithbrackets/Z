@@ -738,6 +738,17 @@ Recorded because each was invisible at the default optimization level, and
   arise. Only `TK_MPTR` is refused, in two places in `parse_postfix` and
   `parse_primary`. A closure and an interface were never refused, which is why the
   combination sat there unexercised and the comment read as a reason it was safe.
+- **A declaration with a written-out type never checked its initializer.**
+  `parse_var_decl` recorded the declared type and kept the initializer, and
+  nothing in between converted one to the other or compared them. `float f = 3;`
+  compiled to a zero, because the declared type was a float slot that nothing
+  wrote, so reading `f` read uninitialised memory and printed `0`. `int x =
+  "hello";` compiled, and reading `x` printed the string pointer's own bytes as an
+  integer. The check an assignment has always made is now made here too, in the
+  same order and with the same two exceptions: an int widens to a float because
+  that cannot lose a value, and a concrete value going to an interface boxes. So
+  `float f = 3` is `3`, and `int x = "hello"` is a `type_mismatch`.
+  `var_init` and `var_init_type` are the tests.
 
 ## Performance
 

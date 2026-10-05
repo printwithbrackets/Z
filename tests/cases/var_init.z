@@ -1,0 +1,70 @@
+// A declaration with an explicit type agrees with its initializer.
+//
+// The one conversion is an int widening to a float, which cannot lose a value.
+// `float f = 3;` used to compile to a *zero*: the declared type was recorded and
+// the initializer was kept, and nothing in between converted or complained, so
+// the two never met. Reading `f` then read a float slot that was never written.
+//
+// `var` infers, so there is nothing to check there and nothing changes. A value
+// going to an interface is boxed, and a `null` carries no type, so both of those
+// are left alone.
+
+struct Point {
+    int x;
+    int y;
+}
+
+class Box {
+    int v;
+    Box(int n) { this.v = n; }
+}
+
+int main() {
+    // The widening, which is the case this file exists for.
+    float f = 3;
+    Console.WriteLog(f);
+    float g = 1.5;
+    Console.WriteLog(g);
+    float h = 2 + 1;
+    Console.WriteLog(h);
+    // Written out longhand, so the two orders are both covered.
+    float i = 0;
+    i = 4;
+    Console.WriteLog(i);
+
+    // The types that need no conversion.
+    int n = 7;
+    Console.WriteLog(n);
+    string s = "text";
+    Console.WriteLog(s);
+    bool flag = true;
+    Console.WriteLog(flag);
+    // A char is an int in Z, so a byte read is an int initializer.
+    var raw = "z";
+    int c = raw[0];
+    Console.WriteLog(c);
+
+    // `var` is unchanged: the type comes from the value.
+    var v = 3;
+    Console.WriteLog(v);
+    var w = "inferred";
+    Console.WriteLog(w);
+    var x = 1.5;
+    Console.WriteLog(x);
+
+    // A null carries no type, and a class value goes to the class it is.
+    int* p = null;
+    if (p == null) { Console.WriteLog("null"); } else { Console.WriteLog("not null"); }
+    Point pt = new Point(1, 2);
+    Console.WriteLog(pt.x + pt.y);
+    Box* b = new Box(9);
+    Console.WriteLog(b.v);
+
+    // An int inside a float inside a wider expression: each step widens once.
+    float sum = 1 + 2 + 3.5;
+    Console.WriteLog(sum);
+    int back = 3;
+    Console.WriteLog(back);
+
+    return 0;
+}
