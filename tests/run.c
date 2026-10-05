@@ -943,9 +943,13 @@ int main(int argc, char **argv) {
         rmdir(dir);
     }
 
-    /* Runtime-abort cases: compiled with --bounds, the program must exit
-     * nonzero and every non-empty line of the sibling .expected must appear in
-     * its combined output. */
+    /* Runtime-abort cases: the program must exit nonzero and every non-empty line
+     * of the sibling .expected must appear in its combined output.
+     *
+     * No flag is passed. That is the assertion now: these used to be compiled
+     * with `--bounds`, which meant they proved the flag worked rather than that
+     * the check happens, and a build with checks off by default passed them
+     * either way. */
     static const char *aborts[] = {
         "bounds_read", "bounds_write", "bounds_negative", "bounds_runtime_len", "bounds_string",
     };
@@ -958,7 +962,7 @@ int main(int argc, char **argv) {
             fail++;
             continue;
         }
-        snprintf(cmd, sizeof cmd, "%s run %s %s --bounds 2>&1", zq, path, opt_flag());
+        snprintf(cmd, sizeof cmd, "%s run %s %s 2>&1", zq, path, opt_flag());
         char actual[1 << 16];
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
@@ -984,6 +988,38 @@ int main(int argc, char **argv) {
             pass++;
         } else {
             fail++;
+        }
+    }
+
+    /* `--no-bounds` turns the check off, and has to be a real flag to do it.
+     *
+     * It used to be collected as an unrecognized argument and handed to the link
+     * step, where `cc` does not have a `-fno-bounds` for C and warns that the
+     * option is "valid for Modula-2 but not for C". The program still got its
+     * unchecked read, so the flag appeared to work, and the build printed a
+     * warning from a tool the caller never named. So this checks both halves:
+     * the read succeeds, and nothing is printed that is not the program's own
+     * output. */
+    {
+        snprintf(path, sizeof path, "%s/bounds_off.z", rt_dir);
+        snprintf(exp_path, sizeof exp_path, "%s/bounds_off.expected", rt_dir);
+        char expected[1 << 16];
+        if (!slurp(exp_path, expected, sizeof expected)) {
+            fprintf(stderr, "FAIL bounds_off (missing .expected)\n");
+            fail++;
+        } else {
+            snprintf(cmd, sizeof cmd, "%s run %s %s --no-bounds 2>&1", zq, path, opt_flag());
+            char actual[1 << 16];
+            if (run_cmd_capture(cmd, actual, sizeof actual) != 0 || strcmp(expected, actual) != 0) {
+                fprintf(stderr,
+                        "FAIL bounds_off (--no-bounds did not give an unchecked read and a clean "
+                        "build)\n--- expected ---\n%s--- actual ---\n%s\n",
+                        expected, actual);
+                fail++;
+            } else {
+                printf("ok   bounds_off (--no-bounds)\n");
+                pass++;
+            }
         }
     }
 

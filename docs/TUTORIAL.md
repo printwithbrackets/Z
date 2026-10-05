@@ -1367,16 +1367,19 @@ Locals live on the stack (no GC cost); only heap allocations are collected.
 
 ### Bounds checking
 
-Array indexing is **not** checked by default, so it costs nothing. Pass
-`--bounds` and every index into an array is range-checked at runtime:
-
-```sh
-./z run game.z --bounds
-```
+Every index into an array or a string is range-checked at runtime, with no
+flag. Out-of-range access aborts with a message:
 
 ```console
-$ ./z run oob.z --bounds
+$ ./z run oob.z
 runtime error: array index 5 out of bounds (length 3)
+```
+
+`--no-bounds` turns the checks off. It is for code that has been measured and is
+trusted, where the check is a cost you have decided to pay:
+
+```sh
+./z run game.z --no-bounds
 ```
 
 The check reads the length out of the array's own header, so a length that is
@@ -1565,7 +1568,7 @@ deliberately.
   the receiver is a parameter too. The argument registers run out well before
   those numbers, and the surplus is passed on the stack. Exceeding one is a
   compile error rather than silently wrong code.
-- **Array and string indexing are unchecked** unless you pass `--bounds`. See
+- **Array and string indexing is checked**, and `--no-bounds` turns it off. See
   section 15.
 - **A `string` is a sequence of bytes, and that is all it is.** `s.length`,
   `s[i]` and `s[a..b]` all count and slice bytes. Z has no character type, so

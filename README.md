@@ -85,9 +85,10 @@ Code is compiled with `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 ```
 
 Optimization levels are spelled like gcc's (`-O0`..`-O3`), and `-O2` turns on
-loop-invariant code motion. `--bounds` range-checks array *and string* indexing,
-`-w` silences warnings, and `-Werror` makes them fail the build. Anything the
-compiler does not recognize is passed through to the linker.
+loop-invariant code motion. Array *and string* indexing is range-checked by
+default and `--no-bounds` turns it off, `-w` silences warnings, and `-Werror`
+makes them fail the build. Anything the compiler does not recognize is passed
+through to the linker.
 
 A `z.surface` file beside your code renames what a program writes for a global —
 the builtins, the standard library, your own globals — so a codebase can be
@@ -250,7 +251,7 @@ system assembler — we do not write an ELF encoder.
   sites do not: a keyword is not a fallback, so `if` would have to be genuinely
   absent rather than merely shadowed.
 
-- **M3.5 (done):** the everyday-language layer — `const`; bitwise `& | ^ ~ << >>` and the compound forms; `break`/`continue`; the `null` literal; lexicographic string comparison; integer built-ins `abs min max clamp sqrt` and `sin`/`cos` (fixed point, a full turn of `1 << 30`); opt-in `--bounds` range checking.
+- **M3.5 (done):** the everyday-language layer — `const`; bitwise `& | ^ ~ << >>` and the compound forms; `break`/`continue`; the `null` literal; lexicographic string comparison; integer built-ins `abs min max clamp sqrt` and `sin`/`cos` (fixed point, a full turn of `1 << 30`); on-by-default range checking, with `--no-bounds` to turn it off.
 - **M3.7 (done):** C interoperability — `extern` (implemented in C) and `export` (defined in Z, callable from C) in both directions, with linker arguments passed through. Every Z function is emitted under a private `z$` symbol, so it can no longer collide with a libc name, a runtime helper, or a word the assembler reserves.
 - **M3.8 (done):** first-class function pointers — `&f` yields a value typed by
   the function's signature, `fn(params) -> ret` names the type, and calls through

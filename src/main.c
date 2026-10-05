@@ -105,13 +105,15 @@ static int run_argv(char *const argv[]) {
 }
 
 static void usage(void) {
-    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]\n"
+    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
                     "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
                     "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
                     "  -O0 naive codegen (no register allocation, no folding)\n"
                     "  -O1 default: folding, register allocation, strength reduction\n"
                     "  -O2 adds loop-invariant code motion\n"
                     "  -O3 adds loop unrolling\n"
+                    "  --no-bounds  drop the array and string index checks, which are on\n"
+                    "               by default; measured and trusted code only\n"
                     "  -g        emit DWARF debug info (line table, functions, locals)\n"
                     "  -w         silence all warnings\n"
                     "  -Werror    treat warnings as errors\n"
@@ -525,7 +527,17 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     const char *src = argv[2];
     const char *out = NULL;
-    int bounds_checks = 0;
+    /* Bounds checks are on unless `--no-bounds` says otherwise.
+     *
+     * An unchecked read is faster, and that is the whole argument for having had
+     * this behind a flag. It is the wrong default for a language whose array is
+     * a bare pointer with a length header in front of it: the check is one
+     * compare against a value that is already in a register, and the alternative
+     * to paying it is a program that reads whatever the next allocation put
+     * there. `--no-bounds` is still there for the code that has been measured
+     * and is trusted, and it is a real flag now rather than one that fell through
+     * to the C compiler. */
+    int bounds_checks = 1;
     int debug_info = 0;
     /* The embedded standard library is on by default; --no-std turns it off,
      * which is what a program that wants to define its own `StringBuilder` (or
@@ -550,7 +562,16 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out = argv[++i];
         } else if (strcmp(argv[i], "--bounds") == 0) {
+            /* The default. Still accepted, so a script that passes it explicitly
+             * keeps working and keeps meaning what it says. */
             bounds_checks = 1;
+        } else if (strcmp(argv[i], "--no-bounds") == 0) {
+            /* Consumed here rather than collected for the link step. It used to
+             * fall through to `cc`, which does not have a `-fno-bounds` for C and
+             * says so: "valid for Modula-2 but not for C". Every build that asked
+             * for no bounds therefore printed a warning from a tool the caller
+             * never named, which is a warning nobody can act on. */
+            bounds_checks = 0;
         } else if (strcmp(argv[i], "--no-std") == 0) {
             use_stdlib = 0;
         } else if (strcmp(argv[i], "--no-surface") == 0) {

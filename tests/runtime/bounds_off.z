@@ -1,0 +1,17 @@
+// `--no-bounds` gives back the unchecked read, and says nothing about it.
+//
+// This is the same read `bounds_read` makes, run with the flag. What it asserts
+// is not only that the program finishes, but that the build is silent: `--no-bounds`
+// used to be collected as an unrecognized argument and handed to the link step,
+// where the C compiler warns that the option is valid for Modula-2 and not for C.
+// The read worked anyway, so the flag looked like it did its job while every
+// build that used it printed a warning from a tool the caller never named.
+//
+// A program in that state is a program whose warnings nobody can act on, so the
+// harness compares the combined output byte for byte rather than looking for the
+// value alone.
+
+var a = new int[2];
+a[0] = 7;
+a[1] = 9;
+Console.WriteLog(a[5]);
