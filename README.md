@@ -778,6 +778,20 @@ Recorded because each was invisible at the default optimization level, and
   ineligible for a register, which is what keeps a variable under them in memory
   whichever index the walk used, and `addr_index` covers the two other forms an
   assignment can take to say they still work.
+- **A string accumulate was compiled as integer arithmetic on a pointer.** When a
+  scalar local lives in a register, `x = x + ...` does not materialize its
+  address: the chain is applied straight to the register, three-address style,
+  which is the point of the optimisation. The test for that shape never looked at
+  the *type*, only the shape, and a string has the same shape. `s = s + t` is an
+  addition rooted at a read of `s` with a variable on the right, so a string chain
+  passed, and the `add` was applied to the pointer. `s` became an address rather
+  than a string, and reading it back read whatever that address held: the program
+  died with 139 and printed nothing. The chain now requires an `int` or a `bool`,
+  which are the types whose addition is the machine's. A float has its own
+  in-place path in a vector register, a string has to go through the runtime's
+  concatenation because that allocates, and neither can be folded into an integer
+  add. `accum_chain` is the test, and it covers the int and float cases too so
+  that the optimisation is shown still firing.
 - **A declaration with a written-out type never checked its initializer.**
   `parse_var_decl` recorded the declared type and kept the initializer, and
   nothing in between converted one to the other or compared them. `float f = 3;`

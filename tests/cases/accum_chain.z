@@ -1,0 +1,111 @@
+// `x = x + y` in place, when x lives in a register.
+//
+// The register allocator can put a scalar local in a register, and then an
+// assignment to it does not need its address materialized: the value is already
+// where the right-hand side has to go. When the right-hand side is a chain of
+// additions rooted at a read of the same local -- `x + a + b - c` -- the whole
+// chain is applied straight to that register, three-address style, and the
+// result is the new value of x. One chain, one pass, no memory.
+//
+// The test for that shape has to be the *type* of the chain, not its shape.
+// A string has the same shape: `s + t` is an addition rooted at a read of `s`
+// with a variable on the right, which is everything the chain test looks at. So
+// a string chain was compiled as integer arithmetic on the pointer, and
+// `s = s + t` produced an address rather than a string. Reading it back is a read
+// of whatever that address holds, which is why the program died rather than
+// printing something wrong.
+//
+// So only the types whose addition is the machine's addition qualify. An int and
+// a bool do; a string, a float, a pointer and an aggregate do not. A float has
+// its own in-place path above this one, and a string has to go through the
+// runtime's concatenation.
+
+int main() {
+    // The bug. Two string locals, so the right operand is a variable and the
+    // chain test accepts it.
+    {
+        var a = "a";
+        var b = "b";
+        var s = a;
+        s = s + b;
+        Console.WriteLog(s);
+    }
+
+    // The same shape, run round a loop so the value is built up, and with a
+    // subtraction and a third operand.
+    {
+        var x = "a";
+        var y = "b";
+        var z = "c";
+        var s = x;
+        var i = 0;
+        while (i < 3) {
+            s = s + y;
+            i = i + 1;
+        }
+        Console.WriteLog(s);
+        var t = x;
+        t = t + y + z;
+        Console.WriteLog(t);
+    }
+
+    // What the optimisation is for: an int chain in place, in a loop, where the
+    // alternative is a load and a store per iteration.
+    {
+        var one = 1;
+        var two = 2;
+        var three = 3;
+        var total = 0;
+        var i = 0;
+        while (i < 1000) {
+            total = total + one + two - three;
+            i = i + 1;
+        }
+        Console.WriteLog(total);
+    }
+
+    // A bool, which is an int underneath and so takes the same path. There is no
+    // `|` on two bools, so the chain here is the assignment rather than an
+    // operator, which is the shape that is actually at stake.
+    {
+        var on = true;
+        var flag = false;
+        var i = 0;
+        while (i < 4) {
+            bool next = flag;
+            next = on;
+            flag = next;
+            i = i + 1;
+        }
+        Console.WriteLog(flag);
+    }
+
+    // A float, whose addition is a vector instruction and never went near the
+    // integer path. Here to say it still does not.
+    {
+        var one = 1.5;
+        var half = 0.5;
+        var acc = 0.0;
+        var i = 0;
+        while (i < 3) {
+            acc = acc + one + half;
+            i = i + 1;
+        }
+        Console.WriteLog(acc);
+    }
+
+    // A string built up one character at a time through a builder, which is the
+    // shape the string cases above are really about.
+    {
+        var b = new StringBuilder();
+        var i = 0;
+        while (i < 3) {
+            b.append("ab");
+            b.appendInt(i);
+            i = i + 1;
+        }
+        Console.WriteLog(b.toString());
+    }
+
+    return 0;
+}

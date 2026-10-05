@@ -2104,8 +2104,25 @@ static void gen_vcall(CG *cg, Expr *e) {
 /* True if `e` is a left-leaning arithmetic accumulation chain rooted at a read
  * of `slot` (e.g. `sum + a + b - c` for slot=sum), where every right operand is
  * a constant or a simple leaf. Such a chain can be applied directly in the
- * register already holding `slot`'s value (three-address style). */
+ * register already holding `slot`'s value (three-address style).
+ *
+ * The *type* is the first thing checked, and it has to be. A string has the same
+ * shape: `s + t` is an addition rooted at a read of `s` with a variable on the
+ * right, which is everything below looks at, and nothing in the shape says the
+ * addition is the machine's. So a string chain was applied as integer arithmetic
+ * on the pointer, `s = s + t` produced an address rather than a string, and
+ * reading it back read whatever that address held. The test said 139 and nothing
+ * else, because the address was not a string to begin with.
+ *
+ * An int and a bool qualify: the value in the register is the number, and `add`
+ * is the operation. A float does not, and has its own in-place path above the
+ * call site, where the value is in a vector register. A string has to go through
+ * the runtime's concatenation, which allocates and therefore cannot be folded
+ * into an integer add. A pointer has no arithmetic here, and an aggregate is not
+ * a scalar at all. */
 static int is_accum_chain(CG *cg, Expr *e, int slot) {
+    if (e == NULL || (e->type != NULL && !is_kind(e->type, TK_INT) && !is_kind(e->type, TK_BOOL)))
+        return 0;
     while (e != NULL) {
         if (e->kind == E_VAR)
             return e->slot == slot && !e->agg_param;
