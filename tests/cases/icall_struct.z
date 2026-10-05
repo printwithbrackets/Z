@@ -1,0 +1,83 @@
+// A call through a closure or an interface that returns a struct.
+//
+// A struct larger than a register is returned through memory, so the caller
+// reserves a buffer and passes its address as a hidden first argument in `rdi`.
+// A closure's environment, an interface's receiver and a bound method's receiver
+// are each *also* a hidden first argument, and all three want `rdi`.
+//
+// Two things were wrong. Only one hidden argument was counted when there were
+// two, so the declared arguments started a register too early. And the receiver
+// was loaded into `rdi` after the buffer had gone there, overwriting it, so the
+// callee wrote the struct through the receiver and the caller read a buffer
+// nothing had written.
+//
+// The visible result was a program printing zeroes or whatever the frame
+// happened to hold, and a struct with a string in it writing far enough through
+// the stray pointer to take the process down.
+//
+// A method pointer returning a struct *is* refused by the parser, and has been
+// all along. A closure and an interface are not, which is what the code comment
+// here used to claim, and that claim is why the combination was never exercised.
+
+struct Pt {
+    int x;
+    int y;
+}
+
+struct Big {
+    int a;
+    int b;
+    string s;
+}
+
+interface Shape {
+    Pt Corner();
+    Big Tag(string prefix);
+}
+
+class Sq {
+    int side;
+    Sq(int s) { this.side = s; }
+    virtual Pt Corner() { return new Pt(side, side * 10); }
+    virtual Big Tag(string prefix) { return new Big(side, side + 1, prefix + int_to_string(side)); }
+}
+
+int main() {
+    // A closure returning a struct, with a declared argument, so the hidden
+    // environment and the hidden result buffer both have to be counted.
+    var f = (int k) => new Pt(k, k + 1);
+    var p = f(3);
+    Console.WriteLog(p.x);
+    Console.WriteLog(p.y);
+
+    // Two declared arguments, so the offset is wrong by more than one register.
+    var g = (int a, int b) => new Pt(a * 10, b * 100);
+    var gp = g(2, 5);
+    Console.WriteLog(gp.x);
+    Console.WriteLog(gp.y);
+
+    // A closure capturing something, so the environment is not the empty cell.
+    var captured = 7;
+    var h = (int k) => new Pt(captured, captured + k);
+    var hp = h(1);
+    Console.WriteLog(hp.x);
+    Console.WriteLog(hp.y);
+
+    // The same call through an interface.
+    Shape sh = new Sq(4);
+    var ip = sh.Corner();
+    Console.WriteLog(ip.x);
+    Console.WriteLog(ip.y);
+
+    // Through an interface, with a declared argument and a string in the result.
+    // This is the shape that exited 139 rather than answering wrongly.
+    var it = sh.Tag("sq:");
+    Console.WriteLog(it.a);
+    Console.WriteLog(it.b);
+    Console.WriteLog(it.s);
+
+    // Read straight out of the call, with no local in between.
+    Console.WriteLog(sh.Corner().y);
+
+    return 0;
+}

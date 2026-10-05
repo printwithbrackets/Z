@@ -717,6 +717,27 @@ Recorded because each was invisible at the default optimization level, and
   the process down rather than answering wrongly: with a string and a float
   beside the ints, the callee writes far enough from the start of the buffer for
   the stray write to reach something that matters.
+- **A call through a closure or an interface claimed `rdi` twice.** A closure's
+  environment and an interface's receiver are each a hidden first argument, and so
+  is a struct result buffer, so a call with both has *two* leading integer-class
+  arguments rather than one. Only one was counted, which put the declared
+  arguments a register too early, and the receiver was then loaded into `rdi`
+  after the buffer had gone there. Three places had to agree and none of them
+  did. The call site now counts both, the buffer takes `rdi`, the environment
+  takes `rsi` and the declared arguments start at `rdx`. The hoisted lambda never
+  reserved a slot for the buffer at all, so its prologue stored `rdi` into the
+  environment's frame slot and a capturing body indexed the buffer as though it
+  were the capture array. And the interface trampoline read the receiver from
+  `rdi` unconditionally, which dereferenced the *buffer* and jumped to whatever
+  the length header held. A closure returning a struct printed zeroes or frame
+  garbage, and the same call through an interface exited 139. `icall_struct` is
+  the test.
+- **A comment claimed the parser refused these combinations when it only refused
+  bound pointers.** `gen_icall` said a closure and a bound pointer were both
+  refused for a struct return, and used that as the reason the case could not
+  arise. Only `TK_MPTR` is refused, in two places in `parse_postfix` and
+  `parse_primary`. A closure and an interface were never refused, which is why the
+  combination sat there unexercised and the comment read as a reason it was safe.
 
 ## Performance
 

@@ -1899,16 +1899,17 @@ static void gen_icall(CG *cg, Expr *e) {
         rt_nt = 1;
     int rt_base = sret ? temp_alloc_many(cg, rt_nt) : 0;
     int rt_addr = sret ? temp_off(cg, rt_base + rt_nt - 1) : 0;
-    /* The parser rejects a bound pointer returning a struct, so a struct
-     * result buffer and a bound receiver never both claim rdi here. A closure is
-     * refused for the same reason, so its environment and a result buffer cannot
-     * both want rdi either. */
+    /* A method pointer returning a struct is refused by the parser, so a result
+     * buffer and a *bound* receiver cannot both want rdi here. A closure and an
+     * interface are not refused, and they can. This comment used to claim they
+     * were, which is why the combination was never exercised. */
     int iface = is_kind(e->lhs->type, TK_IFACE);
     int bound = is_kind(e->lhs->type, TK_MPTR);
     /* A closure's cell is { code, env }, the same two words in the same order as
      * a bound method's, so the hidden first argument is the environment for one
      * and the receiver for the other. */
     int closure = is_kind(e->lhs->type, TK_CLOSURE);
+    int hidden_env = bound || closure || iface;
     int tf = temp_alloc(cg);
     gen_expr(cg, e->lhs); /* the callable */
     store_temp(cg, tf);
@@ -1917,37 +1918,41 @@ static void gen_icall(CG *cg, Expr *e) {
     if (cg->temp_top > cg->temp_high)
         cg->temp_high = cg->temp_top;
     gen_args_stage(cg, e, base);
-    /* A bound pointer's receiver, or a closure's environment, occupies rdi, so
-     * the declared arguments start one register higher -- and once a hidden
-     * argument has taken rdi, the declared arguments continue in the integer
-     * sequence, so a float among them is passed as raw bits in a general-purpose
-     * register. The vector sequence only applies when nothing is hidden. */
-    /* The same assignment the callee's prologue reads, with the hidden argument
-     * counted as a leading integer-class one. A float among the declared
-     * arguments still arrives in a vector register: the ABI numbers the two
-     * sequences independently, so an environment in rdi does not push the first
-     * float out of xmm0. */
+    /* A bound pointer's receiver, or a closure's environment, is a hidden argument
+     * of its own, and so is a struct result buffer. When both are present there
+     * are *two* leading integer-class arguments, not one: the buffer takes `rdi`
+     * and the receiver or environment takes `rsi`, and the declared arguments
+     * start at `rdx`. Counting one is what put the declared arguments a register
+     * too early, and what made the receiver load below land on top of the buffer.
+     *
+     * The vector sequence is unaffected either way. The ABI numbers the integer
+     * and vector registers independently, so a leading integer argument does not
+     * push the first declared float out of `xmm0`. */
     ArgAssign aa;
-    args_prologue(cg, e, base, (sret || bound || closure || iface) ? 1 : 0, &aa);
-    if (sret)
+    args_prologue(cg, e, base, (sret ? 1 : 0) + (hidden_env ? 1 : 0), &aa);
+    if (sret) {
         buf_printf(cg->out, "  lea rdi, [rbp - %d]\n", rt_addr);
+    }
     load_temp(cg, tf, "r11");
+    /* Where the receiver or environment goes depends on whether a result buffer took
+     * the register below it. */
+    const char *envreg = ARG_REGS[sret ? 1 : 0];
     if (iface) {
         /* An interface cell is { itab, receiver }. The code address is not in the
          * cell -- the cell holds one itab for the whole interface -- so it comes
          * from the slot this method's name resolved to at parse time. */
-        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        buf_printf(cg->out, "  mov %s, QWORD PTR [r11 + 8]\n", envreg);
         buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
         buf_printf(cg->out, "  mov r11, QWORD PTR [r11 + %d]\n", e->vtable_index * 8);
     } else if (bound) {
         /* r11 is the binding cell: { code, receiver }. */
-        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        buf_printf(cg->out, "  mov %s, QWORD PTR [r11 + 8]\n", envreg);
         buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
     } else if (closure) {
-        /* { code, env }: the environment becomes the hidden first argument and
-         * the declared arguments were placed from rsi up, which is where the
-         * hoisted function expects to find them. */
-        buf_printf(cg->out, "  mov rdi, QWORD PTR [r11 + 8]\n");
+        /* { code, env }: the environment becomes the hidden first argument, after
+         * the result buffer if there is one, and the declared arguments were placed
+         * above both, which is where the hoisted function expects to find them. */
+        buf_printf(cg->out, "  mov %s, QWORD PTR [r11 + 8]\n", envreg);
         buf_printf(cg->out, "  mov r11, QWORD PTR [r11]\n");
     }
     buf_printf(cg->out, "  call r11\n");
@@ -5130,7 +5135,14 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
                 if (sm == NULL)
                     continue;
                 buf_printf(&out, "$tr$%s$%s$%d:\n", impl->name, id->name, m);
-                buf_printf(&out, "  mov rax, QWORD PTR [rdi]\n");
+                /* The receiver is in the register the real callee will look in,
+                 * which is not always `rdi`. A struct is returned through memory,
+                 * so a method returning one takes the result buffer in `rdi` and
+                 * the receiver in `rsi`. Reading `rdi` here regardless meant the
+                 * trampoline dereferenced the *buffer* as though it were the
+                 * object and jumped to whatever the length header held. */
+                int sret = is_kind(sm->ret, TK_STRUCT) || is_kind(sm->ret, TK_UNION);
+                buf_printf(&out, "  mov rax, QWORD PTR [%s]\n", sret ? "rsi" : "rdi");
                 buf_printf(&out, "  mov rax, QWORD PTR [rax + %d]\n", sm->vtable_index * 8);
                 buf_puts(&out, "  jmp rax\n");
             }

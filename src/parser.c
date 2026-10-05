@@ -6219,9 +6219,26 @@ static Expr *parse_lambda(Parser *p, Span span) {
 
     advance(p); /* '(' */
     scope_push(p);
-    /* The environment is declared first, before the body exists, because the
-     * body is rewritten to index it and so needs to know which frame slot it
-     * landed in. Frame order is irrelevant; only the recorded offsets matter. */
+    /* The result buffer's slot is reserved before the environment's, and always.
+     *
+     * A struct is returned through memory, so a lambda returning one receives the
+     * buffer as a hidden argument ahead of its environment. The frame layout has
+     * to allow for that before the body is parsed, because the body is rewritten
+     * to index the environment and so needs to know which frame slot it landed
+     * in -- and the return type is not known until the body has been read.
+     *
+     * Reserving it unconditionally rather than shifting the layout afterwards
+     * costs one word in the frame of a lambda that returns something small, which
+     * is nothing next to the frame a hoisted function already has, and it means
+     * the two shapes share one layout instead of two. Not reserving it is what
+     * made the capture read the *buffer* as though it were the environment: the
+     * prologue stored `rdi` into the environment's slot and the body indexed it.
+     */
+    int ret_slot = declare_var(p, "$ret", type_ptr(p->ty, type_void(p->ty)));
+    mark_synth(p, "$ret");
+    /* The environment is declared next, before the body exists, because the body
+     * is rewritten to index it. Frame order is irrelevant; only the recorded
+     * offsets matter. */
     int env_slot = declare_var(p, "$env", env_ty);
     mark_synth(p, "$env");
     if (!at(p, T_RPAREN)) {
@@ -6301,24 +6318,41 @@ static Expr *parse_lambda(Parser *p, Span span) {
     fn->src_fname = NULL; /* a lambda is anonymous: `$lam0` is not a source name */
     fn->ret_type = ret;
     fn->fbody = body_block;
-    fn->vis_start = 1; /* the hidden environment is not a parameter a reader wrote */
 
-    /* The environment is parameter 0, and the declared parameters follow it. */
-    Expr **params = arena_alloc_array(p->arena, (size_t)(np + 1), sizeof(Expr *));
+    /* A struct-returning lambda takes the hidden result buffer ahead of its
+     * environment, so the parameter list is [$ret, $env, declared...]. Otherwise
+     * it is [$env, declared...], and the reserved word is left as a hole. */
+    int lam_sret = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
+    int nparams = np + 1 + (lam_sret ? 1 : 0);
+    Expr **params = arena_alloc_array(p->arena, (size_t)nparams, sizeof(Expr *));
+    int at_p = 0;
+    if (lam_sret) {
+        Expr *retp = new_expr(p, E_VAR, span);
+        retp->name = arena_strdup(p->arena, "$ret");
+        retp->type = type_ptr(p->ty, ret);
+        retp->slot = ret_slot;
+        params[at_p++] = retp;
+    }
+    /* The environment comes straight after the buffer, because that is the
+     * register order: `rdi` then `rsi`. Putting it after the declared parameters
+     * would agree with the frame and disagree with the call. */
+    Expr *envp = new_expr(p, E_VAR, span);
+    envp->name = "$env";
+    envp->type = env_ty;
+    envp->slot = env_slot;
+    params[at_p++] = envp;
     for (int i = 0; i < np; i++) {
         Expr *pe = new_expr(p, E_VAR, span);
         pe->name = arena_strdup(p->arena, pnames[i]);
         pe->type = ptypes[i];
         pe->slot = poffset[i];
-        params[i + 1] = pe;
+        params[at_p++] = pe;
     }
-    Expr *envp = new_expr(p, E_VAR, span);
-    envp->name = "$env";
-    envp->type = env_ty;
-    envp->slot = env_slot;
-    params[0] = envp;
     fn->params = params;
-    fn->nparams = np + 1;
+    fn->nparams = nparams;
+    /* Neither the result buffer nor the environment is a parameter a reader
+     * wrote, so the first one they can match to the source moves with them. */
+    fn->vis_start = lam_sret ? 2 : 1;
     fn->locals_bytes = p->next_offset;
     add_pending(p, fn);
 
