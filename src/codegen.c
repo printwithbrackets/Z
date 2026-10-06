@@ -3771,7 +3771,16 @@ static int licm_may_write(Expr *e) {
     case E_UNIONLIT:
         return 1;
     default:
-        return licm_may_write(e->lhs) || licm_may_write(e->rhs);
+        /* A match's arms are where its writes are. Reaching only `lhs` and `rhs`
+         * -- the subject and nothing else -- asked what the *test* does and
+         * ignored what the arms do, so a body that only ever assigns inside a
+         * `match` arm looked like it wrote nothing at all. */
+        if (licm_may_write(e->lhs) || licm_may_write(e->rhs))
+            return 1;
+        for (int i = 0; i < e->narms; i++)
+            if (licm_may_write(e->arms[i].body))
+                return 1;
+        return 0;
     }
 }
 
@@ -3805,8 +3814,11 @@ static void licm_note_expr(Expr *e, unsigned char *written) {
     }
     licm_note_expr(e->lhs, written);
     licm_note_expr(e->rhs, written);
+    licm_note_expr(e->env, written);
     for (int i = 0; i < e->nargs; i++)
         licm_note_expr(e->args[i], written);
+    for (int i = 0; i < e->narms; i++)
+        licm_note_expr(e->arms[i].body, written);
 }
 
 static void licm_note_stmt(Stmt *s, unsigned char *written) {
@@ -3905,8 +3917,11 @@ static int licm_walk_expr(CG *cg, Expr *e, const unsigned char *written, LicmLis
         return 0;
     int below = licm_walk_expr(cg, e->lhs, written, L);
     below += licm_walk_expr(cg, e->rhs, written, L);
+    below += licm_walk_expr(cg, e->env, written, L);
     for (int i = 0; i < e->nargs; i++)
         below += licm_walk_expr(cg, e->args[i], written, L);
+    for (int i = 0; i < e->narms; i++)
+        below += licm_walk_expr(cg, e->arms[i].body, written, L);
     if (e->hoisted_slot != 0) {
         /* The measure pass already decided this and reserved the slot. The
          * emit pass only has to schedule the computation. */
@@ -3967,20 +3982,31 @@ static void licm_walk_stmt(CG *cg, Stmt *s, const unsigned char *written, LicmLi
     }
 }
 
-/* Runs the pass over one loop. `step` is the loop's own step expression, or NULL
- * for a `while`: it runs once per iteration, so a local it writes is not
- * invariant, and without it the loop's induction variable looks like a constant
- * and expressions over it get hoisted out of the loop they vary in.
+/* Runs the pass over one loop.
+ *
+ * `step` is the loop's own step expression, or NULL for a `while`: it runs once
+ * per iteration, so a local it writes is not invariant, and without it the
+ * loop's induction variable looks like a constant and expressions over it get
+ * hoisted out of the loop they vary in.
+ *
+ * `cond` is the loop's condition, for the same reason and by the same argument.
+ * A condition is usually a read, but nothing stops it writing --
+ * `while ((k = k + 1) < 4)` is ordinary -- and the body walk cannot see it. Handed
+ * only the body, the pass concluded that `k` was invariant and hoisted `k * 2` out
+ * of the loop, computing it once with `k` still zero.
  *
  * `emit` is 0 during the measure pass, which still marks nodes and reserves
  * their slots so the frame accounts for them. */
-static void licm_hoist(CG *cg, Stmt *body, Expr *step, int emit) {
+static void licm_hoist(CG *cg, Stmt *body, Expr *step, Expr *cond, int emit) {
     if (body == NULL)
         return;
     unsigned char written[LICM_MAX_SLOT];
     memset(written, 0, sizeof written);
-    /* The step first: it is the one write the body walk cannot see, and getting
-     * it wrong is a miscompile rather than a missed optimization. */
+    /* The condition and the step first: they are the writes the body walk cannot
+     * see, and getting either wrong is a miscompile rather than a missed
+     * optimization. */
+    if (cond != NULL)
+        licm_note_expr(cond, written);
     if (step != NULL)
         licm_note_expr(step, written);
     licm_note_stmt(body, written);
@@ -4198,13 +4224,13 @@ static void gen_stmt_body(CG *cg, Stmt *s) {
     }
     case S_WHILE: {
         if (cg->opt >= 2)
-            licm_hoist(cg, s->body, NULL, !cg->measuring);
+            licm_hoist(cg, s->body, NULL, s->cond, !cg->measuring);
         gen_loop(cg, s->body, s->cond, NULL, unroll_factor(cg, s->body, s->cond));
         break;
     }
     case S_FOR: {
         if (cg->opt >= 2)
-            licm_hoist(cg, s->body, s->for_step, !cg->measuring);
+            licm_hoist(cg, s->body, s->for_step, s->cond, !cg->measuring);
         if (s->for_init != NULL)
             gen_stmt(cg, s->for_init);
         gen_loop(cg, s->body, s->cond, s->for_step, unroll_factor(cg, s->body, s->cond));

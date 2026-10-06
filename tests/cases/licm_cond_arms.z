@@ -1,0 +1,78 @@
+// Loop-invariant code motion has to know what the loop writes, and the loop is
+// more than its body.
+//
+// The pass keeps a table of the locals a loop writes and hoists any expression
+// that reads only locals the table does not name. A write the analysis cannot see
+// is therefore a silent correctness bug rather than a missed speedup: the local
+// looks constant, the expression is computed once before the loop, and every
+// iteration reuses that value.
+//
+// Two writes were outside what it looked at.
+//
+// The condition, which is not the body. `while ((k = k + 1) < 4)` is an ordinary
+// loop whose condition advances the counter, and the pass was handed the body and
+// the step and nothing else. `k` looked invariant, `k * 2` was hoisted, and it was
+// computed once with `k` still zero.
+//
+// A `match` arm, which the walkers did not descend into. They followed `lhs` and
+// `rhs`, which for a match is the subject and nothing else, so a body whose only
+// assignment lives inside an arm looked like it wrote nothing.
+//
+// Both only show from -O2, and only when the loop body has no call in it. A call
+// makes `licm_may_write` give up and mark every local written, which hides both of
+// them: the results are printed after the loop here for that reason, and it is
+// also why neither had been found before.
+//
+// The last block pins a value across a loop that also holds an invariant
+// expression, so the pass hoisting too much shows up as a wrong number as well as
+// the pass hoisting too little. It cannot show that the hoist *happened* -- a pure
+// arithmetic expression computes the same either way -- so that half was checked
+// against the emitted assembly by hand rather than claimed here.
+
+enum Shape { Round, Square, Tri }
+
+int main() {
+    // ---- a write in the condition ----
+    var k = 0;
+    var t = 0;
+    var n = 0;
+    while ((k = k + 1) < 4) {
+        t = k * 2;
+        n = n + 1;
+    }
+    Console.WriteLog(t); // 6, from k == 3 on the last pass
+    Console.WriteLog(k); // 4
+    Console.WriteLog(n); // 3
+
+    // ---- a write inside a match arm ----
+    var shape = Round;
+    var s = 0;
+    var u = 0;
+    var i = 0;
+    while (i < 3) {
+        i = i + 1;
+        match (shape) {
+            Round => s = s + 10,
+            Square => s = s + 20,
+            Tri => s = s + 30,
+        };
+        u = s * 2;
+    }
+    Console.WriteLog(u); // 60, from s == 30 on the last pass
+
+    // ---- too much hoisting, and too little ----
+    // `a * b` is invariant. `m * a` is not, because `m` is written every pass.
+    // Both are in one expression, so a pass that hoisted either the wrong one or
+    // nothing at all changes this number.
+    var a = 3;
+    var b = 7;
+    var r = 0;
+    var m = 0;
+    while (m < 4) {
+        m = m + 1;
+        r = r + a * b + m * a;
+    }
+    Console.WriteLog(r); // 4*21 + 3*(1+2+3+4) = 84 + 30 = 114
+
+    return 0;
+}
