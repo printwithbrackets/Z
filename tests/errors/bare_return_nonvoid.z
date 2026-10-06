@@ -1,0 +1,13 @@
+// A bare `return` in a function that owes a value.
+//
+// There is no value to copy into the return slot, so the slot is left holding
+// whatever the frame happened to contain, and the caller reads it as the answer.
+// It compiled silently and printed a number that was never computed.
+int f() {
+    return;
+}
+
+int main() {
+    Console.WriteLog(f());
+    return 0;
+}

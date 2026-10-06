@@ -277,25 +277,100 @@ int main(int argc, char **argv) {
     /* Golden cases. */
     char path[512], exp_path[512], cmd[2048];
     static const char *cases[] = {
-        "hello",         "arith",          "vars",         "bools",       "ifelse",
-        "loops",         "funcs",          "recursion",    "strings",     "compound",
-        "mainfunc",      "nested_calls",   "manyargs",     "scopes",      "shadows",
-        "forloop",       "pointers",       "arrays",       "foreach",     "strconcat",
-        "structs",       "structs_nested", "interp",       "methods",     "props",
-        "ext",           "fatarrow",       "opoverload",   "tern",        "ownership",
-        "files",         "strings_owned",  "temporaries",  "enum_match",  "match_arms",
-        "constfold",     "regalloc",       "divmod",       "boolstr",     "generics",
-        "generics2",     "classes",        "classes2",     "integration", "strings2",
-        "collections",   "collections2",   "frame_layout", "bitwise",     "consts",
-        "breakcontinue", "nested_loops",   "null",         "strcmp",      "intrinsics",
-        "trig",          "symnames",       "bigconst",     "fnptr",       "methodptr",
-        "literals",      "stdlib",         "floats",       "closures",    "closures_toplevel",
-        "nested_fn",     "typed_locals",   "local_types",  "unroll",      "unroll_dep",
-        "onearg_call",   "durations",      "stackargs",    "closedform",  "licm_bigframe",
-        "inliner",       "result",         "interfaces",   "cxxsyntax",   "rangefor",
-        "addrof_field",  "destructors",    "strreturn",    "stdin",       "surface",
-        "typeof",        "vcall_struct",   "icall_struct", "var_init",    "closedform_call",
-        "addr_index",    "accum_chain",
+        "hello",
+        "arith",
+        "vars",
+        "bools",
+        "ifelse",
+        "loops",
+        "funcs",
+        "recursion",
+        "strings",
+        "compound",
+        "mainfunc",
+        "nested_calls",
+        "manyargs",
+        "scopes",
+        "shadows",
+        "forloop",
+        "pointers",
+        "arrays",
+        "foreach",
+        "strconcat",
+        "structs",
+        "structs_nested",
+        "interp",
+        "methods",
+        "props",
+        "ext",
+        "fatarrow",
+        "opoverload",
+        "tern",
+        "ownership",
+        "files",
+        "strings_owned",
+        "temporaries",
+        "enum_match",
+        "match_arms",
+        "constfold",
+        "regalloc",
+        "divmod",
+        "boolstr",
+        "generics",
+        "generics2",
+        "classes",
+        "classes2",
+        "integration",
+        "strings2",
+        "collections",
+        "collections2",
+        "frame_layout",
+        "bitwise",
+        "consts",
+        "breakcontinue",
+        "nested_loops",
+        "null",
+        "strcmp",
+        "intrinsics",
+        "trig",
+        "symnames",
+        "bigconst",
+        "fnptr",
+        "methodptr",
+        "literals",
+        "stdlib",
+        "floats",
+        "closures",
+        "closures_toplevel",
+        "nested_fn",
+        "typed_locals",
+        "local_types",
+        "unroll",
+        "unroll_dep",
+        "onearg_call",
+        "durations",
+        "stackargs",
+        "closedform",
+        "licm_bigframe",
+        "inliner",
+        "result",
+        "interfaces",
+        "cxxsyntax",
+        "rangefor",
+        "addrof_field",
+        "destructors",
+        "strreturn",
+        "stdin",
+        "surface",
+        "typeof",
+        "vcall_struct",
+        "icall_struct",
+        "var_init",
+        "closedform_call",
+        "addr_index",
+        "accum_chain",
+        "str_buf_literal",
+        "enum_variant_wide",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -433,6 +508,8 @@ int main(int argc, char **argv) {
     static const char *errs[] = {
         "undefined_var",
         "type_mismatch",
+        "dup_struct_method",
+        "bare_return_nonvoid",
         "var_init_type",
         "missing_semi",
         "unknown_func",
@@ -530,6 +607,21 @@ int main(int argc, char **argv) {
         int rc = run_cmd_capture(cmd, actual, sizeof actual);
         if (rc == 0) {
             fprintf(stderr, "FAIL %s (expected compile error, got success)\n", errs[i]);
+            fail++;
+            continue;
+        }
+        /* A diagnostic and then a crash looked exactly like a diagnostic and then
+         * a clean exit, because both are "the compiler exited nonzero". The
+         * golden cases started insisting on the exit status, and the diagnostic
+         * cases had no reason to until a case actually died: a redundant struct
+         * declaration reported "already defined" and then segfaulted, and this
+         * group called it a pass.
+         *
+         * A signal arrives as 128 plus the number, which is above any exit status
+         * a compiler chooses for itself, so the bound is the whole test. */
+        if (rc >= 128) {
+            fprintf(stderr, "FAIL %s (the compiler died on signal %d after reporting)\n", errs[i],
+                    rc - 128);
             fail++;
             continue;
         }

@@ -1,0 +1,27 @@
+// An enum variant with more than sixteen fields.
+//
+// The field types and names were gathered into two sixteen-entry arrays on the
+// stack while the variant was scanned. A guard stopped the writes at sixteen and
+// the count went past it regardless, so a variant with twenty fields was handed
+// to the union builder as twenty: the builder read five names and five type
+// pointers out of whatever followed those arrays in the frame. The second of the
+// two sites that build a variant wrote the name before consulting the guard, so
+// the seventeenth field was already a store out of bounds.
+//
+// Both arrays grow now, and the whole variant is readable from a match arm, so
+// this checks that the fields landed where they should rather than only that the
+// compiler survived. Twenty is past both old limits, and the answer is the sum of
+// all twenty values, which is not a number that falls out of any uninitialised
+// memory by accident.
+
+enum Wide {
+    Wide(int f0, int f1, int f2, int f3, int f4, int f5, int f6, int f7, int f8, int f9, int f10, int f11, int f12, int f13, int f14, int f15, int f16, int f17, int f18, int f19)
+}
+
+int main() {
+    var v = Wide(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+    Console.WriteLog(match v {
+        Wide(f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19) => f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14 + f15 + f16 + f17 + f18 + f19
+    });
+    return 0;
+}

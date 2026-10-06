@@ -438,7 +438,22 @@ char *z_str_buf_append(char *buf, const char *s) {
     if (buf == NULL)
         return zstr_copy(s, (size_t)lb);
     ZStrHdr *h = ZH(buf);
-    if (h->cap - h->len < lb) {
+    /* A literal arrives here too, and it has to be copied out before anything is
+     * written through it.
+     *
+     * The growth test is `capacity - length < wanted`, and a literal has a
+     * capacity of zero because its bytes are static and there is nothing to grow.
+     * Appending nothing to nothing made that `0 - 0 < 0`, which is false, so no
+     * reallocation happened and the terminator was then stored through the
+     * literal's own bytes in .rodata. Appending something to a literal took the
+     * copy path and was always fine, which is why the empty case is the only one
+     * that died.
+     *
+     * `cap == 0` is the flag for "these bytes are not mine to write" that the
+     * header comment above already gives it, and it is checked here for the same
+     * reason `z_str_free` checks it: a literal must be safe to pass anywhere a
+     * buffer is taken. */
+    if (h->cap == 0 || h->cap - h->len < lb) {
         long need = h->len + lb;
         long cap = h->cap + h->cap / 2;
         if (cap < need)

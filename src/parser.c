@@ -421,6 +421,49 @@ static Stmt *parse_func(Parser *p, int nested);
 static Stmt *parse_struct_decl(Parser *p, int is_class);
 
 static GenericType *find_gtype(Parser *p, const char *name);
+
+/* The field types and names of one enum variant, gathered while its tokens are
+ * scanned.
+ *
+ * Grown rather than fixed. The two arrays used to be sixteen entries on the stack
+ * with a guard that stopped the writes at sixteen and nothing else: the count
+ * carried on past it and was handed to the union builder with that length, which
+ * read the names and the type pointers out of whatever followed the arrays in the
+ * frame. A variant with twenty fields walked off the end of both arrays and the
+ * process died.
+ *
+ * The second of the two sites that build a variant had it slightly worse: the
+ * name was written before the guard, so a seventeenth field was already a store
+ * out of bounds rather than only a read.
+ *
+ * There is no reason for a limit here. The builder copies into arena storage of
+ * its own, so the fixed thing was only this scratch space, and a variant with
+ * twenty fields is a big variant rather than a wrong one. A limit at sixteen
+ * would have been a number with nothing behind it. */
+typedef struct {
+    Type **ftypes;
+    const char **fnames;
+    int n;
+    int cap;
+} VariantFields;
+
+static void variant_fields_add(Parser *p, VariantFields *vf, Type *ft, const char *name) {
+    if (vf->n == vf->cap) {
+        int ncap = vf->cap == 0 ? 8 : vf->cap * 2;
+        Type **nt = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Type *));
+        const char **nn = arena_alloc_array(p->arena, (size_t)ncap, sizeof(char *));
+        if (vf->ftypes != NULL) {
+            memcpy(nt, vf->ftypes, (size_t)vf->n * sizeof(Type *));
+            memcpy(nn, vf->fnames, (size_t)vf->n * sizeof(char *));
+        }
+        vf->ftypes = nt;
+        vf->fnames = nn;
+        vf->cap = ncap;
+    }
+    vf->ftypes[vf->n] = ft;
+    vf->fnames[vf->n] = name;
+    vf->n++;
+}
 static StructDef *resolve_gtype(Parser *p, GenericType *g, Type **args, int nargs, Span span);
 static void split_shift_closer(Parser *p);
 static Type *parse_type_at(Parser *p, int i);
@@ -2081,9 +2124,7 @@ static void prescan_struct_fields(Parser *p) {
                 break;
             char *vname = p->toks[j].text;
             j++;
-            Type *ftypes[16];
-            const char *fnames[16];
-            int nf = 0;
+            VariantFields vf = {NULL, NULL, 0, 0};
             if (j < p->ntoks && p->toks[j].kind == T_LPAREN) {
                 j++;
                 while (j < p->ntoks && p->toks[j].kind != T_RPAREN && p->toks[j].kind != T_EOF) {
@@ -2095,11 +2136,7 @@ static void prescan_struct_fields(Parser *p) {
                     Parser sub = *p;
                     sub.pos = j;
                     Type *ft = parse_type(&sub);
-                    if (nf < 16) {
-                        ftypes[nf] = ft;
-                        fnames[nf] = p->toks[k].text;
-                    }
-                    nf++;
+                    variant_fields_add(p, &vf, ft, p->toks[k].text);
                     j = k + 1;
                     if (j < p->ntoks && p->toks[j].kind == T_COMMA)
                         j++;
@@ -2107,7 +2144,7 @@ static void prescan_struct_fields(Parser *p) {
                 if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
                     j++;
             }
-            union_add_variant(p->ty, ud, vname, ftypes, fnames, nf);
+            union_add_variant(p->ty, ud, vname, vf.ftypes, vf.fnames, vf.n);
             if (j < p->ntoks && p->toks[j].kind == T_COMMA) {
                 j++;
                 continue;
@@ -7668,9 +7705,7 @@ static Stmt *parse_enum_decl(Parser *p) {
         }
         char *vname = cur(p)->text;
         advance(p);
-        Type *ftypes[16];
-        const char *fnames[16];
-        int nf = 0;
+        VariantFields vf = {NULL, NULL, 0, 0};
         if (match(p, T_LPAREN)) {
             while (!at(p, T_RPAREN) && !at(p, T_EOF)) {
                 Type *ft = parse_type(p);
@@ -7678,18 +7713,16 @@ static Stmt *parse_enum_decl(Parser *p) {
                     diag_error(cur(p)->span, "expected variant field type and name");
                     break;
                 }
-                fnames[nf] = cur(p)->text;
+                const char *fname = cur(p)->text;
                 advance(p);
-                if (nf < 16)
-                    ftypes[nf] = ft;
-                nf++;
+                variant_fields_add(p, &vf, ft, fname);
                 if (!match(p, T_COMMA))
                     break;
             }
             match(p, T_RPAREN);
         }
         if (ud != NULL)
-            union_add_variant(p->ty, ud, vname, ftypes, fnames, nf);
+            union_add_variant(p->ty, ud, vname, vf.ftypes, vf.fnames, vf.n);
         if (!match(p, T_COMMA))
             break;
     }
@@ -7880,6 +7913,20 @@ static char *dtor_name(Parser *p, StructDef *sd) {
     return n;
 }
 
+/* Steps over a braced block, counting braces so that a body containing one does
+ * not end the skip early. Returns the index just past the closing brace. */
+static int skip_braced(Parser *p, int i) {
+    int depth = 0;
+    while (i < p->ntoks && p->toks[i].kind != T_EOF) {
+        if (p->toks[i].kind == T_LBRACE)
+            depth++;
+        else if (p->toks[i].kind == T_RBRACE && --depth == 0)
+            return i + 1;
+        i++;
+    }
+    return i;
+}
+
 static Stmt *parse_struct_decl(Parser *p, int is_class) {
     Span start = cur(p)->span;
     advance(p); /* 'struct' or 'class' */
@@ -7907,6 +7954,24 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         sd = type_define_struct(p->ty, name);
         if (sd == NULL) {
             diag_error(start, "%s '%s' is already defined", is_class ? "class" : "struct", name);
+            /* Step over the whole declaration rather than reading its members.
+             *
+             * There is no type for them to belong to, and every member read below
+             * was written on the assumption that there is one. Fields were guarded
+             * and methods were guarded, and both guards were added because something
+             * had already crashed: a plain method died in `struct_add_method`, a
+             * destructor died passing a null name to the mangler. Guarding each
+             * site is how three of them get found. Nothing in a body that names a
+             * rejected type can be diagnosed usefully either, since the names in it
+             * resolve against the type that is already there.
+             *
+             * The body still has to be consumed so that what follows parses in the
+             * right place. */
+            advance(p); /* the name */
+            p->pos = skip_type_param_list(p, p->pos);
+            if (at(p, T_LBRACE))
+                p->pos = skip_braced(p, p->pos);
+            return new_stmt(p, S_EXPR, start);
         }
     }
     /* Step over the name. */
@@ -8286,6 +8351,21 @@ static Stmt *parse_stmt(Parser *p) {
         advance(p);
         Stmt *s = new_stmt(p, S_RETURN, start);
         if (at(p, T_SEMI)) {
+            /* A bare `return` is an ordinary way out of a void function, and an
+             * error in one that owes a value.
+             *
+             * It used to compile silently in both. There is no expression to copy
+             * into the return slot, so the slot keeps whatever the frame held,
+             * and the caller reads that as the answer: a function returning `int`
+             * printed a number nobody computed, and one returning a struct returned
+             * whatever was in the result buffer.
+             *
+             * The diagnostic names what is missing rather than only the return
+             * type, because "cannot return without a value" on its own reads as a
+             * complaint about the statement when what is wanted is a value. */
+            if (!is_unk(p->cur_ret) && !is_kind(p->cur_ret, TK_VOID))
+                diag_error(start, "cannot return without a value from a function returning '%s'",
+                           type_name(p->ty, p->cur_ret));
             s->expr = NULL;
         } else {
             /* The function's return type tells `Ok(...)`/`Err(...)` what to

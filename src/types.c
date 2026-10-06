@@ -455,6 +455,11 @@ int type_needs_drop(Type *t) {
 }
 
 StructMethod *struct_find_method(StructDef *sd, const char *name) {
+    /* NULL in, NULL out. This is the lookup for a type that may not exist, and a
+     * caller asking whether a method is there has no type to ask about in the
+     * case where the type's own declaration was rejected. */
+    if (sd == NULL || name == NULL)
+        return NULL;
     for (int i = 0; i < sd->nmethods; i++)
         if (strcmp(sd->methods[i]->name, name) == 0)
             return sd->methods[i];
