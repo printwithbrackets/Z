@@ -4067,7 +4067,7 @@ static void gen_stmt_body(CG *cg, Stmt *s) {
         if (cg->inl_depth > 0) {
             int lbl = cg->inl_label[cg->inl_depth - 1];
             if (lbl > 0)
-                buf_printf(cg->out, "  jmp .L%d\n", lbl);
+                buf_printf(cg->out, "  jmp .Li%d\n", lbl);
         }
         break;
     case S_VAR:
@@ -4220,14 +4220,40 @@ static void gen_stmt_body(CG *cg, Stmt *s) {
         if (cg->loop_depth > 0)
             buf_printf(cg->out, "  jmp .L%d\n", cg->loops[cg->loop_depth - 1].cont);
         break;
-    case S_BLOCK:
+    case S_BLOCK: {
+        /* The label goes on the stack for the length of the body, so a `return`
+         * inside it can find the end of *this* body and not the end of whichever
+         * one encloses it. The stack was there and nothing pushed onto it, so
+         * `inl_depth` stayed zero and every `return` in an inlined body fell
+         * through into the rest of that body and carried on. A `return` as the
+         * last statement was unaffected, which is why no test could see it.
+         *
+         * A body that is not inlined has no label and pushes nothing, so a
+         * `return` that reaches one from inside an inlined body jumps to the
+         * innermost labelled body, which is the copy it belongs to. */
+        int pushed = 0;
+        if (s->inl_label > 0 && cg->inl_depth < (int)(sizeof cg->inl_label / sizeof(int))) {
+            cg->inl_label[cg->inl_depth++] = s->inl_label;
+            pushed = 1;
+        }
         gen_block_items(cg, s);
+        if (pushed)
+            cg->inl_depth--;
         /* A block that wraps an inlined body carries the label its `return`s
          * jump to, emitted after the last item so reaching the end of the body
-         * and returning from it are the same thing. */
+         * and returning from it are the same thing.
+         *
+         * `Li`, not `L`. These numbers come from the parser's counter and every
+         * other label in the file comes from the code generator's, and the two
+         * counters are seeded independently and both start low. Sharing one `.L`
+         * namespace meant a loop in a spliced body and the end of another spliced
+         * body could land on the same number, and the assembler stopped on the
+         * duplicate symbol: a generic function with an inlinable call in it did
+         * not build at all. */
         if (s->inl_label > 0)
-            buf_printf(cg->out, ".L%d:\n", s->inl_label);
+            buf_printf(cg->out, ".Li%d:\n", s->inl_label);
         break;
+    }
     case S_FUNC:
     case S_STRUCT:
     case S_UNION:

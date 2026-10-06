@@ -230,7 +230,23 @@ typedef struct {
      * captured, in the order the body first mentioned them, which is the order
      * its environment is laid out in. */
     int lambda_counter;
-    int inline_label; /* labels for spliced inlined bodies, unique across the program */
+    /* Labels for spliced inlined bodies, unique across the program.
+     *
+     * These are emitted as `.Li<n>` rather than `.L<n>`, because the code
+     * generator has its own label counter for loops and branches and the two are
+     * seeded independently. Sharing one namespace meant a loop inside a spliced
+     * body and the end of another spliced body could land on the same number, and
+     * the assembler stopped on the duplicate symbol -- so a generic function with
+     * an inlinable call in it did not build at all. That was the collision; this
+     * counter was only half of it.
+     *
+     * Not restored across a generic instantiation, where `lambda_counter` and
+     * `func_counter` are. Those two want the same names for a second instance of
+     * one template, because the instance replaces the template rather than
+     * joining it. A spliced body is not like that: two instances are two separate
+     * places in the assembly and each needs its own label, so this one only ever
+     * goes up. */
+    int inline_label;
     int func_counter; /* owner id stamped on each Var; see capture_for */
     struct Var *captured[MAX_CAPTURES];
     int ncaptured;
@@ -3135,7 +3151,6 @@ static StructDef *instantiate_type(Parser *p, GenericType *g, Type **concrete, S
     int saved_foreach = p->foreach_counter;
     int saved_lambda = p->lambda_counter;
     int saved_func = p->func_counter;
-    int saved_label = p->inline_label;
     int saved_owner = p->cur_owner;
     StructDef *saved_captured[MAX_CAPTURES];
     int saved_ncaptured = p->ncaptured;
@@ -3216,7 +3231,6 @@ static StructDef *instantiate_type(Parser *p, GenericType *g, Type **concrete, S
     p->foreach_counter = saved_foreach;
     p->lambda_counter = saved_lambda;
     p->func_counter = saved_func;
-    p->inline_label = saved_label;
     p->cur_owner = saved_owner;
     if (saved_ncaptured > 0)
         memcpy(p->captured, saved_captured, (size_t)saved_ncaptured * sizeof(Var));

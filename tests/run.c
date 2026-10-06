@@ -372,6 +372,7 @@ int main(int argc, char **argv) {
         "str_buf_literal",
         "enum_variant_wide",
         "closure_slot_collision",
+        "inline_early_return",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);

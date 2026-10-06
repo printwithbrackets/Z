@@ -1,0 +1,92 @@
+// A `return` part way through an inlined body has to leave the body, and each
+// inlined body needs a label of its own.
+//
+// The inliner rebuilds a body it copies, and each `return e` becomes two
+// statements: an assignment of the value to the hidden result local, and a jump
+// to the end of the inlined body. Reaching the end and returning from it are
+// the same thing, so the label sits at the end of the body and a `return` at the
+// very end needs no jump of its own -- which is why a body with one return, the
+// shape the existing inliner test uses, could never tell whether the jump was
+// emitted.
+//
+// It was not emitted. The code generator kept a stack of the labels of the
+// bodies it was inside and nothing ever pushed onto it, so a `return` inside an
+// inlined body fell through into the rest of that body and kept going. The
+// statements after the `return` ran, and the last one won. `pick` returns early
+// on a negative argument and then does four more statements, so inlined
+// `pick(-5)` computes -1, stores it, does not leave, runs the rest, and returns
+// -9.
+//
+// The label counter has the mirror problem. It is saved and restored around a
+// generic instantiation, alongside the lambda and function counters, because two
+// instantiations of one template want the same names. An inlined body is not like
+// that: both instantiations are emitted, so their bodies need different labels,
+// and restoring the counter hands the same label out again to whatever is
+// instantiated next or parsed after. The assembler rejects the duplicate symbol
+// and the program does not build at all.
+//
+// Every call here is the whole initializer. A call that is an argument to
+// something else is not spliced, it goes down the cheaper expression path, and
+// that one has never needed a jump.
+
+int pick(int n) {
+    var r = 0;
+    if (n < 0) { return -1; }
+    r = n * 2;
+    if (n > 100) { return r; }
+    r = r + 1;
+    return r;
+}
+
+// A `return` that is the last statement, which must keep working: that is the
+// shape where falling through happened to be right.
+int last(int n) {
+    var r = n * 3;
+    return r;
+}
+
+// A `return` from inside a loop, which leaves from further inside the body.
+//
+// The counter is separate from the loop variable on purpose. A first draft used
+// the loop variable itself and checked it for the value the second increment
+// produced, which put the test two steps past the check and made the early
+// return unreachable -- so the case passed for the wrong reason, returning -1
+// because the loop ran out rather than because the `return` left.
+int early(int n) {
+    var i = 0;
+    var seen = 0;
+    while (i < n) {
+        i = i + 1;
+        seen = seen + 1;
+        if (seen == 2) { return seen * 100; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// An inlinable call inside a generic function, whose body is instantiated under
+// a saved-and-restored label counter.
+T viaGeneric<T>(T a) {
+    pick(-5);
+    return a;
+}
+
+int main() {
+    var a = pick(-5);
+    var b = pick(3);
+    var c = pick(500);
+    Console.WriteLog(a);
+    Console.WriteLog(b);
+    Console.WriteLog(c);
+
+    var d = last(4);
+    Console.WriteLog(d);
+
+    var e = early(10);
+    Console.WriteLog(e);
+
+    var f = viaGeneric(9);
+    Console.WriteLog(f);
+
+    return 0;
+}
