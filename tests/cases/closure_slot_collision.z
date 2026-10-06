@@ -1,0 +1,70 @@
+// A captured variable and a lambda's own parameter, matched by slot number.
+//
+// A hoisted lambda has a frame of its own and its parameters are numbered from
+// the same place every frame is numbered from, so a captured variable in the
+// *enclosing* frame and a parameter of the *lambda* can carry the same number.
+// The rewrite that turns a capture into `*env[i]` matched on that number and on
+// the type. When the two lined up, the reference to the parameter was rewritten
+// as well, so the lambda read the captured variable where its argument should
+// have been. The argument was still passed, still checked, and discarded.
+//
+// Twelve of each, so that some pair lines up whatever the numbering turns out to
+// be. Every lambda is called with its own index and captures a value ten times
+// larger, which is what makes the two readable as different numbers rather than
+// as one that happens to agree. Before the fix only f2 was wrong, and it was
+// wrong at every optimization level, which is the part worth noting: nothing
+// about this depended on a pass being enabled.
+
+int main() {
+    var v0 = 10;
+    var v1 = 20;
+    var v2 = 30;
+    var v3 = 40;
+    var v4 = 50;
+    var v5 = 60;
+    var v6 = 70;
+    var v7 = 80;
+    var v8 = 90;
+    var v9 = 100;
+    var v10 = 110;
+    var v11 = 120;
+    var f0 = (int p) => p * 100 + v0;
+    var f1 = (int p) => p * 100 + v1;
+    var f2 = (int p) => p * 100 + v2;
+    var f3 = (int p) => p * 100 + v3;
+    var f4 = (int p) => p * 100 + v4;
+    var f5 = (int p) => p * 100 + v5;
+    var f6 = (int p) => p * 100 + v6;
+    var f7 = (int p) => p * 100 + v7;
+    var f8 = (int p) => p * 100 + v8;
+    var f9 = (int p) => p * 100 + v9;
+    var f10 = (int p) => p * 100 + v10;
+    var f11 = (int p) => p * 100 + v11;
+
+    Console.WriteLog(
+        f0(1)
+        +
+        f1(2)
+        +
+        f2(3)
+        +
+        f3(4)
+        +
+        f4(5)
+        +
+        f5(6)
+        +
+        f6(7)
+        +
+        f7(8)
+        +
+        f8(9)
+        +
+        f9(10)
+        +
+        f10(11)
+        +
+        f11(12)
+    );
+    return 0;
+}

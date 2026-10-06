@@ -952,26 +952,35 @@ static void mark_synth(Parser *p, const char *name) {
         v->is_synth = 1;
 }
 
-static Var *lookup_var(Parser *p, const char *name) {
+/* Resolves a name to its binding, walking outward through the scopes still
+ * open. `mark` records a use, which is right when something read the variable
+ * and wrong when the caller was only asking which one a name means.
+ *
+ * The walk stops at the enclosing function's body scope, because a function body
+ * is a frame of its own and continuing past it would let a function read a
+ * variable declared beside it: `var g = 5; int f() { return g; }` used to
+ * compile, and returned 0, because slot numbers are assigned per function and f
+ * read whatever f's own frame happened to hold. */
+static Var *resolve_var(Parser *p, const char *name, int mark) {
     for (Scope *s = p->scope; s != NULL; s = s->parent) {
         for (Var *v = s->vars; v != NULL; v = v->next) {
             if (strcmp(v->name, name) == 0) {
-                /* Resolving the name is a use. lookup_var_local deliberately
-                 * does not do this, since it also serves the redeclaration
-                 * check, where merely testing for a name is not a use. */
-                v->used = 1;
+                if (mark)
+                    v->used = 1;
                 return v;
             }
         }
-        /* A function body is a frame of its own, so its outermost scope is where
-         * name lookup stops. Continuing past it would let a function read a
-         * variable declared beside it: `var g = 5; int f() { return g; }` used
-         * to compile, and returned 0, because slot numbers are assigned per
-         * function and f read whatever f's own frame happened to hold. */
         if (s->is_fn_body)
             break;
     }
     return NULL;
+}
+
+static Var *lookup_var(Parser *p, const char *name) {
+    /* Resolving the name is a use. lookup_var_local deliberately does not, since
+     * it also serves the redeclaration check, where merely testing for a name is
+     * not a use. */
+    return resolve_var(p, name, 1);
 }
 
 static int align_up(int n, int a) {
@@ -6160,10 +6169,35 @@ static void rewrite_captures_expr(Parser *p, Expr *e, Var **caps, int ncaps, Typ
     if (e == NULL)
         return;
     if (e->kind == E_VAR) {
-        for (int i = 0; i < ncaps; i++) {
-            if (caps[i]->offset != e->slot)
-                continue;
-            if (!type_equals(caps[i]->type, e->type))
+        /* Which binding this name means, resolved rather than inferred.
+         *
+         * It used to match on the slot number and the type, which is the same
+         * information the reference itself is made of, and that was the defect: a
+         * slot number says which word of a frame, not which variable it belongs
+         * to. A hoisted lambda has a frame of its own and numbers it from the
+         * same place every frame is numbered from, so a captured variable in the
+         * enclosing frame and a parameter of the lambda can carry the same number.
+         *
+         * When they lined up, the reference to the parameter matched the capture
+         * and was rewritten too, so the lambda read the captured variable where
+         * its argument should have been. The argument was still passed and still
+         * type-checked, and then discarded:
+         *
+         *     var v0 = 10; var v1 = 20; var v2 = 30;
+         *     var f = (int p) => p * 100 + v2;   // p@32, v2@32
+         *     f(3)                              // 3030, not 330
+         *
+         * The capture list is already right about this. `capture_for` records a
+         * variable only when its owner is not the lambda's, so nothing in here
+         * belongs to the lambda and every entry does. The matching was the part
+         * that could not tell them apart.
+         *
+         * Resolving by name also gets shadowing right for free, and it keeps the
+         * `$env` reference this function synthesizes from matching a capture that
+         * happens to sit at the same offset. */
+        Var *bound = resolve_var(p, e->name, 0);
+        for (int i = 0; i < ncaps && bound != NULL; i++) {
+            if (caps[i] != bound)
                 continue;
             Type *vt = e->type;
             char *nm = e->name;

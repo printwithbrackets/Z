@@ -371,6 +371,7 @@ int main(int argc, char **argv) {
         "accum_chain",
         "str_buf_literal",
         "enum_variant_wide",
+        "closure_slot_collision",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
