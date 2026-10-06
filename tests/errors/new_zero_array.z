@@ -1,0 +1,16 @@
+// `new T[0]` and a negative count.
+//
+// A zero-length array used to be allocated as an array of length zero, so every
+// index into it was a bounds failure at run time:
+//
+//     var a = new int[0];
+//     a[0] = 1;   // "array index 0 out of bounds (length 0)", exit 134
+//
+// That is a run-time error about something the reader could have been told
+// about while reading the program, and the reader cannot act on it there. Both
+// forms are diagnosed at the `new` instead.
+int main() {
+    var a = new int[0];
+    var b = new string[-3];
+    return 0;
+}

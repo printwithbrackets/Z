@@ -374,6 +374,7 @@ int main(int argc, char **argv) {
         "closure_slot_collision",
         "inline_early_return",
         "licm_cond_arms",
+        "str_buf_ownership",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -513,6 +514,7 @@ int main(int argc, char **argv) {
         "type_mismatch",
         "dup_struct_method",
         "bare_return_nonvoid",
+        "new_zero_array",
         "var_init_type",
         "missing_semi",
         "unknown_func",

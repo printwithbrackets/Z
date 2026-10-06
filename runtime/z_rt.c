@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
+#include <limits.h>
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
@@ -454,6 +455,14 @@ char *z_str_buf_append(char *buf, const char *s) {
      * reason `z_str_free` checks it: a literal must be safe to pass anywhere a
      * buffer is taken. */
     if (h->cap == 0 || h->cap - h->len < lb) {
+        /* Two long additions, both of which wrap before the allocation they
+         * size fails. The arena refuses an overflowing count the same way and for
+         * the same reason: a wrapped size is not a large allocation, it is a
+         * small one, and the copy below would write past it. */
+        if (lb > LONG_MAX - h->len || h->cap > LONG_MAX - h->cap / 2) {
+            fprintf(stderr, "z: allocation size overflow\n");
+            exit(1);
+        }
         long need = h->len + lb;
         long cap = h->cap + h->cap / 2;
         if (cap < need)
@@ -463,6 +472,33 @@ char *z_str_buf_append(char *buf, const char *s) {
         char *out = zstr_alloc_impl(cap);
         memcpy(out, buf, (size_t)h->len);
         ZH(out)->len = h->len;
+        /* The old buffer is *not* released here, and that is worth explaining
+         * because the parser is already half way to expecting it.
+         *
+         * `parse_var_decl` does not set `frees_old` for an assignment from this
+         * call, on the grounds that the call is a transfer of the buffer rather
+         * than a replacement of its contents, and it leaves the releasing to the
+         * call. Nothing released it, so the old buffer leaked: ASan reported 4285
+         * bytes across 12 allocations for a loop that appends one byte two
+         * thousand times.
+         *
+         * Releasing it here fixes that and breaks a program that works today:
+         *
+         *     var b = str_buf_new(0);
+         *     Console.WriteLog(len(str_buf_append(b, "grown")));
+         *
+         * The call hands back a different buffer and `b` still names the old one,
+         * which the scope teardown then releases. Two releases of one pointer.
+         * Before this, `b` stayed valid and merely leaked.
+         *
+         * So the transfer has to be modelled before it can be acted on. The
+         * parser's half says the caller may not keep the old buffer, and nothing
+         * enforces it: `b` is an ordinary local that outlives the call and is
+         * destroyed normally. Either the call stops being a transfer -- the
+         * caller keeps the old buffer and must release it, so the leak stands --
+         * or the compiler has to mark the argument consumed so that neither the
+         * scope teardown nor a use of `b` afterwards can reach it. The first is
+         * today's behaviour. */
         buf = out;
         h = ZH(buf);
     }

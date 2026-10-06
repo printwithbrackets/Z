@@ -4366,6 +4366,19 @@ static Expr *parse_new(Parser *p) {
     }
     if (!is_unk(count->type) && !is_kind(count->type, TK_INT)) {
         diag_error(start, "array length must be 'int' but got %s", type_name(p->ty, count->type));
+    } else if (count->kind == E_INT && count->ival <= 0) {
+        /* Zero elements is a diagnostic rather than a one-element array.
+         *
+         * `new T[0]` used to allocate an array of length zero, and every index
+         * into it was then a bounds failure at run time: `a[0] = 1` printed
+         * "array index 0 out of bounds (length 0)" and aborted. That is a run
+         * time error about a thing the reader could have been told about while
+         * reading the program, and the reader cannot act on it there.
+         *
+         * A negative count is the same mistake with the sign wrong, and it
+         * reaches the allocator as a size_t, so it is refused here too rather
+         * than turned into an enormous request. */
+        diag_error(start, "array length must be at least 1 but got %lld", count->ival);
     }
     Expr *e = new_expr(p, E_NEW, start);
     e->lhs = count;

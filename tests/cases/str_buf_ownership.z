@@ -1,0 +1,56 @@
+// The three shapes `str_buf_append` has to handle, and the buffer it replaces.
+//
+// Appending copies out of the buffer it is handed and hands back a different one.
+// The parser already treats that as a transfer rather than a replacement: it does
+// not set `frees_old` for an assignment whose right side is this call. Nothing
+// releases the old buffer, so it leaks -- ASan reported 4285 bytes across 12
+// allocations for a loop that appends one byte two thousand times, twelve rather
+// than two thousand because the buffer grows geometrically.
+//
+// The release cannot simply be added on the runtime side. This program works
+// today and stops working if the call frees what it replaced:
+//
+//     var b = str_buf_new(0);
+//     Console.WriteLog(len(str_buf_append(b, "grown")));
+//
+// The call returns a different buffer and `b` still names the old one, which the
+// scope teardown then releases: two releases of one pointer. Modelling the
+// transfer properly means the compiler marking the argument consumed, which is a
+// separate piece of work. So the leak stands and this case exists to pin the
+// behaviour that is correct today, and to notice if either half moves.
+//
+// Every call below stores the result back over the variable it came from, which
+// is what the standard library does and the only shape that is safe. The one that
+// is not -- a call result passed straight to something else -- is in the comment
+// above rather than here, because a golden test cannot observe a double free
+// without dying on it.
+
+int main() {
+    // A runtime-allocated buffer, reallocated on the first append and not on the
+    // ones after it.
+    var b = str_buf_new(8);
+    b = str_buf_append(b, "grown past the start");
+    b = str_buf_append(b, " and again");
+    Console.WriteLog(b);
+
+    // A literal. It has no spare capacity by definition, so every append to it
+    // reallocates, and the runtime must not free the literal it copied out of.
+    var l = str_buf_append("lit", "eral");
+    l = str_buf_append(l, " and more");
+    Console.WriteLog(l);
+
+    // A buffer with room, which takes the in-place path and releases nothing.
+    var roomy = str_buf_new(64);
+    roomy = str_buf_append(roomy, "small");
+    Console.WriteLog(roomy);
+    Console.WriteLog(len(roomy));
+
+    // And through the builder, which is what the standard library actually calls.
+    var sb = new StringBuilder();
+    sb.append("a");
+    sb.appendInt(42);
+    sb.append("b");
+    Console.WriteLog(sb.toString());
+
+    return 0;
+}
