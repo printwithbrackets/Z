@@ -516,6 +516,7 @@ int main(int argc, char **argv) {
     /* Diagnostic cases. */
     static const char *errs[] = {
         "undefined_var",
+        "return_owned_local",
         "type_mismatch",
         "dup_struct_method",
         "bare_return_nonvoid",

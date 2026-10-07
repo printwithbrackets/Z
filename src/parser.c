@@ -5906,6 +5906,42 @@ static void list_append(Parser *p, Stmt ***items_io, int *n_io, Stmt *d) {
     *n_io = m;
 }
 
+/* `return x;` of a local that owns a destructor is a use-after-free waiting to
+ * happen. The scope's destructor runs on the way out, so the caller receives a
+ * value that was already torn down, and then the caller's own scope tears it
+ * down a second time. `return move x;` is how the value is handed on, and it is
+ * the only form that is sound, so the plain form is rejected here with a note
+ * saying what to write instead.
+ *
+ * Strings are exempt: a return copies a borrowed string, so the caller never
+ * sees the local's bytes. Only the name is resolved, and only up to the
+ * function's own body, the same rule `resolve_var` applies to reads. */
+static void check_return_of_owned_local(Parser *p, Stmt *s) {
+    (void)p;
+    Expr *e = s->expr;
+    if (e == NULL || e->kind != E_VAR || e->name == NULL)
+        return;
+    Var *found = NULL;
+    for (Scope *sc = s->ret_scope; sc != NULL && found == NULL; sc = sc->parent) {
+        for (Var *v = sc->vars; v != NULL; v = v->next) {
+            if (strcmp(v->name, e->name) == 0) {
+                found = v;
+                break;
+            }
+        }
+        if (sc->is_fn_body)
+            break;
+    }
+    if (found == NULL || found->is_param || is_kind(found->type, TK_STRING))
+        return;
+    if (!type_needs_drop(found->type))
+        return;
+    diag_note_at(found->decl_span, "'%s' is declared here; write 'return move %s;' to hand it to the caller", found->name, found->name);
+    diag_error_code(s->span, "return_owned_local",
+                    "cannot return '%s' directly: its destructor would run before the caller gets it",
+                    found->name);
+}
+
 /* Expands every block scope and every return in a statement list. Inner first,
  * so a nested block's values are destroyed before the enclosing block's.
  *
@@ -5934,6 +5970,7 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
             continue;
         }
         if (s->kind == S_RETURN) {
+            check_return_of_owned_local(p, s);
             Stmt *d = build_drops_chain(p, s->ret_scope, s->span);
             if (d != NULL) {
                 /* Handed to the return rather than spliced in ahead of it. A
