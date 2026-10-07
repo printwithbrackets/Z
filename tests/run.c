@@ -519,6 +519,7 @@ int main(int argc, char **argv) {
         "dup_struct_method",
         "bare_return_nonvoid",
         "new_zero_array",
+        "str_buf_use_after_move",
         "var_init_type",
         "missing_semi",
         "unknown_func",

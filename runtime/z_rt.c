@@ -472,33 +472,18 @@ char *z_str_buf_append(char *buf, const char *s) {
         char *out = zstr_alloc_impl(cap);
         memcpy(out, buf, (size_t)h->len);
         ZH(out)->len = h->len;
-        /* The old buffer is *not* released here, and that is worth explaining
-         * because the parser is already half way to expecting it.
+        /* The old buffer is released here, because the call takes it.
          *
-         * `parse_var_decl` does not set `frees_old` for an assignment from this
-         * call, on the grounds that the call is a transfer of the buffer rather
-         * than a replacement of its contents, and it leaves the releasing to the
-         * call. Nothing released it, so the old buffer leaked: ASan reported 4285
-         * bytes across 12 allocations for a loop that appends one byte two
-         * thousand times.
+         * This is the only place the two buffers can both be known, and it is the
+         * only place that knows whether there are two. The call returns `buf`
+         * itself when there was room and a fresh allocation when there was not, so
+         * the compiler cannot decide at compile time who owns what: assuming the
+         * caller keeps the old buffer double-frees on the common in-place append,
+         * and assuming the caller drops it leaks whenever the append reallocated.
          *
-         * Releasing it here fixes that and breaks a program that works today:
-         *
-         *     var b = str_buf_new(0);
-         *     Console.WriteLog(len(str_buf_append(b, "grown")));
-         *
-         * The call hands back a different buffer and `b` still names the old one,
-         * which the scope teardown then releases. Two releases of one pointer.
-         * Before this, `b` stayed valid and merely leaked.
-         *
-         * So the transfer has to be modelled before it can be acted on. The
-         * parser's half says the caller may not keep the old buffer, and nothing
-         * enforces it: `b` is an ordinary local that outlives the call and is
-         * destroyed normally. Either the call stops being a transfer -- the
-         * caller keeps the old buffer and must release it, so the leak stands --
-         * or the compiler has to mark the argument consumed so that neither the
-         * scope teardown nor a use of `b` afterwards can reach it. The first is
-         * today's behaviour. */
+         * `z_str_free` skips a literal, so the case above where the buffer arrived
+         * as one needs no separate branch. */
+        z_str_free(buf);
         buf = out;
         h = ZH(buf);
     }

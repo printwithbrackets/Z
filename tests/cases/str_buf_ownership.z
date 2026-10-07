@@ -1,56 +1,66 @@
-// The three shapes `str_buf_append` has to handle, and the buffer it replaces.
+// `str_buf_append` takes the buffer it is handed.
 //
-// Appending copies out of the buffer it is handed and hands back a different one.
-// The parser already treats that as a transfer rather than a replacement: it does
-// not set `frees_old` for an assignment whose right side is this call. Nothing
-// releases the old buffer, so it leaks -- ASan reported 4285 bytes across 12
-// allocations for a loop that appends one byte two thousand times, twelve rather
-// than two thousand because the buffer grows geometrically.
+// The call returns either the same buffer, when there was room, or a fresh one,
+// when there was not. Only the runtime knows which, and the two cases have to be
+// owned the same way, so the contract is that the call consumes its first
+// argument: the old buffer is released inside the call, and the argument is dead
+// afterwards.
 //
-// The release cannot simply be added on the runtime side. This program works
-// today and stops working if the call frees what it replaced:
+// Neither of the two alternatives works, which is why it is the contract and not
+// a choice. If the caller kept the old buffer, then `buf = str_buf_append(buf,
+// s)` would release the destination's own value whenever the append grew in
+// place, which is the common case. If the caller dropped it, nothing released it
+// and the old buffer leaked on every append that reallocated.
 //
-//     var b = str_buf_new(0);
-//     Console.WriteLog(len(str_buf_append(b, "grown")));
+// So the argument is marked moved at the call. That gives the scope teardown
+// something to skip and turns a later read into a diagnostic rather than a use of
+// released bytes. The flag is cleared by the assignment that receives the result,
+// which is what lets the builder below append in a loop.
 //
-// The call returns a different buffer and `b` still names the old one, which the
-// scope teardown then releases: two releases of one pointer. Modelling the
-// transfer properly means the compiler marking the argument consumed, which is a
-// separate piece of work. So the leak stands and this case exists to pin the
-// behaviour that is correct today, and to notice if either half moves.
-//
-// Every call below stores the result back over the variable it came from, which
-// is what the standard library does and the only shape that is safe. The one that
-// is not -- a call result passed straight to something else -- is in the comment
-// above rather than here, because a golden test cannot observe a double free
-// without dying on it.
+// This case checks the shapes. It cannot check that nothing leaks, because a
+// golden test only sees output. The leak was 4285 bytes across 12 allocations for
+// a loop appending one byte two thousand times, and `-fsanitize=address` is
+// clean on the first loop below now. What is left is a closure cell, which has no
+// owner at all by design, and the `StringBuilder` object, which has no destructor
+// for its buffer. Both are known and both are written down where they belong.
 
 int main() {
-    // A runtime-allocated buffer, reallocated on the first append and not on the
-    // ones after it.
+    // The ordinary idiom, repeated. Each call consumes `b` and the assignment
+    // gives it a value again.
     var b = str_buf_new(8);
-    b = str_buf_append(b, "grown past the start");
-    b = str_buf_append(b, " and again");
+    b = str_buf_append(b, "one ");
+    b = str_buf_append(b, "two ");
+    b = str_buf_append(b, "three");
     Console.WriteLog(b);
 
-    // A literal. It has no spare capacity by definition, so every append to it
-    // reallocates, and the runtime must not free the literal it copied out of.
-    var l = str_buf_append("lit", "eral");
-    l = str_buf_append(l, " and more");
-    Console.WriteLog(l);
-
-    // A buffer with room, which takes the in-place path and releases nothing.
+    // A buffer with room, so the append returns the same pointer. The teardown
+    // still releases it once, because the argument is consumed either way.
     var roomy = str_buf_new(64);
     roomy = str_buf_append(roomy, "small");
     Console.WriteLog(roomy);
     Console.WriteLog(len(roomy));
 
-    // And through the builder, which is what the standard library actually calls.
+    // The result used as an argument rather than stored. Nothing names the new
+    // buffer afterwards, so it is released with the statement.
+    var c = str_buf_new(0);
+    Console.WriteLog(len(str_buf_append(c, "grown")));
+
+    // A literal argument, which has nothing to release.
+    var l = str_buf_append("lit", "eral");
+    l = str_buf_append(l, " and more");
+    Console.WriteLog(l);
+
+    // And the builder, which is what the standard library actually calls.
     var sb = new StringBuilder();
     sb.append("a");
     sb.appendInt(42);
     sb.append("b");
     Console.WriteLog(sb.toString());
+    Console.WriteLog(sb.length());
+    sb.clear();
+    Console.WriteLog(sb.isEmpty());
+    var taken = sb.take();
+    Console.WriteLog(len(taken));
 
     return 0;
 }

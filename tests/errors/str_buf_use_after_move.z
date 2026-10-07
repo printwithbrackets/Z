@@ -1,0 +1,23 @@
+// Reading a buffer after handing it to `str_buf_append`.
+//
+// The call takes the buffer and releases the old one when it reallocates, so the
+// argument is dead the moment the call returns. A later read is a read of bytes
+// that have been freed, and it used to be exactly that: the call released nothing,
+// so the read happened to work and the buffer leaked instead.
+//
+// The diagnostic names the call rather than the buffer, because the call is where
+// the buffer was given up, and it offers both ways forward. Assigning into the
+// variable is the usual one, and it works: the flag the call sets is cleared by
+// the assignment that receives the result, so a second append to the same buffer
+// is not an error.
+//
+// `use_after_move` is the same diagnostic `move` produces, and it is the same
+// check, which is why the note says what it says.
+int main() {
+    var b = str_buf_new(8);
+    var n = str_buf_append(b, "one");
+    Console.WriteLog(n);
+    // The buffer belongs to `n` now. Reading `b` here is a use of freed bytes.
+    Console.WriteLog(len(b));
+    return 0;
+}

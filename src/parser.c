@@ -3552,6 +3552,31 @@ static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
              * would let a string through as a wait. It takes a number and nothing
              * else, and the gap is closed here, where the caller's own text is
              * still in hand to point at. */
+            /* `str_buf_append` consumes its first argument.
+             *
+             * The call takes the buffer and hands back either the same buffer or a
+             * new one, and only the runtime knows which. Marking the argument as
+             * moved is what makes one rule work for both: the scope teardown skips
+             * a moved variable, and reading one afterwards is a diagnostic rather
+             * than a use of bytes the call has already released.
+             *
+             * Only a bare variable is marked. A field is not: `StringBuilder.append`
+             * passes `buf`, and the assignment that receives the result overwrites
+             * the field in the same statement, so there is nothing to skip and
+             * nothing later that could read the released buffer. Marking it would
+             * make the second append an error.
+             *
+             * The assignment path clears the flag again, so `buf = str_buf_append(
+             * buf, s)` can be repeated -- which is how the builder is written, and
+             * how `temporaries.z` exercises it. */
+            if ((strcmp(name, "str_buf_append") == 0 || strcmp(name, sym) == 0) && n == 2 &&
+                args[0]->kind == E_VAR && args[0]->name != NULL) {
+                Var *taken = lookup_var(p, args[0]->name);
+                if (taken != NULL) {
+                    taken->is_moved = 1;
+                    taken->move_span = args[0]->span;
+                }
+            }
             if (strcmp(name, "hold") == 0 && n == 1 && !is_unk(args[0]->type) &&
                 !is_kind(args[0]->type, TK_INT) && !is_kind(args[0]->type, TK_F64))
                 diag_error(args[0]->span,
@@ -5177,6 +5202,24 @@ static Expr *parse_expr(Parser *p) {
         e->compound = compound;
         e->lhs = lhs;
         e->rhs = rhs;
+        /* Assigning a variable gives it a value again, so a `move` or a
+         * `str_buf_append` that emptied it no longer applies to it.
+         *
+         * The flag was write-once, which made a moved variable unusable for the
+         * rest of its scope: `buf = str_buf_append(buf, s)` empties `buf` at the
+         * call, and without this the second append was "'buf' has been moved
+         * from". `StringBuilder.take()` has always written `buf = str_buf_new(0)`
+         * after moving out of it and only worked because a field was never
+         * flagged.
+         *
+         * Only the plain form clears it. A compound assignment reads the
+         * destination before it writes it, so `buf += s` on a moved `buf` is
+         * still a use of a moved value. */
+        if (!compound && lhs->kind == E_VAR && lhs->name != NULL) {
+            Var *dst = lookup_var(p, lhs->name);
+            if (dst != NULL)
+                dst->is_moved = 0;
+        }
         /* Storing into a string slot copies borrowed bytes. Covers every
          * assignment target there is, because a local, a field and an element
          * store are all one E_ASSIGN whose left side carries the type. A
