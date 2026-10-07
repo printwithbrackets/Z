@@ -461,7 +461,7 @@ int main(int argc, char **argv) {
      * the status was never read. Keeping it here rather than deleting it is what
      * stops that fix from being undone silently, because a harness that folded a
      * signal back into a success would fail this case and nothing else. */
-    static const char *exits[] = {"mainret", "stack_overflow"};
+    static const char *exits[] = {"mainret", "stack_overflow", "null_deref"};
     const char *ex_dir = "tests/exits";
     char exit_out[256];
     for (size_t i = 0; i < sizeof exits / sizeof *exits; i++) {

@@ -356,6 +356,14 @@ void z_bounds_fail(long idx, long len) { bounds_fail("array", idx, len); }
 
 void z_str_bounds_fail(long idx, long len) { bounds_fail("string", idx, len); }
 
+/* Called by generated code when a pointer is dereferenced while null. */
+void z_null_deref_fail(void) {
+    fflush(stdout);
+    fprintf(stderr, "runtime error: null pointer dereference\n");
+    fflush(stderr);
+    abort();
+}
+
 /* Heap array with an 8-byte length header; the returned pointer points at the
  * first element and the element count lives at ptr[-8].
  *

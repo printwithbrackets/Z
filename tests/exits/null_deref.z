@@ -1,0 +1,11 @@
+// Dereferencing a null pointer is caught before the load or store, so it prints
+// a runtime error and aborts rather than dying on a bare SIGSEGV. The line
+// printed before the fault must still appear, which checks the abort comes after
+// the program's own output and not before it.
+int main() {
+    Console.WriteLog(1);
+    int* p = null;
+    Console.WriteLog(*p);
+    Console.WriteLog(2);
+    return 0;
+}
