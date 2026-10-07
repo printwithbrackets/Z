@@ -33,11 +33,19 @@ inside a loop is bounded rather than one leak per iteration.
 
 **Everything else still leaks, and that is stated rather than hidden.** A class
 object from `new C()`, a heap array from `new T[n]`, a closure cell, and anything
-reachable only through one of those, are all still live at exit. Nothing
-double-frees and nothing is freed while still reachable: the whole 172-test suite
-runs clean under AddressSanitizer with no use-after-free, no double free and no
-overflow. Leaks are the safe direction to be wrong in, which is why the frees are
-wired up per type rather than all at once.
+reachable only through one of those, are all still live at exit. Leaks are the
+safe direction to be wrong in, which is why the frees are wired up per type
+rather than all at once.
+
+Leaks are also the only thing the suite is clean of. All 102 golden cases, which
+are the ones that produce a program to run, build and run under
+AddressSanitizer with no use-after-free, no double free and no buffer overflow.
+The rest of the 224 tests are diagnostics and gates, which produce no program, so
+"the suite is clean under ASan" is a statement about those 102 and not about the
+other 122. And it is a statement about the suite rather than about the language:
+a program outside it can release a captured string's cell instead of its string,
+or hand an already-released field to a destructor. Both are known, and each is
+written down next to the code that causes it.
 
 **Destructors are half-built, and one half is a live footgun.** A `~Type()`
 method runs when a value's scope ends, in reverse declaration order. It works on

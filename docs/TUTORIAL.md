@@ -1572,9 +1572,10 @@ deliberately.
   section 15.
 - **A `string` is a sequence of bytes, and that is all it is.** `s.length`,
   `s[i]` and `s[a..b]` all count and slice bytes. Z has no character type, so
-  one `é` is two ints and a `\uXXXX` escape is two to four of them. Nothing
-  validates UTF-8, and nothing needs to: the type makes no claim that the bytes
-  are text.
+  one `é` is two ints and a `\uXXXX` escape is one to three of them: one below
+  U+0080, two below U+0800, and three above that, which covers every code point
+  the lexer accepts, since it refuses anything past U+10FFFF. Nothing validates
+  UTF-8, and nothing needs to: the type makes no claim that the bytes are text.
 - **`+` on a string always copies.** It has to, because a `string` is a value and
   two names bound to one string must not see each other's appends. Use
   `StringBuilder` to build a string in a loop.
