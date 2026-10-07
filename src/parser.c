@@ -2958,21 +2958,48 @@ static void add_pending(Parser *p, Stmt *fn) {
     L->items[L->count++] = fn;
 }
 
-/* Builds a mangled instance name like `max__int` or `foo__int_bool`. */
+/* Builds a mangled instance name like `max__int` or `foo__int_bool`.
+ *
+ * Every non-alphanumeric character in a rendered type name becomes `_`, which is
+ * what makes the result a legal assembler symbol. That mapping is lossy on its
+ * own: `A<B,C>` and `A_B_C` render the same and so would mangle the same, and no
+ * sizing can fix it. It is left as it is because the names Z can render for a
+ * type parameter do not collide that way in practice -- `int[]` and `int**` do,
+ * but Z has no way to spell an `int**` as a type argument.
+ *
+ * The buffer used to be sized by `strlen(name) + 8 * n + 8`, a guess, and the
+ * loop filling it stopped at `off + 2 < cap` without reporting that it had. So a
+ * type name got about twelve bytes, and two types agreeing on their first twelve
+ * characters became one symbol:
+ *
+ *     f<ConfigurationSet>  ->  f__Configuratio
+ *     f<ConfigurationMap>  ->  f__Configuratio
+ *
+ * The parser then found the first instance's cached signature, could not unify
+ * the second argument against it, and rejected a correct program -- quoting a
+ * mangled name the reader never wrote.
+ *
+ * So the size is computed from the rendered names rather than guessed, which
+ * leaves no room to truncate and nothing to guard. */
 static char *mangle_instance(Parser *p, const char *name, Type **types, int n) {
-    size_t cap = strlen(name) + 8 * (size_t)n + 8;
+    const char **rendered = arena_alloc_array(p->arena, (size_t)(n > 0 ? n : 1), sizeof(char *));
+    size_t cap = strlen(name) + 2 + 1; /* "name__" and the terminator */
+    for (int i = 0; i < n; i++) {
+        rendered[i] = type_name(p->ty, types[i]);
+        /* The name itself, plus a separator between this type and the next. */
+        cap += strlen(rendered[i]) + 1;
+    }
     char *buf = arena_alloc(p->arena, cap);
     size_t off = (size_t)snprintf(buf, cap, "%s__", name);
     for (int i = 0; i < n; i++) {
-        const char *tn = type_name(p->ty, types[i]);
-        for (const char *c = tn; *c && off + 2 < cap; c++) {
+        for (const char *c = rendered[i]; *c; c++) {
             char ch = *c;
             buf[off++] =
                 ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))
                     ? ch
                     : '_';
         }
-        if (i + 1 < n && off + 1 < cap)
+        if (i + 1 < n)
             buf[off++] = '_';
     }
     buf[off] = '\0';

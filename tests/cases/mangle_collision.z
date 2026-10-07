@@ -1,0 +1,53 @@
+// Two instantiations of one template must not share a symbol.
+//
+// `mangle_instance` builds the name an instance is emitted and registered under,
+// from the template name and the rendered type of each argument. It sized the
+// buffer with `strlen(name) + 8 * n + 8` -- a guess -- and the loop that filled it
+// stopped at `off + 2 < cap` without saying so. So a type name got about twelve
+// bytes, and two types agreeing on their first twelve characters became one
+// symbol.
+//
+//     f<ConfigurationSet>  ->  f__Configuratio
+//     f<ConfigurationMap>  ->  f__Configuratio
+//
+// The parser then found the cached signature for the first one, could not unify
+// the second argument against it, and rejected a program that is correct. The
+// truncated name is quoted back in the diagnostic, so the message names something
+// the reader never wrote.
+//
+// The mangling maps every non-alphanumeric character to `_`, which is what makes
+// it a legal assembler symbol. `A<B,C>` and `A_B_C` are therefore the same name,
+// and no amount of sizing fixes that; it is a property of the alphabet. The names
+// below are chosen to share far more than a punctuation mark, so they isolate the
+// sizing.
+
+struct ConfigurationSet { int v; }
+struct ConfigurationMap { int w; }
+struct ConfigurableThing { int z; }
+
+T f<T>(T x) { return x; }
+
+// Several parameters, so the type names are not the only thing in the symbol.
+// `discard` exists so that `b` is a use: the point of this template is what its
+// name looks like, not what it returns.
+// `_` is a binding that is deliberately not read, so it is not an unused
+// parameter. The point of this template is what its name looks like.
+U g<U, V>(U a, V _) { return a; }
+
+int main() {
+    var a = new ConfigurationSet(11);
+    var b = new ConfigurationMap(22);
+    var c = new ConfigurableThing(33);
+
+    // f with three type arguments that all truncate to the same prefix.
+    Console.WriteLog(f(a).v);
+    Console.WriteLog(f(b).w);
+    Console.WriteLog(f(c).z);
+
+    // A type argument that is not a struct, so the rendered name is a builtin and
+    // the separator is exercised.
+    Console.WriteLog(f(7));
+    Console.WriteLog(f(2.5));
+
+    return 0;
+}

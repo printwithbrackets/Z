@@ -378,6 +378,7 @@ int main(int argc, char **argv) {
         "capture_read_fastpaths",
         "capture_param_spill",
         "capture_drop_box",
+        "mangle_collision",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
