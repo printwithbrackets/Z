@@ -1,0 +1,105 @@
+// A captured variable's frame slot holds a pointer to a heap cell, not the value.
+//
+// `gen_expr` knows that and dereferences when it sees a variable marked boxed.
+// Several places bypass `gen_expr` to save an instruction -- reading the slot's
+// register directly, or resolving a leaf operand -- and each of those has to
+// check `boxed` itself. The ones that did not read the box pointer as though it
+// were the value.
+//
+// Three sites:
+//
+// `mark_boxed_stmt` walked an `if` or `while` body and its else-arm but not its
+// condition, so a variable read by a condition was never marked at all and even
+// `gen_expr` read the pointer. `while (d < 4)` compares a heap address against
+// 4, which is false, so the loop runs once.
+//
+// `leaf_live_reg` and `gen_leaf_to_reg` answer "which register does this operand
+// live in" and returned the box pointer's register. `a + a` with a captured `a`
+// adds the pointer to itself.
+//
+// `gen_void_expr`'s compound form checked `agg_param` and `is_aggregate` and not
+// `boxed`, and so did the arithmetic it performs in place.
+//
+// `a * 3`, `-a` and `a > 1 ? .. : ..` are all correct here on purpose: they pick
+// their operands differently, and they are what makes this a set of three
+// separate sites rather than one.
+//
+// Every captured variable below is written after it is captured, so none of it is
+// constant-folded away first. That matters more than it sounds: with the
+// variable never written, `var c = 1; if (c > 3)` emits `mov rax, 1` and is
+// right by accident, which is the version of this bug that hides.
+
+int main() {
+    // ---- a condition ----
+    var d = 0;
+    var fd = () => d;
+    while (d < 4) {
+        d = d + 1;
+    }
+    Console.WriteLog(fd()); // 4
+
+    // A condition in an `if` rather than a `while`, and a comparison whose
+    // answer differs from the pointer's.
+    var e = 1;
+    var fe = () => e;
+    if (e > 3) {
+        Console.WriteLog("big");
+    } else {
+        Console.WriteLog("small"); // small
+    }
+    Console.WriteLog(fe()); // 1, and read after a write so it cannot be folded
+
+    // ---- a leaf operand ----
+    var a = 5;
+    var fa = () => a;
+    Console.WriteLog(fa() + a); // 10
+    Console.WriteLog(a * 3); // 15
+    var b = 4;
+    var fb = () => b;
+    Console.WriteLog(b + b); // 8
+    Console.WriteLog(fb()); // 4
+    Console.WriteLog(-a); // -5
+    Console.WriteLog(a > 1 ? 100 : 200); // 100
+
+    // ---- a condition or a step inside a lambda ----
+    //
+    // The same traversal walks a lambda body to rewrite each captured reference
+    // into `*env[k]`, and it skipped every loop condition and every loop step. A
+    // `for (; i < n; i = i + 1)` over a captured `i` read and then updated the
+    // lambda's own frame slot, which the hoisted frame does not have: the
+    // condition never saw the step, so the loop did not terminate.
+    var i = 2;
+    var countUp = (int n) => {
+        var s = 0;
+        for (; i < n; i = i + 1) {
+            s = s + 1;
+        }
+        return s;
+    };
+    Console.WriteLog(countUp(5)); // 3
+    i = 7;
+    Console.WriteLog(countUp(9)); // 2
+
+    var j = 4;
+    var countUp2 = (int n) => {
+        var s = 0;
+        while (j < n) {
+            j = j + 1;
+            s = s + 1;
+        }
+        return s;
+    };
+    Console.WriteLog(countUp2(10)); // 6
+
+    var k = 1;
+    var countUp3 = (int n) => {
+        var s = 0;
+        if (k < n) {
+            s = 100;
+        }
+        return s;
+    };
+    Console.WriteLog(countUp3(9)); // 100
+
+    return 0;
+}

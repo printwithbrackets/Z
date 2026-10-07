@@ -398,10 +398,21 @@ static void mark_boxed_stmt(Parser *p, Stmt *s) {
         return;
     case S_FOR:
         mark_boxed_stmt(p, s->for_init);
+        /* The condition and the step, for the same reason as the `if` and `while`
+         * cases below: both are the loop's own expressions and both read and write
+         * captured variables. The step was skipped outright. */
+        mark_boxed_expr(p, s->cond);
+        mark_boxed_expr(p, s->for_step);
         mark_boxed_stmt(p, s->body);
         return;
     case S_IF:
     case S_WHILE:
+        /* The condition first. It reads the captured variables it names, so it
+         * needs the marking as much as the body does -- and nothing marked it,
+         * because this case walked the body and the else-arm and skipped the one
+         * thing in between. A `while (d < 4)` over a captured `d` compared the
+         * box pointer against 4, which is false, so the loop ran once. */
+        mark_boxed_expr(p, s->cond);
         mark_boxed_stmt(p, s->body);
         mark_boxed_stmt(p, s->orelse);
         return;
@@ -6272,10 +6283,22 @@ static void rewrite_captures_stmt(Parser *p, Stmt *s, Var **caps, int ncaps, Typ
         return;
     case S_FOR:
         rewrite_captures_stmt(p, s->for_init, caps, ncaps, env_ty, env_slot);
+        /* The condition reads captured variables as much as the body does, and
+         * this skipped it. A `for (; i < n; ...)` inside a lambda then read the
+         * lambda's own frame slot for `i` rather than `*env[k]`, and that slot is
+         * whatever the hoisted frame happened to hold -- so `for (; i < n; k = k
+         * + 1)` with `i` unrewritten did not terminate. */
+        rewrite_captures_expr(p, s->cond, caps, ncaps, env_ty, env_slot);
+        /* The step too, and this one is worse than a wrong answer. A `for` whose
+         * step assigns a captured variable updated the lambda's own frame slot
+         * rather than the cell, so the condition never saw the change and the
+         * loop did not terminate. */
+        rewrite_captures_expr(p, s->for_step, caps, ncaps, env_ty, env_slot);
         rewrite_captures_stmt(p, s->body, caps, ncaps, env_ty, env_slot);
         return;
     case S_IF:
     case S_WHILE:
+        rewrite_captures_expr(p, s->cond, caps, ncaps, env_ty, env_slot);
         rewrite_captures_stmt(p, s->body, caps, ncaps, env_ty, env_slot);
         rewrite_captures_stmt(p, s->orelse, caps, ncaps, env_ty, env_slot);
         return;

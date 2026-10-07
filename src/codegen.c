@@ -1323,7 +1323,12 @@ static int is_leaf_expr(Expr *e) {
  * or something that was spilled. Lets an operator name the operand instead of
  * copying it into a scratch register first. */
 static const char *leaf_live_reg(CG *cg, Expr *e) {
-    if (e == NULL || e->kind != E_VAR || e->agg_param || is_aggregate(e->type))
+    /* `boxed` is not an optional check here. A captured variable's slot holds a
+     * pointer to a heap cell, and the register that slot was allocated holds that
+     * same pointer, so naming it as "the register the operand lives in" hands the
+     * caller a box pointer where a value is expected. `a + a` over a captured `a`
+     * added the pointer to itself. */
+    if (e == NULL || e->kind != E_VAR || e->agg_param || e->boxed || is_aggregate(e->type))
         return NULL;
     LocalInfo *li = li_lookup(cg, e->slot);
     if (li != NULL && li->is_const)
@@ -1334,6 +1339,17 @@ static const char *leaf_live_reg(CG *cg, Expr *e) {
 static void gen_leaf_to_reg(CG *cg, Expr *e, const char *reg) {
     if (e->kind == E_INT || e->kind == E_BOOL) {
         buf_printf(cg->out, "  mov %s, %lld\n", reg, e->ival);
+        return;
+    }
+    /* A captured variable has to be loaded through its box, exactly as the E_VAR
+     * arm of gen_expr does it. Reaching here with a boxed slot meant loading the
+     * pointer instead, which is the same defect leaf_live_reg has to refuse. */
+    if (e->boxed) {
+        buf_printf(cg->out, "  mov r11, QWORD PTR [rbp - %d]\n", e->slot);
+        if (is_kind(e->type, TK_F64))
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", reg);
+        else
+            buf_printf(cg->out, "  mov %s, QWORD PTR [r11]\n", reg);
         return;
     }
     LocalInfo *li = li_lookup(cg, e->slot);
@@ -3355,8 +3371,12 @@ static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
  * `x = x <op> v` accumulation this updates the register in place without
  * materializing the result in rax. */
 static void gen_void_expr(CG *cg, Expr *e) {
+    /* The in-place forms below read and write the register the destination slot
+     * was allocated, so a captured destination is not one of them: its slot holds
+     * a box pointer, and `b += 10` added 10 to the address of the cell rather than
+     * to the value inside it. Those go to gen_expr, which dereferences. */
     if (e != NULL && e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR &&
-        !is_aggregate(e->type) && !e->lhs->agg_param) {
+        !is_aggregate(e->type) && !e->lhs->agg_param && !e->lhs->boxed) {
         const char *lreg = local_reg(cg, e->lhs->slot);
         if (lreg != NULL) {
             if (e->compound) {
