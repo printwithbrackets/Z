@@ -1,0 +1,20 @@
+// `pop` and `removeAt` hand an element to the caller with `return move`. Each
+// returned object's destructor must run exactly once, when the caller's own
+// variable goes out of scope, and not once inside the vector and again on the
+// way out of pop.
+class R {
+    int v;
+    R(int a) { v = a; }
+    ~R() { Console.WriteLog("drop " + v); }
+}
+int main() {
+    var xs = new Vec<R*>();
+    xs.push_back(new R(1));
+    xs.push_back(new R(2));
+    xs.push_back(new R(3));
+    var r = xs.pop();
+    Console.WriteLog("got " + r.v);
+    var q = xs.removeAt(0);
+    Console.WriteLog("got " + q.v);
+    return 0;
+}

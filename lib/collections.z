@@ -166,7 +166,9 @@ class Vec<T> {
          * slot as it releases it. The copy is what the caller owns. */
         var out = data[len];
         drop_value(data[len]);
-        return out;
+        /* `move` hands the copy to the caller. A plain `return out;` would let
+         * this scope destroy it on the way out, before the caller got it. */
+        return move out;
     }
 
     /* The C++ name for `pop`. See `push_back`: an alias, not a second body. */
@@ -191,7 +193,7 @@ class Vec<T> {
         for (var k = i; k + 1 < len; k++) { data[k] = data[k + 1]; }
         drop_value(data[len - 1]);
         len--;
-        return out;
+        return move out;
     }
 
     void insertAt(int i, T v) {

@@ -347,6 +347,7 @@ int main(int argc, char **argv) {
         "local_types",
         "unroll",
         "unroll_dep",
+        "vec_pop_owned",
         "onearg_call",
         "durations",
         "stackargs",
