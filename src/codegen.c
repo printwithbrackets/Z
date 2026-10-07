@@ -491,6 +491,21 @@ static void assign_args(Type **ptypes, int n, int hidden, ArgAssign *out) {
     out->pad = (nstack * 8 + 15) & ~15;
 }
 
+/* Emits a null check on the address in rax before it is loaded through or
+ * stored through. A null pointer otherwise faults at a low address that the
+ * OS maps to nothing, which is a bare SIGSEGV with no message. Turned off by
+ * --no-bounds along with the array checks, so the one flag still means "trust
+ * the program". Preserves rax; clobbers only rdi. */
+static void emit_null_check(CG *cg) {
+    if (!cg->bounds_checks)
+        return;
+    int lok = next_label(cg);
+    buf_printf(cg->out, "  test rax, rax\n  jnz .L%d\n", lok);
+    buf_printf(cg->out, "  call z_null_deref_fail\n");
+    buf_printf(cg->out, ".L%d:\n", lok);
+}
+
+
 static void store_temp(CG *cg, int t) {
     buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", temp_off(cg, t));
 }
@@ -1392,8 +1407,11 @@ static void gen_addr(CG *cg, Expr *e) {
         }
         break;
     case E_DEREF:
-        /* The pointer operand *is* the address. */
+        /* The pointer operand *is* the address, so it is checked for null here
+         * before any load or store goes through it. Both reads and writes reach
+         * this through gen_addr. */
         gen_expr(cg, e->lhs);
+        emit_null_check(cg);
         break;
     case E_INDEX: {
         /* A string element is a byte, so its address is base + index with no
