@@ -101,5 +101,36 @@ int main() {
     };
     Console.WriteLog(countUp3(9)); // 100
 
+    // ---- a compound assignment ----
+    //
+    // gen_void_expr now declines the in-place path for a captured destination, so
+    // this lands in the boxed assignment instead -- which was written as a plain
+    // store and never read the `compound` flag at all. `b += 10` stored 10.
+    var c = 1;
+    var fc = () => c;
+    c += 10;
+    Console.WriteLog(fc()); // 11
+    c *= 3;
+    Console.WriteLog(fc()); // 33
+    c -= 3;
+    Console.WriteLog(fc()); // 30
+    c /= 2;
+    Console.WriteLog(fc()); // 15
+
+    // The same path for a float, where a captured float also needed two more
+    // fixes to be reachable at all. `is_float_value_expr` listed E_DEREF but
+    // gen_float had no case for it, so the compiler recursed until the stack ran
+    // out; and gen_float's E_VAR case read the box pointer as the value, which
+    // printed something like 3.35e-315.
+    var g = 1.5;
+    var fg = () => g;
+    g = g + 2.5;
+    Console.WriteLog(fg()); // 4
+    Console.WriteLog(g); // 4
+    g += 2.5;
+    Console.WriteLog(fg()); // 6.5
+    g *= 2.0;
+    Console.WriteLog(fg()); // 13
+
     return 0;
 }

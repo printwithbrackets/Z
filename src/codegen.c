@@ -662,12 +662,22 @@ static void gen_float(CG *cg, Expr *e) {
         return;
     }
     case E_VAR: {
+        /* A captured variable's slot holds a pointer to a heap cell, and the slot
+         * is eight bytes wide, so loading it as a double loads an address and
+         * prints something like 3.35e-315. A read of a captured float inside its
+         * own lambda is rewritten to `*env[k]` and so arrives as an E_DEREF; this
+         * case is the enclosing function reading the same variable, and it has to
+         * dereference too. */
         if (e->agg_param)
             buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
-        else
+        else if (e->boxed) {
+            buf_printf(cg->out, "  mov r11, QWORD PTR [rbp - %d]\n", e->slot);
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", XMM_ACC);
+        } else
             buf_printf(cg->out, "  movsd %s, QWORD PTR [rbp - %d]\n", XMM_ACC, e->slot);
         return;
     }
+    case E_DEREF:
     case E_FIELD: {
         gen_addr(cg, e);
         buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
@@ -3004,12 +3014,51 @@ static void gen_expr_body(CG *cg, Expr *e) {
             } else {
                 store_temp(cg, tr);
             }
-            load_temp(cg, tb, "r11");
+            load_temp(cg, tb, "r11"); /* r11 = the box pointer */
             if (is_kind(e->type, TK_F64)) {
-                load_temp_x(cg, tr, XMM_ACC);
+                /* A compound assignment reads the value it is adding to, and this
+                 * path did not: it was written as a plain store, the `compound`
+                 * flag was never read here at all, and `f += 2.5` over a captured
+                 * `f` stored 2.5. The other three assignment forms have always done
+                 * this read-modify-write.
+                 *
+                 * The accumulator is `XMM_ACC` in both halves, and the addend goes
+                 * in the scratch beside it. Loading the addend into `XMM_ACC` and
+                 * storing `XMM_ACC` is right for the plain case only, and the two
+                 * branches have to be written so the register that is read is the
+                 * register that is stored. */
+                if (e->compound) {
+                    buf_printf(cg->out, "  movsd %s, QWORD PTR [r11]\n", XMM_ACC);
+                    load_temp_x(cg, tr, XMM_SCRATCH[1]);
+                    static const char *const fops[] = {"addsd", "subsd", "mulsd", "divsd"};
+                    static const TokenKind fkinds[] = {T_PLUS, T_MINUS, T_STAR, T_SLASH};
+                    for (size_t i = 0; i < sizeof fops / sizeof(*fops); i++)
+                        if (e->op == fkinds[i])
+                            buf_printf(cg->out, "  %s %s, %s\n", fops[i], XMM_ACC, XMM_SCRATCH[1]);
+                } else {
+                    load_temp_x(cg, tr, XMM_ACC);
+                }
                 buf_printf(cg->out, "  movsd QWORD PTR [r11], %s\n", XMM_ACC);
             } else {
-                load_temp(cg, tr, "rax");
+                load_temp(cg, tb, "rax"); /* rax = the box pointer */
+                if (e->compound) {
+                    /* Read what is already in the cell and apply the operator to
+                     * it, which is what `emit_binop_op` expects: rax on the left,
+                     * r11 on the right. The plain form skips the dereference
+                     * entirely, and that is the whole difference.
+                     *
+                     * `r11` is loaded with the right operand *inside* this branch
+                     * and not before it. It already holds the box pointer, and
+                     * loading over it left the store below writing the value into
+                     * itself -- which silently turned every plain assignment to a
+                     * captured variable into a no-op. */
+                    load_temp(cg, tr, "r11");
+                    buf_printf(cg->out, "  mov rax, QWORD PTR [rax]\n");
+                    emit_binop_op(cg, e->op);
+                    load_temp(cg, tb, "r11"); /* the box pointer again, to store */
+                } else {
+                    load_temp(cg, tr, "rax");
+                }
                 buf_printf(cg->out, "  mov QWORD PTR [r11], rax\n");
             }
             cg->temp_top = tb;
