@@ -1,0 +1,12 @@
+// A plain `return` of a local whose destructor would run on the way out is
+// rejected: the caller would receive a value that was already torn down.
+class R {
+    int v;
+    R(int a) { v = a; }
+    ~R() { Console.WriteLog("drop"); }
+}
+R* make() {
+    var mine = new R(5);
+    return mine;
+}
+int main() { make(); return 0; }

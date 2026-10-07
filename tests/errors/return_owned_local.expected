@@ -1,0 +1,1 @@
+cannot return 'mine' directly: its destructor would run before the caller gets it
