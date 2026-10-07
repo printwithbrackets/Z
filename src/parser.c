@@ -5661,6 +5661,13 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
             slot->name = arena_strdup(p->arena, v->name);
             slot->slot = v->offset;
             slot->type = v->type;
+            /* A captured variable's slot holds a pointer to a heap cell, so the
+             * reference has to carry `boxed` or codegen reads the slot and hands
+             * `z_str_free` the box. That is not a leak: `z_str_free` subtracts the
+             * header size to read the header, so a heap address given to it is a
+             * read eight bytes before the allocation, which AddressSanitizer calls
+             * a heap-buffer-overflow and the program calls a segfault. */
+            slot->boxed = v->captured;
             Expr **sargs = arena_alloc_array(p->arena, 1, sizeof(Expr *));
             sargs[0] = slot;
             Expr *scall = new_expr(p, E_CALL, v->decl_span);
@@ -5692,6 +5699,25 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
         slot->name = arena_strdup(p->arena, v->name);
         slot->slot = v->offset;
         slot->type = v->type;
+        /* Deliberately *not* marked boxed, unlike the string above.
+         *
+         * For a struct it makes no difference: the receiver is `&slot`, and a
+         * captured struct's cell holds a copy of the bytes, so the box pointer is
+         * already the address the destructor wants.
+         *
+         * For a class it does, and marking it reaches the destructor that had
+         * been silently skipped, which is right -- but it then runs on an object
+         * whose string fields can be aliased out through a closure:
+         *
+         *     var b = new Boxed("one");
+         *     var h = () => b.label;
+         *     Console.WriteLog(h());   // the temporary is released afterwards
+         *                              // and it is b's own field
+         *
+         * `~Boxed` then releases the same allocation a second time. Unmarked, the
+         * destructor is never reached and the object leaks instead, which is the
+         * smaller fault and the one this leaves in place. The aliasing is a
+         * separate defect and fixing it is not a one-line change to this pass. */
         Expr *recv;
         if (sd->is_class) {
             recv = slot;

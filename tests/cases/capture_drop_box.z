@@ -1,0 +1,89 @@
+// The teardown of a captured string has to reach the string, not the box.
+//
+// A captured variable's frame slot holds a pointer to a heap cell. Everything
+// that reads the variable dereferences that pointer, and everything that writes
+// it writes through it. The destructor pass did neither: it built its
+// `z_str_free(v)` call with an ordinary reference to the slot, so the call
+// received the box pointer and released the box.
+//
+// AddressSanitizer said so, and what it said was that the read went eight bytes
+// before a heap allocation:
+//
+//     ERROR: AddressSanitizer: heap-buffer-overflow
+//     READ of size 8 in z_str_free
+//     0x... is located 8 bytes before 8-byte region [...)
+//     allocated by ... z_box
+//
+// `z_str_free` subtracts the header size to read the header, so the pointer it
+// was handed was a heap address rather than a string.
+//
+// This case cannot check that, because a golden test only sees the output and
+// this is a crash. It checks that the programs run and print what they should,
+// which is what a release of the wrong pointer turns into. The leak was confirmed
+// with `-fsanitize=address` on the string cases, which now run clean.
+//
+// The captured string is reassigned before the scope ends, because a drop that
+// releases a box it did not allocate is the same fault whether or not the string
+// behind it was ever replaced.
+
+struct Holder {
+    int v;
+    ~Holder() { v = -1; }
+}
+
+class Boxed {
+    string label;
+    Boxed(string s) { label = s; }
+    ~Boxed() { label = ""; }
+}
+
+int readTheString(string s) { return len(s); }
+
+int main() {
+    // A captured string, released at the end of the scope.
+    {
+        var s = "abc";
+        var f = () => len(s);
+        s = "defgh";
+        Console.WriteLog(f()); // 5
+    }
+    Console.WriteLog("past the string scope"); // reached
+
+    // A captured string passed to a function, so the drop is not the last thing
+    // that touched it.
+    {
+        var t = "hello";
+        var g = () => len(t);
+        Console.WriteLog(g()); // 5
+        Console.WriteLog(readTheString(t)); // 5
+    }
+    Console.WriteLog("past the second string scope"); // reached
+
+    // A captured class is deliberately *not* here. `var h = () => b.label;`
+    // hands out the object's own field, and releasing the temporary after
+    // `Console.WriteLog(h())` frees it, so the destructor frees it again. That
+    // aliasing is a separate defect; marking the class receiver boxed in
+    // `build_drops` is what makes the destructor run at all, and leaving that
+    // unmarked is what keeps this case a leak instead of a use-after-free.
+
+    // A captured struct with a destructor.
+    {
+        var h2 = new Holder(7);
+        var r = () => h2.v;
+        Console.WriteLog(r()); // 7
+    }
+    Console.WriteLog("past the struct scope"); // reached
+
+    // The uncaptured forms, which must keep working.
+    {
+        var u = "plain";
+        Console.WriteLog(len(u)); // 5
+    }
+    {
+        var c = new Boxed("two");
+        Console.WriteLog(c.label); // two
+    }
+    Console.WriteLog("done"); // reached
+
+    return 0;
+}
