@@ -1,0 +1,74 @@
+// A captured parameter must be boxed without losing the parameters after it.
+//
+// The prologue stores incoming parameters into their frame slots, and a captured
+// one is not stored: it is boxed, because a closure may outlive the frame and so
+// the value has to be somewhere on the heap. Boxing is a call.
+//
+// That call is `z_box`, which calls `malloc`, and `malloc` clobbers every
+// caller-saved register -- `rsi` included. The parameters were spilled in
+// parameter order, so a captured parameter in `rdi` boxed first and every later
+// parameter was read out of a register the call had already destroyed:
+//
+//     mov rdi, rdi
+//     call z_box             <- rsi is gone
+//     mov QWORD PTR [rbp - 16], rax   <- the box
+//     mov QWORD PTR [rbp - 24], rsi   <- whatever malloc left behind
+//
+// A function with one parameter is unaffected, which is why `makeAdder` in
+// closures.z passes: its captured parameter is the `rdi` one. The defect needs
+// two parameters and a capture of the first.
+//
+// Every parameter is spilled before any boxing now. The array return buffer and
+// a float do not change that argument, they only change which registers are
+// named: `z_box` clobbers all of them either way.
+//
+// `later` below is deliberately made of several parameters so that more than one
+// of them is at risk, and `twice` is called rather than inlined so that the
+// closure reaches a second frame through a parameter.
+
+int applyTwice(closure(int) -> int f, int v) { return f(f(v)); }
+
+int adder(int n, int x, int bias) {
+    var f = (int y) => y + n + bias;
+    return applyTwice(f, x);
+}
+
+int applyThree(closure(int) -> int f, int v) { return f(f(f(v))); }
+
+int adder3(int n, int x, int bias) {
+    var f = (int y) => y + n + bias;
+    return applyThree(f, x);
+}
+
+int main() {
+    // n and bias are both captured; x is in between and is what the call
+    // destroyed. f is y + 12, so twice(5) is f(17) = 29.
+    Console.WriteLog(adder(5, 5, 7)); // 29
+
+    // The same thing through three nested calls. f is y + 3, so f(0)=3, f(3)=6,
+    // f(6)=9.
+    Console.WriteLog(adder3(1, 0, 2)); // 9
+
+    // A captured parameter that is not the first, so the boxing happens after
+    // another parameter has already been spilled. f is y + 4.
+    Console.WriteLog(captureSecond(9, 4)); // 13
+
+    // And the ordinary shapes, which must keep working: no capture at all, and a
+    // capture with nothing behind it.
+    Console.WriteLog(noCapture(5, 6)); // 11
+    Console.WriteLog(captureOnly(5)); // 25
+
+    return 0;
+}
+
+int captureSecond(int spare, int n) {
+    var f = (int y) => y + n;
+    return f(spare);
+}
+
+int noCapture(int a, int b) { return a + b; }
+
+int captureOnly(int n) {
+    var f = (int y) => y * n;
+    return f(5);
+}

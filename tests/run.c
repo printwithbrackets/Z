@@ -376,6 +376,7 @@ int main(int argc, char **argv) {
         "licm_cond_arms",
         "str_buf_ownership",
         "capture_read_fastpaths",
+        "capture_param_spill",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);

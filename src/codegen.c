@@ -5104,6 +5104,26 @@ static void emit_function(CG *cg, Stmt *fn) {
             ptypes[i] = fn->params[i]->type;
         ArgAssign aa;
         assign_args(ptypes, fn->nparams, 0, &aa);
+        /* Every parameter is spilled first, and only then is any of them boxed.
+         *
+         * Boxing is a call, and the call is `z_box`, which calls `malloc`, and
+         * `malloc` clobbers every caller-saved register including `rsi`. Doing
+         * both in one pass in parameter order meant a captured parameter in `rdi`
+         * was boxed before `rsi` was read, so every parameter after the first
+         * captured one was stored from a register the allocator had already
+         * overwritten:
+         *
+         *     int adder(int n, int x, int bias) {          // n is captured
+         *         var f = (int y) => y + n + bias;
+         *         return applyTwice(f, x);
+         *     }
+         *
+         * `x` and `bias` came out as whatever `malloc` left in their registers.
+         * A function whose only parameter is the captured one is unaffected, which
+         * is why `makeAdder` in closures.z passes: its capture is the `rdi` one.
+         *
+         * The result buffer and a float do not change the argument, they only
+         * change which registers are named. */
         for (int i = 0; i < fn->nparams; i++) {
             if (is_kind(fn->params[i]->type, TK_F64) && aa.reg[i] != NULL) {
                 buf_printf(cg->out, "  movsd QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot,
@@ -5112,16 +5132,30 @@ static void emit_function(CG *cg, Stmt *fn) {
                 buf_printf(cg->out, "  mov r11, QWORD PTR [rbp + %d]\n",
                            16 + 8 * npool_used + aa.soff[i]);
                 buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], r11\n", fn->params[i]->slot);
-            } else if (fn->params[i]->boxed) {
-                /* A captured parameter: the slot must hold the box, not the
-                 * value, or a closure reading the environment would find an
-                 * integer where it expects a pointer. */
-                buf_printf(cg->out, "  mov rdi, %s\n  call z_box\n", aa.reg[i]);
-                buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", fn->params[i]->slot);
             } else {
                 buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], %s\n", fn->params[i]->slot,
                            aa.reg[i]);
             }
+        }
+        for (int i = 0; i < fn->nparams; i++) {
+            /* A captured parameter: the slot must hold the box, not the value, or
+             * a closure reading the environment would find an integer where it
+             * expects a pointer. Reading the spilled slot rather than the incoming
+             * register is also what lets this be a second pass at all.
+             *
+             * The selection matches the one pass this replaced, branch for branch:
+             * a float was stored raw there too, and a parameter that arrived on the
+             * stack rather than in a register was never boxed. Which parameters are
+             * boxed is a separate question from spilling them safely. */
+            if (!fn->params[i]->boxed)
+                continue;
+            if (is_kind(fn->params[i]->type, TK_F64))
+                continue;
+            if (aa.reg[i] == NULL)
+                continue;
+            buf_printf(cg->out, "  mov rdi, QWORD PTR [rbp - %d]\n", fn->params[i]->slot);
+            buf_printf(cg->out, "  call z_box\n");
+            buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", fn->params[i]->slot);
         }
     }
     gen_block_items(cg, fn->fbody);
