@@ -979,6 +979,44 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* `z --version` answers without a file and exits 0.
+     *
+     * It takes no source file, so it is the one invocation that has to be
+     * recognized before the argument count is checked -- otherwise it is a
+     * usage error, which is exactly what it was until the compiler grew a way to
+     * name itself. A build script asking what it has cannot afford that.
+     *
+     * Three things are checked, because each is a way for the flag to exist and
+     * still be useless: the version has to reach stdout rather than stderr (a
+     * script capturing it does not want the diagnostics channel), the exit has
+     * to be 0 (a nonzero exit is a build failure whatever it printed), and it
+     * has to carry a number rather than a placeholder, since a hardcoded "dev"
+     * would satisfy the first two while telling nobody anything.
+     *
+     * Trailing arguments are ignored rather than diagnosed, so a script that
+     * appends its own flags still gets an answer. */
+    {
+        char actual[1 << 16];
+        snprintf(cmd, sizeof cmd, "%s --version 2>/dev/null", zq);
+        int rc = run_cmd_capture(cmd, actual, sizeof actual);
+
+        /* A digit somewhere in what was printed. Deliberately not "0.1": the
+         * point is that a release bumped the constant and the test still says
+         * something true, not that it pins the number. */
+        int has_number = 0;
+        for (const char *p = actual; *p; p++)
+            if (*p >= '0' && *p <= '9')
+                has_number = 1;
+
+        if (rc != 0 || strncmp(actual, "z ", 2) != 0 || !has_number) {
+            fprintf(stderr, "FAIL version (rc=%d)\n--- actual ---\n%s\n", rc, actual);
+            fail++;
+        } else {
+            printf("ok   version (--version prints a version and exits 0)\n");
+            pass++;
+        }
+    }
+
     /* The output path and any extra linker arguments reach the C toolchain as
      * data, never as shell syntax.
      *
