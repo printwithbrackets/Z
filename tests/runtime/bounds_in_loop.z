@@ -1,0 +1,14 @@
+// A bounds check inside a hot loop still fires when the array is held in a
+// register: the loop reads a[0] through a[3] of a length-3 array, so the fourth
+// read is past the end and must abort with the usual message.
+int main() {
+    var a = new int[3];
+    var i = 0;
+    var total = 0;
+    while (i < 4) {
+        total = total + a[i];
+        i = i + 1;
+    }
+    Console.WriteLog(total);
+    return 0;
+}

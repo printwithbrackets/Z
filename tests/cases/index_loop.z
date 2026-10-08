@@ -1,0 +1,15 @@
+// Arrays indexed inside a loop: the array locals and the loop counters compete
+// for registers, so this checks indexing still reads the right elements with
+// the base held in a register. Sum of 0..9 is 45; the string index gives 99, the byte value of 'c'.
+int main() {
+    var a = new int[10];
+    var i = 0;
+    while (i < 10) { a[i] = i; i = i + 1; }
+    var total = 0;
+    var k = 0;
+    while (k < 10) { total = total + a[k]; k = k + 1; }
+    Console.WriteLog(total);
+    var s = "abcdef";
+    Console.WriteLog(s[2]);
+    return 0;
+}

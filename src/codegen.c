@@ -160,6 +160,12 @@ typedef struct {
      * every iteration, not just up to where the condition happens to appear in
      * the emitted order. */
     int loop_marker;
+    /* How hot the local is: each def or use adds 8^depth, where depth is the
+     * number of loops around it. The colourer gives registers to the heaviest
+     * locals first, so a loop counter read a dozen times per iteration beats a
+     * pointer that is only declared once outside the loop. */
+    long long weight;
+    int colored;    /* already considered by alloc_regs */
 } LocalInfo;
 
 /* How deep inlined bodies may nest. Shared with the parser, which enforces the
@@ -204,6 +210,7 @@ typedef struct {
     int nlocals, loc_cap;
     int pool_mask;   /* bitmask of POOL_REGS indices actually used */
     int loop_marker; /* incremented once per loop walked; see LocalInfo.loop_marker */
+    int alloc_loop_depth; /* loops around the statement the allocation walk is on; see LocalInfo.weight */
     /* Frame slots holding fresh string values that nothing has taken over yet.
      * A temporary lives until the end of the statement that made it, which is
      * the smallest scope that is always reached: `Console.WriteLog(a + b)` allocates a
@@ -862,6 +869,8 @@ static LocalInfo *li_for(CG *cg, int slot) {
     li->d = li->u = -1;
     li->assigned = -1;
     li->const_cand = 0;
+    li->weight = 0;
+    li->colored = 0;
     li->const_val = 0;
     li->is_float = 0;
     li->reassigned = 0;
@@ -894,12 +903,20 @@ static void mark_addr_taken(CG *cg, Expr *e, int idx) {
     walk_alloc_expr(cg, e, idx);
 }
 
+/* The weight of one access at the current loop depth: 8 per enclosing loop,
+ * capped so a deeply nested body cannot overflow the sum. */
+static long long loop_weight(CG *cg) {
+    int d = cg->alloc_loop_depth > 6 ? 6 : cg->alloc_loop_depth;
+    return 1LL << (3 * d);
+}
+
 /* Records a use of a local at statement index idx. */
 static void li_use(CG *cg, int slot, int idx) {
     LocalInfo *li = li_for(cg, slot);
     if (li->u < idx)
         li->u = idx;
     li->loop_marker = cg->loop_marker;
+    li->weight += loop_weight(cg);
 }
 
 /* Records a definition of a local at statement index idx. */
@@ -910,6 +927,7 @@ static void li_def(CG *cg, int slot, int idx) {
     if (li->u < idx)
         li->u = idx;
     li->loop_marker = cg->loop_marker;
+    li->weight += loop_weight(cg);
 }
 
 /* Walks an expression to record defs/uses and disqualify address-taken
@@ -929,7 +947,16 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         mark_addr_taken(cg, e->lhs, idx);
         break;
     case E_INDEX:
-        mark_addr_taken(cg, e->lhs, idx); /* base is addressed */
+        /* The index reads its base for the value, which is the pointer to the
+         * elements, so an array or string local does not need an address. Only
+         * an aggregate base, which is represented by its address, does. Marking
+         * every base made any array local ineligible for a register, and the
+         * base of a matmul inner loop was then reloaded from the frame on every
+         * element access. */
+        if (is_aggregate(e->lhs->type))
+            mark_addr_taken(cg, e->lhs, idx);
+        else
+            walk_alloc_expr(cg, e->lhs, idx);
         walk_alloc_expr(cg, e->rhs, idx);
         break;
     case E_POSTINC:
@@ -1096,8 +1123,10 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
     case S_WHILE: {
         int marker = ++cg->loop_marker;
         int loop_start = *idx;
+        cg->alloc_loop_depth++;
         walk_alloc_expr(cg, s->cond, cur);
         walk_alloc_block(cg, s->body, idx);
+        cg->alloc_loop_depth--;
         extend_live_across_loop(cg, marker, loop_start, *idx);
         break;
     }
@@ -1109,9 +1138,11 @@ static void walk_alloc_stmt(CG *cg, Stmt *s, int *idx) {
         int marker = ++cg->loop_marker;
         int loop_start = *idx;
         walk_alloc_stmt(cg, s->for_init, idx);
+        cg->alloc_loop_depth++;
         walk_alloc_expr(cg, s->cond, (*idx)++);
         walk_alloc_block(cg, s->body, idx);
         walk_alloc_expr(cg, s->for_step, (*idx)++);
+        cg->alloc_loop_depth--;
         extend_live_across_loop(cg, marker, loop_start, *idx);
         break;
     }
@@ -1169,12 +1200,24 @@ static void alloc_regs(CG *cg, Stmt *fn) {
     if (!opt_on(cg))
         return;
 
-    /* Greedy colouring in order of first definition, skipping the locals already
-     * settled as constants: they need no storage and no register. */
-    for (int i = 0; i < cg->nlocals; i++) {
-        LocalInfo *li = &cg->locals[i];
-        if (li->is_const)
-            continue;
+    /* Greedy colouring, heaviest local first, skipping the locals already
+     * settled as constants: they need no storage and no register. The overlap
+     * test below is what keeps two locals from sharing a register, and it does
+     * not depend on the order, so only which locals win a register changes. Ties
+     * go to the earlier definition, as they did before weights existed. */
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < cg->nlocals; i++) {
+            LocalInfo *li = &cg->locals[i];
+            if (li->colored || li->is_const)
+                continue;
+            if (best < 0 || li->weight > cg->locals[best].weight)
+                best = i;
+        }
+        if (best < 0)
+            break;
+        LocalInfo *li = &cg->locals[best];
+        li->colored = 1;
         if (!li->eligible || li->d < 0 || li->u < li->d)
             continue;
         for (int r = 0; r < NPOOL; r++) {
