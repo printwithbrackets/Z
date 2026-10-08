@@ -169,15 +169,62 @@ same front end as your code, not a C function behind a builtin.
 
 ## Editor support
 
-`vim/` holds Vim/Neovim runtime files: `syntax/z.vim` (highlighting, including
-`$"..."` interpolation holes), `ftplugin/z.vim` (comments, formatting and a
-brace/`match`-aware indent), `ftdetect/z.vim` (`*.z`) and `compiler/z.vim`, so
-`:make` builds the current file and puts compiler errors in the quickfix list.
-Point any plugin manager at that directory, e.g. with lazy.nvim:
+`vim/` holds Vim/Neovim runtime files. Point any plugin manager at that
+directory, e.g. with lazy.nvim:
 
 ```lua
 { dir = "/path/to/z/vim" }
 ```
+
+| file | what it does |
+|---|---|
+| `syntax/z.vim` | highlighting: every keyword in `KEYWORDS[]`, every radix with `_` separators, duration literals (`2h21m37`), destructor declarations, the builtins, the surface names, and `$"..."` interpolation holes |
+| `ftplugin/z.vim` | comments, formatting, a brace/`match`-aware `indentexpr`, and `compiler z` |
+| `ftdetect/z.vim` | `*.z` |
+| `compiler/z.vim` | `makeprg` and `errorformat`, so `:make` and `:lmake` work |
+| `plugin/z.vim` | the commands below |
+| `autoload/z.vim` | shared helpers: running the compiler, and JSON diagnostics to quickfix |
+
+### Errors and warnings
+
+`:make` works, but it goes through `errorformat` and the one-line `gcc` error
+format, which has no diagnostic code and flattens every note into the list as an
+unrelated entry. `:Zcheck` reads `--error-format=json` instead, so each problem
+carries its code and each note that names a span is a line you can jump to:
+
+```vim
+:Zcheck        " compile the current file, fill the quickfix list, open it
+:Zcheck!       " same, without opening the window
+:Zlmake        " into the location list instead of the quickfix list
+:Zclearfix     " empty the list and remove the gutter signs
+:Zsigns        " re-place the gutter signs from the current quickfix list
+:Zversion      " print the compiler version
+```
+
+```
+> probe.z|8| E| [unused-local] 'unused' is declared but never used
+  probe.z|5| E| [return_owned_local] cannot return 'mine' directly: its destructor would run before the caller gets it
+  probe.z|9| E| [undefined_variable] undefined variable 'nope'  (in function 'main')
+  probe.z|4| I| [note] 'mine' is declared here; write 'return move mine;' to hand it to the caller
+```
+
+Errors, warnings and notes arrive as `E`, `W` and `I`, so `:cnext` can be filtered
+with `:cdo`. Errors and warnings also get a gutter sign (`DiagnosticSignError`
+and `DiagnosticSignWarn`); set `g:z_signs_error` and `g:z_signs_warning` to
+change the glyph. A note that names a span — "declared here" — becomes its own
+entry rather than being appended to the message, because the place it points at
+is the thing worth looking at.
+
+Two settings, both off by default:
+
+```vim
+let g:z_check_on_write = 1        " run :Zcheck after each write
+let g:z_check_on_write_quiet = 0  " open the quickfix window on every save
+let g:z_compiler = '/usr/local/bin/z'
+```
+
+`g:z_compiler` is used by `:Zcheck` and by `compiler/z.vim` alike. Without it
+both run the `z` binary beside this checkout, so a clone needs nothing on `$PATH`.
 
 ## Quick tour
 

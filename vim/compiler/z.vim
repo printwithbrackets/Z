@@ -3,6 +3,10 @@
 "
 " Override the compiler with, for example:
 "     let g:z_compiler = '/usr/local/bin/z'
+"
+" `:Zcheck` (vim/plugin/z.vim) is the better command: this one has to go
+" through `errorformat`, and the one-line gcc format the compiler can print
+" carries no diagnostic code and no note spans. See the note at the bottom.
 
 if exists("b:current_compiler")
   finish
@@ -30,7 +34,19 @@ endif
 execute "setlocal makeprg="
       \ .. escape(s:z .. " build %:S --error-format=gcc --color=never", " \t")
 
+" %t reads the severity's first letter, so error/warning/note arrive as E/W/N
+" and the quickfix window can group them. `%*[^:]` swallows the rest of the
+" severity word, because `: error:` after `t` would otherwise become part of
+" the message.
 setlocal errorformat=%f:%l:%c:\ %t%*[^:]:\ %m
+
+" Follow a quickfix entry into another file rather than asking about it: a
+" diagnostic in an imported file is the normal case, not the rare one, and
+" `:cnext` stopping to ask is the wrong default.
+if !exists('g:z_switchbuf_set')
+  let g:z_switchbuf_set = 1
+  set switchbuf=useopen,uselast
+endif
 
 let b:undo_ftplugin = get(b:, "undo_ftplugin", "") .. "|setl makeprg< errorformat<"
 
