@@ -84,9 +84,12 @@ command! -nargs=0 Zclearfix :call z#Clear()
 command! -nargs=0 Zsigns :call z#Signs()
 command! -nargs=0 Zversion :echo 'Z compiler: ' . (empty(z#Version()) ? 'not found (' . z#Compiler() . ')' : z#Version())
 
-if get(g:, 'z_check_on_write', 0)
-  augroup z_check_on_write
-    autocmd! * <buffer>
-    autocmd BufWritePost <buffer> call <SID>Check('', 0)
-  augroup END
-endif
+" Check on write, registered per filetype rather than `<buffer>`. A plugin file
+" is sourced at startup, when `<buffer>` would bind to whichever buffer happened
+" to be current then -- usually none of the user's -- and the autocmd would never
+" fire for a file opened later. A pattern on the extension follows the file
+" instead of the startup order.
+augroup z_check_on_write
+  autocmd! * *.z
+  autocmd BufWritePost *.z call z#CheckOnWrite()
+augroup END

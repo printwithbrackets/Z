@@ -176,3 +176,32 @@ function! z#Clear() abort
   call setqflist([], 'r')
   call z#Signs()
 endfunction
+
+" The `BufWritePost` hook, and the only place that reads g:z_check_on_write.
+"
+" Deliberately a function rather than an `if` in plugin/z.vim: a plugin file is
+" sourced at startup, which is *before* a LazyVim spec's `config()` runs, so a
+" flag set there is not yet true and the autocmd would never be registered at
+" all. Reading it per write means the flag can be set whenever, which is the only
+" time that works.
+function! z#CheckOnWrite() abort
+  if !get(g:, 'z_check_on_write', 0)
+    return
+  endif
+  if empty(expand('%:p')) || &buftype !=# ''
+    return
+  endif
+let l:items = z#Diagnostics(expand('%:p'))
+  call z#Report(l:items, 'z: ' . fnamemodify(expand('%:p'), ':t'))
+  if empty(l:items)
+    return
+  endif
+  " Quiet mode: only interrupt for a real error. A warning belongs in the list
+  " and gets a sign in the gutter, but it is not worth the quickfix window
+  " appearing over the file on every save.
+  let l:errors = len(filter(copy(l:items), 'v:val.type ==# "E"'))
+  if l:errors == 0 && get(g:, 'z_check_on_write_quiet', 1)
+    return
+  endif
+  copen
+endfunction
