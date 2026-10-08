@@ -4,7 +4,7 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Version 0.1.** `z --version` reports it, and it is the tag the release is cut
+**Version 0.11.** `z --version` reports it, and it is the tag the release is cut
 from.
 
 **Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
