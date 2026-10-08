@@ -106,10 +106,13 @@ guaranteed](#memory-safety-what-is-and-is-not-guaranteed).
 
 **[partial]** A first cut of this section is in the compiler: the destructor
 syntax, reverse-declaration-order teardown, and the `return` and scope-end paths
-work today. The `?`, `break`, `continue` and panic paths do not, a type with no
-destructor of its own does not tear down its owning fields, and there is no move
-semantics yet, so returning an owned local frees it out from under the caller.
-See [What exists today](#what-exists-today-v1-appendix) for the exact split.
+work today. The `?`, `break`, `continue` and panic paths do not, and a type with
+no destructor of its own does not tear down its owning fields. The `return` path
+is enforced rather than merely correct: returning a local that would be destroyed
+on the way out is a diagnostic, so the one case this section has to worry about
+cannot be written. `move` exists and is checked for the types that can be
+handed over. See [What exists today](#what-exists-today-v1-appendix) for the
+exact split.
 
 A `~Type()` method runs when the value's scope ends, **in reverse declaration
 order**, and on every path out of that scope: falling off the end, `return`,
@@ -224,7 +227,7 @@ object.
 Each removed form is a **diagnostic that says what to do instead**, not a
 silent unknown: a program carried over from v1 needs to be told that
 inheritance is gone rather than left with an undefined method name. Three
-diagnostics, three error tests.
+diagnostics, two error tests.
 
 The four tests that used inheritance (`integration`, `methodptr`,
 `local_types`, `interfaces`) were rewritten against interfaces and produce
@@ -271,8 +274,14 @@ done, and the rest of the slice is waiting on them.
   storing one copies no bytes and releasing one frees nothing.
   `move x` hands a value on instead of sharing it, clears the source, and makes
   reading the source a diagnostic naming the move. It is what `StringBuilder.take`
-  uses to stay a handover rather than an alias, and what `return move local;` is
-  for.
+  uses to stay a handover rather than an alias.
+  **Returning such a value is the case that is enforced.** A `return` naming a
+  bare local of a type that needs a drop must be written `return move local;`;
+  the plain form is the diagnostic `return_owned_local`, whose note points at the
+  declaration and names the fix. Exempt are a `string`, because a return already
+  copies a borrowed string, and any return that is not a bare identifier. See
+  [What exists today](#what-exists-today-v1-appendix) for which types that covers
+  today and for the one exemption the code intends but does not apply.
   A string computed but never stored is a **temporary**, and it is released when
   the statement that made it ends, so a loop of `Console.WriteLog(a + b)` is
   bounded rather than one leak per iteration. The value is spilled to a pinned frame slot and
@@ -323,7 +332,7 @@ Depends on slice 3 and is small because of it.
 Runs alongside 1–4 rather than after, because a golden suite that has not been
 ported yet is the thing that catches slice 3's destructor paths being wrong.
 
-- All 71 golden tests and 66 error tests rewritten to the v2 surface.
+- All 104 golden tests and 82 error tests rewritten to the v2 surface.
 - `lib/collections.z` and `lib/string.z` become structs with destructors.
 - `make test-all` at `-O0`–`-O3` stays the gate, for the reason in
   [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels--command-line): a pass
@@ -340,6 +349,8 @@ will be misread.
 - Using a reference after the value it borrows is destroyed.
 - Indexing an array or `Vec` out of range (`--bounds` is on by default in v2;
   see the command line).
+- Returning a local that a destructor would destroy on the way out — it must be
+  written `return move local;`.
 - Destroying a value twice.
 - Sending a value to a thread that still holds it, or sending a non-`Send` one.
 - Assigning to a `const`, or initializing a `const` twice.
@@ -349,6 +360,11 @@ will be misread.
 - A failed allocation.
 - A channel operation on a closed channel.
 - A leak, when the runtime can see one at exit.
+- **[now]** Dereferencing a null pointer through `*`, read or written, which
+  prints `runtime error: null pointer dereference` and exits 134. This is the
+  v1 compiler, where it rides the same flag as the bounds check: `--no-bounds`
+  restores the bare SIGSEGV and exit 139. It covers the `*` operator only, so
+  `p.field` through a null pointer is still a bare SIGSEGV either way.
 
 **Not guaranteed:**
 
@@ -1224,7 +1240,7 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 197 tests in all — 86 golden, 76 diagnostic, and 35 runtime, interop, module,
+- 231 tests in all — 104 golden, 82 diagnostic, and 45 runtime, interop, module,
   warning and driver tests — with `make test-all` green across four `-O` levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into
@@ -1246,7 +1262,10 @@ calls at the end of a scope. What works, and is tested:
   destroys and the copy is what reads it, so the other order frees the bytes the
   copy was about to read and hands the caller a copy of freed memory. The value
   is spilled across the destructors to keep that ordering, and pinned so the
-  destructors are not handed its slot
+  destructors are not handed its slot. The parser now rejects the plain form of
+  that return before codegen sees it, so this machinery only has to serve the
+  moved form — `return move x;`, whose value is handed over rather than copied —
+  and the exempt `string` return
 
 What does not work yet, and so does **not** satisfy the rest of section 2:
 
@@ -1257,12 +1276,25 @@ What does not work yet, and so does **not** satisfy the rest of section 2:
   objects, heap arrays and closure cells are still live at exit: those frees need
   the same treatment `string` got, one type at a time, and a leak is the safe
   direction to be wrong in
-- there is no move semantics for class pointers or heap arrays yet, so a plain
-  copy of one is still a silent alias. `move` exists and is checked, and it
-  clears the source for `string`; the other types are not wired to it
-- there is no move semantics for a class pointer or a heap array, so returning
-  one of those as a local still destroys the value before the caller can use it.
-  `move` fixes it for `string` and is not yet wired to the others
+- a plain copy of a class pointer or a heap array is still a silent alias, and
+  `move` is what makes the handover explicit rather than implied. `move` does
+  clear the source for both a `string` and a class pointer — reading a moved
+  variable is a diagnostic naming the move — but a variable that has been moved
+  is then **write-once**: reassigning it is itself `has been moved from`, so a
+  moved slot cannot be refilled. A moved variable is not released at scope end
+  either, which is the point; it is already somebody else's
+- returning one of those as a local is now rejected rather than miscompiled. A
+  plain `return x;` naming a local of a type that needs a drop is the diagnostic
+  `return_owned_local`, with a note at the declaration saying to write
+  `return move x;`. It covers a class pointer whose class has a destructor, an
+  array of one, and a struct owning a field that needs a drop. It does not fire
+  on a `string`, since a return already copies a borrowed string, nor on a return
+  that is not a bare identifier — `return new C(5);` and `return f();` have
+  nothing already-owned to hand back. The parser intends to exempt a
+  **parameter** (`src/parser.c:5935` tests `found->is_param`) but does not:
+  `is_param` is set to 0 at `src/parser.c:1204` and never set to 1, so the
+  exemption is dead code and a parameter of a class with a destructor is
+  diagnosed too.
 
 Read [LANGUAGE-v1.md](LANGUAGE-v1.md) for the v1 specification in full, including
 the sections this document does not repeat: optimization passes in detail,

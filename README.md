@@ -40,28 +40,42 @@ reachable only through one of those, are all still live at exit. Leaks are the
 safe direction to be wrong in, which is why the frees are wired up per type
 rather than all at once.
 
-Leaks are also the only thing the suite is clean of. All 102 golden cases, which
+Leaks are also the only thing the suite is clean of. All 104 golden cases, which
 are the ones that produce a program to run, build and run under
 AddressSanitizer with no use-after-free, no double free and no buffer overflow.
-The rest of the 224 tests are diagnostics and gates, which produce no program, so
-"the suite is clean under ASan" is a statement about those 102 and not about the
-other 122. And it is a statement about the suite rather than about the language:
+The rest of the 231 tests are diagnostics and gates, none of which runs a
+program, so "the suite is clean under ASan" is a statement about those 104 and
+not about the other 127. And it is a statement about the suite rather than about
+the language:
 a program outside it can release a captured string's cell instead of its string,
 or hand an already-released field to a destructor. Both are known, and each is
 written down next to the code that causes it.
 
-**Destructors are half-built, and one half is a live footgun.** A `~Type()`
-method runs when a value's scope ends, in reverse declaration order. It works on
-scope end, on `return` (unwinding every open scope, innermost first), per
-iteration in a loop body, and at the end of a void function. It does **not** yet
-run on `?`, on `break` or `continue`, and it does not tear down an owning field
-of a type with no destructor of its own.
+**Destructors are half-built, and the half that is missing is not reachable by
+accident.** A `~Type()` method runs when a value's scope ends, in reverse
+declaration order. It works on scope end, on `return` (unwinding every open
+scope, innermost first), per iteration in a loop body, and at the end of a void
+function. It does **not** yet run on `?`, on `break` or `continue`, and it does
+not tear down an owning field of a type with no destructor of its own.
 
-**Do not return a local that owns something.** `R* f() { var mine = new R(5);
-return mine; }` destroys `mine` on the way out, so the caller reads freed memory
-and then drops it a second time. `move` fixes this for a `string` today
-(`return move mine;`), and the class and array cases come with the rest of slice
-3.
+**Returning a local that would be destroyed on the way out is now a compile
+error, not a footgun.** `R* f() { var mine = new R(5); return mine; }` is
+rejected:
+
+```
+error: cannot return 'mine' directly: its destructor would run before the caller gets it
+note: 'mine' is declared here; write 'return move mine;' to hand it to the caller
+```
+
+and `return move mine;` hands it over instead, so the destructor runs once, in
+the caller's scope. This covers a `class` pointer whose class has a destructor,
+an array of one, and a struct that owns a field needing a drop. It does not fire
+on a `string`, because a return already copies a borrowed string, nor on a return
+that is not a bare identifier — `return new C(5);` and `return f();` have
+nothing already-owned to hand back. A **parameter** is not exempt, contrary to
+what `src/parser.c:5935` intends: `v->is_param` is set to 0 at `parser.c:1204`
+and never set to 1, so the exemption is dead code and `return p;` is diagnosed
+for a parameter of a class with a destructor.
 
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no
@@ -101,6 +115,19 @@ loop-invariant code motion. Array *and string* indexing is range-checked by
 default and `--no-bounds` turns it off, `-w` silences warnings, and `-Werror`
 makes them fail the build. Anything the compiler does not recognize is passed
 through to the linker.
+
+`--no-bounds` also drops the null-pointer check on `*`, so it is not only a
+throughput flag. With checks on, dereferencing a null pointer prints
+`runtime error: null pointer dereference` and exits 134; with `--no-bounds` it is
+a bare SIGSEGV and exit 139. The check covers the `*` operator only — `p.field`
+through a null pointer is still a bare SIGSEGV either way.
+
+```csharp
+int main() {
+    int* p = null;
+    Console.WriteLog(*p);
+}
+```
 
 A `z.surface` file beside your code renames what a program writes for a global —
 the builtins, the standard library, your own globals — so a codebase can be
@@ -323,6 +350,19 @@ system assembler — we do not write an ELF encoder.
   fully register-resident and ~2× faster end to end, and beat `gcc -O0` on
   modulo-heavy code. Each `for` phase is a separate liveness position, so a loop
   counter can no longer share a register with a local declared in its body.
+  Which local gets which register is decided by **loop depth, not declaration
+  order**: each def and use adds `1 << (3 × depth)` to the local's weight, capped
+  at six enclosing loops, and the allocator colours heaviest-first, breaking ties
+  towards the earlier declaration. That is what keeps a counter read once per
+  iteration in a register while a cold accumulator goes to the frame. Ordering by
+  definition instead meant the accumulator won and the counter spilled, which on a
+  matrix multiply was about 9% of total time — though note that matmul is **not**
+  in `tests/bench/`, so that number comes from the commit that made the change and
+  cannot be reproduced from this tree. An index expression also no longer marks a
+  non-aggregate base address-taken, so an array or string base is register-
+  eligible; the overlap test that stops two live locals sharing a register is
+  unchanged. The array base is still reloaded through the frame on each access,
+  which is what keeps a matrix multiply about 4× off `gcc -O2`.
   `-O3` adds **loop unrolling**: a loop with a condition, a body of at most 24
   statements, and at least two independent loop-carried recurrences is emitted
   four times over, testing the condition before each copy so the body still runs
@@ -910,7 +950,7 @@ the compiler in this repository implements.
 
 The two documents are kept side by side on purpose. v2 changes the language, not
 the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
-diagnostics system, the 71 golden tests — are still the spec for the parts that
+diagnostics system, the 104 golden tests — are still the spec for the parts that
 do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License
