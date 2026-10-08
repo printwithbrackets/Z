@@ -1,7 +1,19 @@
-# Z — language specification
+# Z — language specification (v1)
 
-This is the subset that is implemented and tested. It grows each milestone; the
-grammar below is the source of truth for what the compiler accepts today.
+**This is the v1 specification, kept as a record.** The compiler in this repository
+implements v1, but v1 has since changed underneath this document: inheritance and
+`base(...)` were cut in v2 slice 2 and the collector was replaced by destructors
+in slice 3, and neither is reflected below. Where this document describes
+inheritance, `override`, `base(...)` or the garbage collector, it is describing
+the language as it was, not as the compiler now accepts it.
+
+For the current behaviour see [LANGUAGE.md](LANGUAGE.md), and for a walkthrough
+see [TUTORIAL.md](TUTORIAL.md). Sections here that the compiler has not changed
+are still accurate and are deliberately not duplicated there — that is why the
+two documents sit side by side.
+
+The grammar below was, at the time of writing, the source of truth for what the
+compiler accepted.
 
 ## Lexical
 
@@ -937,13 +949,18 @@ z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
                     [-w] [-Werror] [-Wno-<name>] [linker args...]
 ```
 
+`[--bounds]` is v1's spelling, written above because the rest of this document is
+v1. The checks it asked for are now **on by default**, so the flag to turn them
+off is `--no-bounds`; `--bounds` is still accepted as an explicit request for the
+default. The driver also accepts `--version` and prints the compiler version.
+
 | | |
 |---|---|
 | `-O0` | naive: every local in memory, no folding, a real `idiv`. A baseline to measure against, and the level to debug codegen with. |
 | `-O1` | the default: constant folding and propagation, function inlining, a liveness-based local register allocator, leaf and immediate operand selection, branch-on-flags conditions, in-place compound assignment, and constant division/modulo strength reduction. |
 | `-O2` | adds loop-invariant code motion. |
 | `-O3` | adds loop unrolling: a loop with a condition and a small enough body is emitted four times over, testing the condition before each copy. |
-| `--bounds` | range-check every array access. Costs a length load and two branches per access, which is why it is off by default. It covers array indices only; a `T*` has no length header to check against. |
+| `--bounds` | range-check every array access. Costs a length load and two branches per access, which is why it is off by default. It covers array indices only; a `T*` has no length header to check against. **[changed since]** checks are now on by default and the flag to turn them off is `--no-bounds`; `--bounds` is still accepted as an explicit request for the default. The check has also grown past array indices: it now covers dereferencing a null `T*`, printing `runtime error: null pointer dereference` and exiting 134. |
 | `-g` | emit DWARF: a line table, and a symbol table naming every function, its parameters and its frame-resident locals. |
 
 A level only gates passes; it never changes what a program means, and the test

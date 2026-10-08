@@ -2,9 +2,10 @@
 
 Z is a small, statically-typed, C#-flavored language that compiles to native
 x86-64 machine code. It has a real type system, value types (structs),
-reference types (classes) with inheritance and dynamic dispatch, interfaces,
-closures and nested functions, monomorphized generics, pattern matching, a tracing garbage
-collector, and a modern optimizing backend — with no runtime dependency beyond libc.
+reference types (classes) with dynamic dispatch, interfaces, closures and nested
+functions, monomorphized generics, pattern matching, owned values destroyed by
+destructors rather than by a collector, and a modern optimizing backend — with
+no runtime dependency beyond libc.
 
 This tutorial walks through the whole language. Every example is runnable and
 verified against the compiler in this repo.
@@ -762,10 +763,11 @@ c.bump(10);
 Console.WriteLog(m(0));            // 15   the receiver is bound, so mutation shows through
 ```
 
-A `method(...)` value is a pointer to a garbage-collected cell holding the code
-address and the receiver, so the receiver stays alive exactly as long as the
-pointer does. That means the receiver may be a local that has otherwise gone out
-of scope.
+A `method(...)` value holds the code address and the receiver in a heap cell, so
+the receiver stays alive exactly as long as the pointer does. That means the
+receiver may be a local that has otherwise gone out of scope. Nothing collects
+that cell — see [Memory, destructors, and `move`](#16-memory-destructors-and-move)
+for what that means.
 
 Method pointers go in arrays and struct fields and can be passed as parameters,
 just like function pointers. A **virtual** method binds through the object's
@@ -1090,6 +1092,11 @@ p = q;                                    // a var declared null takes a pointer
 `var p = null;` gives `p` the type `int*`, so it is assignable later. Comparing
 `null` with a non-pointer, such as `p == 0`, is a type error; write `p == null`.
 
+Dereferencing one is checked rather than left to the hardware — see
+[Null pointer checks](#null-pointer-checks). Note that a **typed** declaration
+initialized to null is not accepted: write `var p = null;`, not
+`var p: int* = null;`.
+
 ---
 
 ## 11. Structs (value types)
@@ -1267,8 +1274,11 @@ Console.WriteLog(animals[0].Speak());   // Rex woof
 Console.WriteLog(animals[1].Speak());   // meow
 ```
 
-- `new C(args)` allocates a garbage-collected object and runs the constructor
-  (a method named like the class). Fields start zeroed.
+- `new C(args)` allocates an object on the `malloc` heap and runs the constructor
+  (a method named like the class). Fields start zeroed. The object is freed when
+  its scope ends **if the class has a `~C()` destructor**; without one it leaks,
+  which is a deliberate direction to be wrong in. See
+  [Memory, destructors, and `move`](#16-memory-destructors-and-move).
 - There is no `: Base`, no `override` and no `base(args)`. Each is a diagnostic
   that says what to do instead, because a program carried over from a version
   that had them needs to be told rather than left with an undefined name.
@@ -1352,18 +1362,114 @@ machinery, boxing, or type erasure — every instantiation is real native code.
 
 ---
 
-## 16. Memory & the garbage collector
+## 16. Memory, destructors, and `move`
 
-The heap (arrays, `new` objects, and strings) is managed by a conservative
-mark-sweep collector. You never free anything:
+There is **no garbage collector**. The heap is plain `malloc`, and a value is
+freed when its scope ends. That is not a `free` you remember to call — it is
+written into the type and run on every way out of the scope.
 
 ```csharp
-var live = "survivor";
-for (var i = 0; i < 100000; i = i + 1) { live = live + "x"; }  // tons of garbage
-Console.WriteLog(live);   // "survivorxxx..." — `live` survived
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog($"drop {this.id}"); }
+}
+
+int main() {
+    var a = new Tracked(1);
+    var b = new Tracked(2);
+    Console.WriteLog("body");
+}
 ```
 
-Locals live on the stack (no GC cost); only heap allocations are collected.
+```console
+$ ./z run tracked.z
+body
+drop 2
+drop 1
+```
+
+`~Type()` runs in **reverse declaration order** when the scope ends — and a
+loop body's scope ends once per iteration, so this is bounded rather than one
+leak per pass:
+
+```csharp
+for (var i = 0; i < 3; i = i + 1) { var t = new Tracked(i); }
+// drops for i = 0, 1, 2, each before the next iteration starts
+```
+
+It also runs on `return`, unwinding every open scope innermost first. It does
+**not** yet run on `?`, on `break`, or on `continue`, and a type with no
+destructor of its own does not tear down its owning fields.
+
+A `string` is owned too. It is copied deeply on every store, released when its
+scope ends, and released again when a slot is overwritten — so this is bounded:
+
+```csharp
+var s = "a";
+for (var i = 0; i < 3; i = i + 1) { Console.WriteLog((s + "b").length); }
+```
+
+### What still leaks
+
+Being straight about it: a heap array is never freed, and a class object whose
+type has no `~Type()` is never freed. A closure cell is never freed. These leak
+by design for now, which is why the suite's AddressSanitizer run looks for
+use-after-free, double free and buffer overflow and **not** for leaks — the
+golden cases leak closure cells too.
+
+```csharp
+// leaks.z
+int main() { var a = new int[1000]; Console.WriteLog(a.length); }
+```
+
+```console
+$ ./z build leaks.z -o leaks -fsanitize=address -g && ./leaks
+Direct leak of 8008 byte(s) in 1 object(s) allocated from:
+SUMMARY: AddressSanitizer: 8008 byte(s) leaked in 1 allocation(s).
+```
+
+The direction is deliberate: a leak is visible under AddressSanitizer and costs
+memory, whereas a double free corrupts the heap.
+
+### `move`
+
+A value has one owner. To hand one on rather than share it, `move` it: the
+source is cleared, and reading it afterwards is a compile error that names the
+move.
+
+```csharp
+var t2 = new Tracked(8);
+var h2 = move t2;
+Console.WriteLog(t2.id);   // error: 't2' has been moved from
+```
+
+A moved variable is then write-once — assigning into it again is the same
+diagnostic — and it is not released at scope end, because it is now
+somebody else's.
+
+This is what makes `return` work. Returning a local that a destructor would
+destroy on the way out is rejected rather than miscompiled:
+
+```
+error: cannot return 'mine' directly: its destructor would run before the caller gets it
+note: 'mine' is declared here; write 'return move mine;' to hand it to the caller
+```
+
+so the handover is written down instead of implied:
+
+```csharp
+R* make() {
+    var mine = new R(5);
+    return move mine;     // the caller's scope runs the destructor, once
+}
+```
+
+This fires for a class pointer whose class has a destructor, an array of one, and
+a struct owning a field that needs a drop. It does not fire on a `string`,
+because a return already copies a borrowed string, nor on a return that is not a
+bare identifier — `return new R(5);` and `return helper(x);` have nothing
+already-owned to hand back.
 
 ### Bounds checking
 
@@ -1389,7 +1495,25 @@ whatever follows the array in the heap.
 
 The flag applies to `build` as well, and costs a length load plus two branches
 per access, which is why it is off by default — turn it on while testing, and
-leave it off for anything you care about throughput.
+leave it off for anything you care about throughput. Note that `--no-bounds` also
+drops the null-pointer check below, so it is not only a throughput flag.
+
+### Null pointer checks
+
+Dereferencing a null pointer through `*` is checked before the load or the store,
+and aborts with a message rather than a bare segfault:
+
+```console
+$ ./z run nullderef.z
+runtime error: null pointer dereference
+$ echo $?
+134
+```
+
+The check covers the `*` operator, so a null pointer is caught on a read and on
+a write alike. It does not cover field access: `p.x` through a null `p` is still
+a bare segfault (exit 139) whether or not checks are on. With `--no-bounds` the
+`*` case is a bare segfault too.
 
 ---
 
