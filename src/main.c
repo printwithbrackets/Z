@@ -37,7 +37,7 @@
  *
  * Hand-maintained and bumped with the tag, because the build has no other
  * source of truth -- the Makefile knows the C toolchain and not the release. */
-#define Z_VERSION "0.1"
+#define Z_VERSION "0.11"
 
 /* Reads an entire file into a NUL-terminated heap buffer. */
 static char *read_file(const char *path, long *out_len) {
