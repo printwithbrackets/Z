@@ -28,6 +28,17 @@
  * lands in it says `z:std` rather than naming a file that does not exist. */
 #define STD_SRC_NAME "z:std"
 
+/* The compiler's own version, reported by `z --version`.
+ *
+ * A build is a C translation of this tree and nothing stamps it, so before this
+ * the only honest answer to "which z is this" was to read the README and guess
+ * from what it described. A release needs the artifact to name itself: a bug
+ * report that cannot say what produced it cannot be reproduced.
+ *
+ * Hand-maintained and bumped with the tag, because the build has no other
+ * source of truth -- the Makefile knows the C toolchain and not the release. */
+#define Z_VERSION "0.1"
+
 /* Reads an entire file into a NUL-terminated heap buffer. */
 static char *read_file(const char *path, long *out_len) {
     FILE *f = fopen(path, "rb");
@@ -108,6 +119,8 @@ static void usage(void) {
     fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
                     "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
                     "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
+                    "       z --version\n"
+                    "  --version print the compiler version and exit\n"
                     "  -O0 naive codegen (no register allocation, no folding)\n"
                     "  -O1 default: folding, register allocation, strength reduction\n"
                     "  -O2 adds loop-invariant code motion\n"
@@ -520,6 +533,16 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
 }
 
 int main(int argc, char **argv) {
+    /* `--version` is answered before anything is parsed, and before the
+     * argument count is checked, because it takes no file and is the one
+     * invocation that must work with nothing else on the line. Anything left
+     * over is ignored rather than diagnosed: a build script that runs
+     * `z --version` to capture the version and has already appended its own
+     * flags should get the number, not a usage error. */
+    if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
+        printf("z %s\n", Z_VERSION);
+        return 0;
+    }
     if (argc < 3) {
         usage();
         return 2;

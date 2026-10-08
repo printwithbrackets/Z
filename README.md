@@ -4,6 +4,9 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
+**Version 0.1.** `z --version` reports it, and it is the tag the release is cut
+from.
+
 **Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
 A working end-to-end compiler: source → lexer → parser → type checker → x86-64
 assembly → native binary. It has a real type system, pointers, heap arrays,
@@ -90,6 +93,7 @@ Code is compiled with `-std=c11 -Wall -Wextra -Wpedantic -Werror`.
 ./z build hello.z -o hello # compile to ./hello
 ./z asm   hello.z          # print the generated x86-64 assembly
 ./z build hello.z -o hello -g   # ...with DWARF, for gdb
+./z --version              # print the compiler version and exit
 ```
 
 Optimization levels are spelled like gcc's (`-O0`..`-O3`), and `-O2` turns on
