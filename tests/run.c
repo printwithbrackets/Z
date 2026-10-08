@@ -348,6 +348,7 @@ int main(int argc, char **argv) {
         "unroll",
         "unroll_dep",
         "vec_pop_owned",
+        "index_loop",
         "onearg_call",
         "durations",
         "stackargs",
@@ -1188,6 +1189,7 @@ int main(int argc, char **argv) {
      * either way. */
     static const char *aborts[] = {
         "bounds_read", "bounds_write", "bounds_negative", "bounds_runtime_len", "bounds_string",
+        "bounds_in_loop",
     };
     for (size_t i = 0; i < sizeof aborts / sizeof aborts[0]; i++) {
         snprintf(path, sizeof path, "%s/%s.z", rt_dir, aborts[i]);
