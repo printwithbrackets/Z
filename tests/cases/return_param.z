@@ -1,0 +1,48 @@
+// A parameter is a borrow, not a local. The callee's teardown never destroys
+// one -- the value behind it is still the caller's -- so `return p;` hands back
+// something this function was never going to free, and it is allowed.
+//
+// `return mine;` on a local is the opposite case and is a diagnostic: see
+// tests/errors/return_owned_local.z. Both are one rule read from two sides, and
+// the parameter side was being rejected because the flag that exempts it was
+// never set.
+//
+// What this checks is not only that it compiles. Each destructor must run
+// exactly once, and in the caller's scope rather than the callee's. The caller
+// hands its own value over with `move` at the call site, which is what keeps the
+// returned handle from aliasing the local it came from -- the same discipline
+// `var h = move r;` needs for the same reason.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog($"drop {this.id}"); }
+}
+
+Tracked* relay(Tracked* p) {
+    Console.WriteLog("in relay");
+    return p;
+}
+
+class Box {
+    int n;
+    Box(int v) { this.n = v; }
+    ~Box() { Console.WriteLog($"box drop {this.n}"); }
+
+    // The receiver is a parameter, and a method returning its own receiver is
+    // the same shape: nothing here is destroyed on the way out.
+    Box* Self() { return this; }
+}
+
+int main() {
+    var r = new Tracked(1);
+    Console.WriteLog("before");
+    var h = relay(move r);
+    Console.WriteLog($"after {h.id}");
+
+    var b = new Box(7);
+    Console.WriteLog($"box {b.Self().n}");
+
+    var t = new Tracked(2);
+    var t2 = relay(move t);
+    Console.WriteLog($"relayed {t2.id}");
+}

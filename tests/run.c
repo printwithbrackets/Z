@@ -362,6 +362,7 @@ int main(int argc, char **argv) {
         "addrof_field",
         "destructors",
         "strreturn",
+        "return_param",
         "stdin",
         "surface",
         "typeof",

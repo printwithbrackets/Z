@@ -72,10 +72,22 @@ the caller's scope. This covers a `class` pointer whose class has a destructor,
 an array of one, and a struct that owns a field needing a drop. It does not fire
 on a `string`, because a return already copies a borrowed string, nor on a return
 that is not a bare identifier — `return new C(5);` and `return f();` have
-nothing already-owned to hand back. A **parameter** is not exempt, contrary to
-what `src/parser.c:5935` intends: `v->is_param` is set to 0 at `parser.c:1204`
-and never set to 1, so the exemption is dead code and `return p;` is diagnosed
-for a parameter of a class with a destructor.
+nothing already-owned to hand back, nor on a **parameter**, which is a borrow
+whose value is still the caller's and which this function never destroys.
+
+That last exemption is the caller's problem, not the callee's. A returned
+parameter hands back a handle that aliases the caller's own local, so the caller
+has to `move` its value over at the call site:
+
+```csharp
+var r = new Tracked(1);
+var h = relay(move r);      // one drop, in main's scope
+```
+
+Write `relay(r)` and both `r` and `h` drop at the end of `main`, which is the
+plain-copy aliasing hazard every class handle has here and not something the
+return rule introduced. `return_param` in the golden suite is the regression
+test.
 
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no

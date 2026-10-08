@@ -279,9 +279,10 @@ done, and the rest of the slice is waiting on them.
   bare local of a type that needs a drop must be written `return move local;`;
   the plain form is the diagnostic `return_owned_local`, whose note points at the
   declaration and names the fix. Exempt are a `string`, because a return already
-  copies a borrowed string, and any return that is not a bare identifier. See
-  [What exists today](#what-exists-today-v1-appendix) for which types that covers
-  today and for the one exemption the code intends but does not apply.
+  copies a borrowed string, any return that is not a bare identifier, and a
+  **parameter**, which is a borrow this function never destroys. See
+  [What exists today](#what-exists-today-v1-appendix) for which types the rule
+  covers today.
   A string computed but never stored is a **temporary**, and it is released when
   the statement that made it ends, so a loop of `Console.WriteLog(a + b)` is
   bounded rather than one leak per iteration. The value is spilled to a pinned frame slot and
@@ -350,7 +351,7 @@ will be misread.
 - Indexing an array or `Vec` out of range (`--bounds` is on by default in v2;
   see the command line).
 - Returning a local that a destructor would destroy on the way out — it must be
-  written `return move local;`.
+  written `return move local;`. A **parameter** is not a local and is allowed.
 - Destroying a value twice.
 - Sending a value to a thread that still holds it, or sending a non-`Send` one.
 - Assigning to a `const`, or initializing a `const` twice.
@@ -1290,11 +1291,13 @@ What does not work yet, and so does **not** satisfy the rest of section 2:
   array of one, and a struct owning a field that needs a drop. It does not fire
   on a `string`, since a return already copies a borrowed string, nor on a return
   that is not a bare identifier — `return new C(5);` and `return f();` have
-  nothing already-owned to hand back. The parser intends to exempt a
-  **parameter** (`src/parser.c:5935` tests `found->is_param`) but does not:
-  `is_param` is set to 0 at `src/parser.c:1204` and never set to 1, so the
-  exemption is dead code and a parameter of a class with a destructor is
-  diagnosed too.
+  nothing already-owned to hand back — nor on a **parameter**, which is a borrow:
+  the value behind it is still the caller's and this function never destroys it,
+  so there is nothing to run before the caller gets it. The caller then owns the
+  aliasing problem, and the fix is the same one an ordinary copy needs: hand the
+  value over at the call site, `relay(move r)`, so the returned handle does not
+  alias the local it came from. `tests/cases/return_param.z` is the regression
+  test, and it checks the destructor count rather than only that it compiles.
 
 Read [LANGUAGE-v1.md](LANGUAGE-v1.md) for the v1 specification in full, including
 the sections this document does not repeat: optimization passes in detail,
