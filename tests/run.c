@@ -1012,7 +1012,11 @@ int main(int argc, char **argv) {
             if (*p >= '0' && *p <= '9')
                 has_number = 1;
 
-        if (rc != 0 || strncmp(actual, "z ", 2) != 0 || !has_number) {
+        /* Also not the name. The binary names itself from argv[0], so it prints
+         * "gzz 0.1.1" when reached through that symlink, and pinning the prefix
+         * would make the suite fail for being invoked under another name --
+         * which is a fact about the caller, not a defect in the compiler. */
+        if (rc != 0 || !has_number || actual[0] == '\0') {
             fprintf(stderr, "FAIL version (rc=%d)\n--- actual ---\n%s\n", rc, actual);
             fail++;
         } else {

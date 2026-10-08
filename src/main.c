@@ -39,11 +39,30 @@
  * source of truth -- the Makefile knows the C toolchain and not the release. */
 #define Z_VERSION "0.1.1"
 
+/* The name this binary was reached by. `gzz` is a symlink to this same
+ * executable, named the way the gcc family names a driver after what it drives
+ * -- one binary, `gcc` for C and `g++` for C++. A driver that hardcoded its own
+ * name would tell a C++ user to type `gcc`, and would print "z:" on an error a
+ * `gzz` user asked for.
+ *
+ * Basename only: argv[0] is whatever path it was invoked through, and
+ * `/home/you/bin/gzz: unknown --color` is not a diagnostic anybody can act on.
+ * Defaults to `z` so a call that reaches here without argv[0] -- which is every
+ * diagnostic emitted before main() -- still names something. */
+static const char *s_prog = "z";
+
+static void SetProgName(const char *argv0) {
+    if (argv0 == NULL || argv0[0] == '\0')
+        return;
+    const char *slash = strrchr(argv0, '/');
+    s_prog = slash != NULL ? slash + 1 : argv0;
+}
+
 /* Reads an entire file into a NUL-terminated heap buffer. */
 static char *read_file(const char *path, long *out_len) {
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
-        fprintf(stderr, "z: cannot open '%s'\n", path);
+        fprintf(stderr, "%s: cannot open '%s'\n", s_prog, path);
         return NULL;
     }
     fseek(f, 0, SEEK_END);
@@ -56,7 +75,7 @@ static char *read_file(const char *path, long *out_len) {
     char *buf = malloc((size_t)len + 1);
     if (buf == NULL) {
         fclose(f);
-        fprintf(stderr, "z: out of memory reading '%s'\n", path);
+        fprintf(stderr, "%s: out of memory reading '%s'\n", s_prog, path);
         return NULL;
     }
     size_t got = fread(buf, 1, (size_t)len, f);
@@ -71,7 +90,7 @@ static int write_file(const char *path, const char *data) {
     int to_stdout = strcmp(path, "-") == 0 || strcmp(path, "/dev/stdout") == 0;
     FILE *f = to_stdout ? stdout : fopen(path, "wb");
     if (f == NULL) {
-        fprintf(stderr, "z: cannot write '%s'\n", path);
+        fprintf(stderr, "%s: cannot write '%s'\n", s_prog, path);
         return 0;
     }
     fputs(data, f);
@@ -100,7 +119,7 @@ static int run_argv(char *const argv[]) {
         execvp(argv[0], argv);
         /* Only reached when exec failed. 127 is what a shell reports for a
          * command it could not run, which is what this reported before. */
-        fprintf(stderr, "z: cannot run '%s'\n", argv[0]);
+        fprintf(stderr, "%s: cannot run '%s'\n", s_prog, argv[0]);
         _exit(127);
     }
     int status = 0;
@@ -116,27 +135,29 @@ static int run_argv(char *const argv[]) {
 }
 
 static void usage(void) {
-    fprintf(stderr, "usage: z <run|build> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
-                    "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
-                    "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
-                    "       z --version\n"
-                    "  --version print the compiler version and exit\n"
-                    "  -O0 naive codegen (no register allocation, no folding)\n"
-                    "  -O1 default: folding, register allocation, strength reduction\n"
-                    "  -O2 adds loop-invariant code motion\n"
-                    "  -O3 adds loop unrolling\n"
-                    "  --no-bounds  drop the array and string index checks, which are on\n"
-                    "               by default; measured and trusted code only\n"
-                    "  -g        emit DWARF debug info (line table, functions, locals)\n"
-                    "  -w         silence all warnings\n"
-                    "  -Werror    treat warnings as errors\n"
-                    "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
-                    "            unreachable, unused-import)\n"
-                    "  --error-format=human|gcc|json  how to render diagnostics\n"
-                    "  --color=auto|always|never       colour, auto = only on a terminal\n"
-                    "  --no-std   compile without the embedded standard library\n"
-                    "  --no-surface  ignore a project manifest; use the shipped names only\n"
-                    "  --surface=<path>  take the dialect from this file instead of searching\n");
+    fprintf(stderr,
+            "usage: %s <run|build> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
+            "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
+            "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
+            "       %s --version\n"
+            "  --version print the compiler version and exit\n"
+            "  -O0 naive codegen (no register allocation, no folding)\n"
+            "  -O1 default: folding, register allocation, strength reduction\n"
+            "  -O2 adds loop-invariant code motion\n"
+            "  -O3 adds loop unrolling\n"
+            "  --no-bounds  drop the array and string index checks, which are on\n"
+            "               by default; measured and trusted code only\n"
+            "  -g        emit DWARF debug info (line table, functions, locals)\n"
+            "  -w         silence all warnings\n"
+            "  -Werror    treat warnings as errors\n"
+            "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
+            "            unreachable, unused-import)\n"
+            "  --error-format=human|gcc|json  how to render diagnostics\n"
+            "  --color=auto|always|never       colour, auto = only on a terminal\n"
+            "  --no-std   compile without the embedded standard library\n"
+            "  --no-surface  ignore a project manifest; use the shipped names only\n"
+            "  --surface=<path>  take the dialect from this file instead of searching\n",
+            s_prog, s_prog);
 }
 
 /* ---- imports ----
@@ -155,7 +176,7 @@ static void usage(void) {
  */
 
 static void die_oom(void) {
-    fprintf(stderr, "z: out of memory\n");
+    fprintf(stderr, "%s: out of memory\n", s_prog);
     exit(1);
 }
 
@@ -245,13 +266,14 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
     char *stable = arena_strdup(arena, path);
     path = stable;
     if (n_loaded >= MAX_FILES || n_loading >= MAX_FILES) {
-        fprintf(stderr, "z: too many imported files (limit %d)\n", MAX_FILES);
+        fprintf(stderr, "%s: too many imported files (limit %d)\n", s_prog, MAX_FILES);
         return 1;
     }
     if (path_listed(loaded_path, n_loaded, path))
         return 0; /* already in the unit; a second import is a no-op */
     if (path_listed(loading_path, n_loading, path)) {
-        fprintf(stderr, "z: import cycle: %s imports itself, directly or indirectly\n", path);
+        fprintf(stderr, "%s: import cycle: %s imports itself, directly or indirectly\n", s_prog,
+                path);
         return 1;
     }
     loading_path[n_loading++] = path; /* arena-owned */
@@ -349,7 +371,7 @@ static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout, Stri
         int ntoks = 0;
         Token *toks = lex_all_file(arena, src, (int)strlen(src), strings, &ntoks, path);
         if (diag_error_count() > 0) {
-            fprintf(stderr, "z: the embedded standard library does not compile\n");
+            fprintf(stderr, "%s: the embedded standard library does not compile\n", s_prog);
             return 1;
         }
         for (int i = 0; i < ntoks; i++) {
@@ -488,7 +510,7 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         snprintf(rt_path, sizeof rt_path, "/tmp/z_%ld_rt.c", (long)getpid());
         FILE *rtf = fopen(rt_path, "wb");
         if (rtf == NULL) {
-            fprintf(stderr, "z: cannot write runtime source\n");
+            fprintf(stderr, "%s: cannot write runtime source\n", s_prog);
             remove(apath);
             free(asm_text);
             arena_free(&arena);
@@ -516,7 +538,7 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         status = run_argv(argv);
         remove(rt_path);
         if (status != 0)
-            fprintf(stderr, "z: assembling/linking failed\n");
+            fprintf(stderr, "%s: assembling/linking failed\n", s_prog);
     } else {
         char obj_path[256];
         snprintf(obj_path, sizeof obj_path, "/tmp/z_%ld.o", (long)getpid());
@@ -533,6 +555,11 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
 }
 
 int main(int argc, char **argv) {
+    /* First, so every diagnostic below -- including `--version` -- is named the
+     * way the binary was reached. `gzz` is a symlink to this executable, so
+     * this is what makes `gzz --version` say `gzz`. */
+    SetProgName(argc > 0 ? argv[0] : NULL);
+
     /* `--version` is answered before anything is parsed, and before the
      * argument count is checked, because it takes no file and is the one
      * invocation that must work with nothing else on the line. Anything left
@@ -540,7 +567,7 @@ int main(int argc, char **argv) {
      * `z --version` to capture the version and has already appended its own
      * flags should get the number, not a usage error. */
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
-        printf("z %s\n", Z_VERSION);
+        printf("%s %s\n", s_prog, Z_VERSION);
         return 0;
     }
     if (argc < 3) {
@@ -612,13 +639,14 @@ int main(int argc, char **argv) {
              * to the linker untouched, as it always has. */
         } else if (strncmp(argv[i], "--error-format=", 15) == 0) {
             if (!diag_set_format_flag(argv[i] + 15)) {
-                fprintf(stderr, "z: unknown --error-format '%s' (human, gcc, json)\n",
+                fprintf(stderr, "%s: unknown --error-format '%s' (human, gcc, json)\n", s_prog,
                         argv[i] + 15);
                 return 2;
             }
         } else if (strncmp(argv[i], "--color=", 8) == 0) {
             if (!diag_set_color_flag(argv[i] + 8)) {
-                fprintf(stderr, "z: unknown --color '%s' (auto, always, never)\n", argv[i] + 8);
+                fprintf(stderr, "%s: unknown --color '%s' (auto, always, never)\n", s_prog,
+                        argv[i] + 8);
                 return 2;
             }
         } else if (strncmp(argv[i], "-O", 2) == 0 && argv[i][2] >= '0' && argv[i][2] <= '9' &&
@@ -627,8 +655,8 @@ int main(int argc, char **argv) {
              * through to the linker untouched. */
             opt_level = argv[i][2] - '0';
         } else if (n_link_args == MAX_LINK_ARGS) {
-            fprintf(stderr, "z: at most %d linker arguments, and %d were given\n", MAX_LINK_ARGS,
-                    n_link_args + 1);
+            fprintf(stderr, "%s: at most %d linker arguments, and %d were given\n", s_prog,
+                    MAX_LINK_ARGS, n_link_args + 1);
             return 2;
         } else {
             link_args[n_link_args++] = argv[i];
@@ -643,7 +671,7 @@ int main(int argc, char **argv) {
             size_t need = strlen(base) + 8;
             default_out = malloc(need);
             if (default_out == NULL) {
-                fprintf(stderr, "z: out of memory\n");
+                fprintf(stderr, "%s: out of memory\n", s_prog);
                 return 1;
             }
             snprintf(default_out, need, "./%s", base);
