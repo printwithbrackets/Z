@@ -5936,10 +5936,13 @@ static void check_return_of_owned_local(Parser *p, Stmt *s) {
         return;
     if (!type_needs_drop(found->type))
         return;
-    diag_note_at(found->decl_span, "'%s' is declared here; write 'return move %s;' to hand it to the caller", found->name, found->name);
-    diag_error_code(s->span, "return_owned_local",
-                    "cannot return '%s' directly: its destructor would run before the caller gets it",
-                    found->name);
+    diag_note_at(found->decl_span,
+                 "'%s' is declared here; write 'return move %s;' to hand it to the caller",
+                 found->name, found->name);
+    diag_error_code(
+        s->span, "return_owned_local",
+        "cannot return '%s' directly: its destructor would run before the caller gets it",
+        found->name);
 }
 
 /* Expands every block scope and every return in a statement list. Inner first,

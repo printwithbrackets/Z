@@ -165,7 +165,7 @@ typedef struct {
      * locals first, so a loop counter read a dozen times per iteration beats a
      * pointer that is only declared once outside the loop. */
     long long weight;
-    int colored;    /* already considered by alloc_regs */
+    int colored; /* already considered by alloc_regs */
 } LocalInfo;
 
 /* How deep inlined bodies may nest. Shared with the parser, which enforces the
@@ -208,9 +208,10 @@ typedef struct {
     const char *cur_sym;
     LocalInfo *locals; /* per-function register-allocation candidates */
     int nlocals, loc_cap;
-    int pool_mask;   /* bitmask of POOL_REGS indices actually used */
-    int loop_marker; /* incremented once per loop walked; see LocalInfo.loop_marker */
-    int alloc_loop_depth; /* loops around the statement the allocation walk is on; see LocalInfo.weight */
+    int pool_mask;        /* bitmask of POOL_REGS indices actually used */
+    int loop_marker;      /* incremented once per loop walked; see LocalInfo.loop_marker */
+    int alloc_loop_depth; /* loops around the statement the allocation walk is on; see
+                             LocalInfo.weight */
     /* Frame slots holding fresh string values that nothing has taken over yet.
      * A temporary lives until the end of the statement that made it, which is
      * the smallest scope that is always reached: `Console.WriteLog(a + b)` allocates a
@@ -511,7 +512,6 @@ static void emit_null_check(CG *cg) {
     buf_printf(cg->out, "  call z_null_deref_fail\n");
     buf_printf(cg->out, ".L%d:\n", lok);
 }
-
 
 static void store_temp(CG *cg, int t) {
     buf_printf(cg->out, "  mov QWORD PTR [rbp - %d], rax\n", temp_off(cg, t));

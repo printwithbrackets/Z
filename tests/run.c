@@ -1188,8 +1188,8 @@ int main(int argc, char **argv) {
      * the check happens, and a build with checks off by default passed them
      * either way. */
     static const char *aborts[] = {
-        "bounds_read", "bounds_write", "bounds_negative", "bounds_runtime_len", "bounds_string",
-        "bounds_in_loop",
+        "bounds_read",        "bounds_write",  "bounds_negative",
+        "bounds_runtime_len", "bounds_string", "bounds_in_loop",
     };
     for (size_t i = 0; i < sizeof aborts / sizeof aborts[0]; i++) {
         snprintf(path, sizeof path, "%s/%s.z", rt_dir, aborts[i]);
