@@ -1471,6 +1471,27 @@ because a return already copies a borrowed string, nor on a return that is not a
 bare identifier — `return new R(5);` and `return helper(x);` have nothing
 already-owned to hand back.
 
+Nor does it fire on a **parameter**, because a parameter is a borrow rather than
+a local: the value behind it is still yours, and the function never destroys it,
+so there is nothing to run before you get it back.
+
+```csharp
+R* relay(R* p) { return p; }        // fine: nothing here is torn down
+```
+
+That hands you back a handle aliasing your own local, so hand your value over at
+the call site:
+
+```csharp
+var r = new R(1);
+var h = relay(move r);               // one drop, in main's scope
+Console.WriteLog(h.Get());           // 1
+```
+
+Write `relay(r)` instead and both `r` and `h` drop at the end of `main`. That is
+the plain-copy aliasing hazard every class handle has here, not something the
+return rule invented — and `move` is the answer to both.
+
 ### Bounds checking
 
 Every index into an array or a string is range-checked at runtime, with no

@@ -1,0 +1,9 @@
+before
+in relay
+after 1
+box 7
+in relay
+relayed 2
+drop 2
+box drop 7
+drop 1

@@ -1163,6 +1163,26 @@ static const char *resolve_fn_sym(Parser *p, const char *name) {
     return name;
 }
 
+/* Marks a just-declared local as a parameter rather than a local statement.
+ *
+ * The distinction is not cosmetic, and it is the reason a parameter is not torn
+ * down when the function returns: a parameter is a borrow, so the value behind
+ * it is still the caller's and the callee's teardown must not destroy it. A
+ * local is the opposite -- the scope ending is what frees it.
+ *
+ * `check_return_of_owned_local` depends on that: `return p;` hands back
+ * something this function was never going to destroy, so it is allowed, while
+ * `return mine;` hands back a local whose destructor is about to run and is a
+ * diagnostic. Nothing set this flag before, so the exemption never fired and
+ * every parameter of a destructor-bearing class was diagnosed as though it were
+ * a local about to be torn down -- the exact failure the flag was written to
+ * prevent, on the one case where it does not apply. */
+static void mark_param(Parser *p, const char *name) {
+    Var *v = lookup_var_local(p, name);
+    if (v != NULL)
+        v->is_param = 1;
+}
+
 static int declare_var(Parser *p, const char *name, Type *type) {
     /* Shadowing an outer variable in a nested block is legal (as in C#); only
      * redeclaring within the same scope is an error. */
@@ -6539,6 +6559,7 @@ static Expr *parse_lambda(Parser *p, Span span) {
             char *pn = cur(p)->text;
             advance(p);
             poffset[np] = declare_var(p, pn, pt);
+            mark_param(p, pn);
             pnames[np] = pn;
             ptypes[np++] = pt;
             if (!match(p, T_COMMA))
@@ -6829,6 +6850,7 @@ static Stmt *parse_func(Parser *p, int nested) {
             pe->name = pname;
             pe->type = pt;
             pe->slot = declare_var(p, pname, pt);
+            mark_param(p, pname);
             if (is_kind(pt, TK_STRUCT) || is_kind(pt, TK_UNION)) {
                 pe->agg_param = 1;
                 Var *pv = lookup_var_local(p, pname);
@@ -7739,6 +7761,7 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     this_var->name = arena_strdup(p->arena, "this");
     this_var->type = this_ty;
     this_var->slot = declare_var(p, "this", this_ty);
+    mark_param(p, "this");
     /* The receiver is reached through every unqualified field and method name,
      * so a method that never writes `this` is still using it. */
     mark_synth(p, "this");
@@ -7769,6 +7792,7 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
             pe->name = pname;
             pe->type = pt;
             pe->slot = declare_var(p, pname, pt);
+            mark_param(p, pname);
             if (is_kind(pt, TK_STRUCT) || is_kind(pt, TK_UNION)) {
                 pe->agg_param = 1;
                 Var *pv = lookup_var_local(p, pname);
