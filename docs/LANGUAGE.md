@@ -333,10 +333,10 @@ Depends on slice 3 and is small because of it.
 Runs alongside 1–4 rather than after, because a golden suite that has not been
 ported yet is the thing that catches slice 3's destructor paths being wrong.
 
-- All 104 golden tests and 82 error tests rewritten to the v2 surface.
+- All 106 golden tests and 84 error tests rewritten to the v2 surface.
 - `lib/collections.z` and `lib/string.z` become structs with destructors.
 - `make test-all` at `-O0`–`-O3` stays the gate, for the reason in
-  [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels--command-line): a pass
+  [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels-command-line): a pass
   that only runs at `-O2` miscompiled once already.
 
 ## Memory safety: what is and is not guaranteed
@@ -654,6 +654,120 @@ collisions instead of fixing them.
 by default. An unexported name used from another namespace is a diagnostic, not
 a silent pass.
 
+## Three tiers of variable
+
+**[now]** A name can denote three different variables. Where it does, the one a
+bare reference means is, in order:
+
+**`lvar`** &rarr; **`var`** &rarr; **`gvar`**
+
+A `gvar` is a variable with storage of its own rather than a frame slot, so it is
+visible from anywhere in the program and outlives every function. An `lvar` is a
+local that outranks a plain `var` of the same name in the same scope -- which is
+why the two may be declared together at all.
+
+```
+gvar base = 10;              // global storage
+int main() {
+    var base = 99;           // shadows the global
+    lvar what = 1;
+    var what = 2;            // both in one scope; lvar wins
+    Console.WriteLog(base);        // 99
+    Console.WriteLog(gvar(base));  // 10
+    Console.WriteLog(what);        // 1
+    Console.WriteLog(var(what));   // 2
+    return 0;
+}
+```
+
+### Spelling
+
+A declaration is spelled `<prefix><TypeName> <name> = <init>;`, where the prefix
+is `g` or `l` and the type word is any type name the compiler knows:
+
+| written | declares |
+|---|---|
+| `gvar x = ...`, `gauto x = ...` | a global, type from the initializer |
+| `gint`, `lint`, `gbool`, `lbool`, `gstring`, `lstring`, `gfloat`, `lfloat` | a global or local of that type |
+| `gFoo x = ...`, `lFoo x = ...` | a global or local of a class or struct `Foo` |
+
+This is one rule rather than a list of keywords, and that is what lets `gFoo`
+work for a `Foo` the compiler has not seen: the prefix and the type name are two
+separate things. Nothing in the lexer changes -- these are ordinary identifiers,
+recognised by what follows them. `gvar why = 1;` is IDENT IDENT `=`, and no
+expression in Z is two identifiers in a row.
+
+An `lvar` at the top level of a file is an ordinary `var`: it is file-scoped
+like any other top-level statement.
+
+### Naming one tier on purpose
+
+`gvar(x)`, `var(x)` and `lvar(x)` name exactly one tier. The priority rule
+answers almost every read, which leaves the other two unreachable -- and there is
+no other way back to the plain `var` that a same-named `lvar` is shadowing.
+
+`var` is a keyword and `gvar`/`lvar` are not, so both spellings are accepted in
+this position. The parenthesis is what tells the two uses apart: `gvar x` is a
+declaration and `gvar(x)` is a reference. Naming a tier that has no such
+variable is the diagnostic `no global named 'x' is in scope here`, rather than a
+silent fall back to whatever the bare name would have meant.
+
+### Where a global's storage lives
+
+Chosen by the initializer rather than by the type:
+
+- a literal initializer is emitted as **`.data`** -- `gint n = 5;` is one
+  instruction's worth of constant, and a `.quad` is smaller and impossible to get
+  wrong at run time
+- anything else is zeroed in **`.bss`** and filled by a generated `z_ginit`,
+  which the entry point calls before `z_main`. This is what lets `gvar x =
+  other;` depend on `other` being set first; only a run-time pass can honour that
+  order.
+
+A string literal is *not* a constant here. A Z string is a `{len, cap}` header
+followed by the bytes, and the header is written by the runtime's string
+constructor, so `gstring s = "hi";` goes through `z_ginit` like any other
+constructed value.
+
+Zeros before `z_ginit` runs rather than whatever was in `.bss`: a program reading
+an uninitialized global reads zero, which is diagnosable.
+
+**A `gvar` is visible across a whole project.** A marker at
+`.zignore/config.z` names the root: the first directory found by walking up
+from the file being compiled that holds one. Every `.z` file under that root is
+then compiled as one program, so a name declared `gvar` in one file is visible
+from every other without an `import`.
+
+```text
+myapp/
+  .zignore/config.z           # the marker; its contents are not read
+  main.z                      # gzz build main.z
+  src/state.z                 # gint total = 10;
+```
+
+```csharp
+// main.z -- no import of src/state.z anywhere
+int main() {
+    Console.WriteLog(total);  // 10
+    return 0;
+}
+```
+
+Three things follow from "the whole project is one program", and each is a
+consequence rather than a rule of its own:
+
+- **Order is the parser's, not the file system's.** Files are collected
+  recursively and sorted, and the file named on the command line is compiled
+  last, so a use is never parsed before the declaration it names. Files are not
+  ordered by dependency; there are no cycles to order around.
+- **One entry point.** Two files that each define `main` is an error naming both,
+  not two symbols at link time.
+- **Dot-directories are skipped.** `.zignore` holds the marker and never joins
+  the unit, and neither does anything else whose name starts with a dot.
+
+With no marker anywhere above the file, nothing changes: the file and whatever it
+imports is the program, exactly as before.
+
 ## References and ownership
 
 **[new]** This is the v2 core. See decision 1.
@@ -859,7 +973,7 @@ a local variable named after a surface name is untouched. A renamed method is
 called and emitted under the internal name, which is what keeps `b.push(x)` from
 type-checking and then failing to link.
 
-The table is the shipped defaults plus a project manifest: `z.surface`, found by
+The table is the shipped defaults plus a project manifest: `.zignore/config.z`, found by
 walking up from the source file, nearest first, one `written = internal` mapping
 per line, `#` for comments. One manifest governs the whole compilation, because
 `import` splices rather than isolates. `--no-surface` ignores it and
@@ -1149,7 +1263,7 @@ a string's header is stored inside its own block rather than in front of it.
   **[now]**
 - `z_str_free(s)` / `z_array_free(p)` — the two header-aware spellings, which
   subtract the header before freeing and skip a literal, whose `cap` is 0.
-  **[now]**, but nothing calls them yet: see [Slice 3](#slice-3--gc-to-raii-and-ownership).
+  **[now]**, but nothing calls them yet: see [Slice 3](#slice-3-gc-to-raii-and-ownership-34-weeks).
 - `z_box` becomes an `Rc` cell with a count.
 - Destructors emitted by the compiler run on every scope exit.
 - A leak report at exit for allocations the runtime can account for. A cycle is a
@@ -1224,9 +1338,12 @@ Loop-invariant code motion shipped exactly that way once.
 The compiler in this repository implements v1. Specifically, all of the following
 is real and tested today, and stays:
 
-- top-level statements, `var`, `Console.WriteLog`, `int`/`bool`/`string`/`float`
+- top-level statements, `var`, `Console.WriteLog`, `int`/`bool`/`string`/`float`,
+  and the three variable tiers -- `gvar` with its own storage, `lvar` beside a
+  plain `var`, and `gvar(x)`/`var(x)`/`lvar(x)` to name one of them
+  ([Three tiers of variable](#three-tiers-of-variable))
 - **surface names**: what a program writes for a global is data, not syntax. A
-  `z.surface` manifest gives a codebase its own dialect over the builtins, the
+  `.zignore/config.z` manifest gives a codebase its own dialect over the builtins, the
   standard library and its own globals, matched without regard to case, and always
   as a fallback so a declared spelling wins. `Console.WriteLog` is one; there is
   no bare `print`, so a program may define its own
@@ -1241,7 +1358,7 @@ is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 231 tests in all — 104 golden, 82 diagnostic, and 45 runtime, interop, module,
+- 235 tests in all — 106 golden, 84 diagnostic, and 45 runtime, interop, module,
   warning and driver tests — with `make test-all` green across four `-O` levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into

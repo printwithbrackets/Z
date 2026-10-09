@@ -1,6 +1,6 @@
 // A project manifest renames what the compiler already has.
 //
-// The names a program writes for a global are data, not syntax: `z.surface` maps
+// The names a program writes for a global are data, not syntax: a manifest maps
 // each spelling a project uses to the name the compiler knows. This is the whole
 // of it -- nothing here is a second compiler, a second runtime, or a second set
 // of emitted symbols. `say` reaches the `print` that has always been there, and
@@ -39,6 +39,11 @@ int main() {
     // *different* function from the one `say = print` names, and a program that
     // declares the spelling keeps the declaration.
     say(shout("quiet"));
+
+    // A right-hand side may be an alias itself: `report` is reached through
+    // `show`, which is reached through `console.writelog`, which is the shipped
+    // name for `print`. Each hop is one a reader would have written.
+    report("through the chain");
 
     return 0;
 }

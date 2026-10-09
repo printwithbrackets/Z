@@ -8,10 +8,12 @@
 
 #include "surface.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -187,10 +189,46 @@ static char *strdup_or_die(const char *s);
  * long path cannot quietly eat the space an argument after it needs. */
 #define MAX_LINK_ARGS 256
 
-#define MAX_FILES 64
-static const char *loaded_path[MAX_FILES];  /* paths already expanded (arena-owned) */
-static const char *loading_path[MAX_FILES]; /* on the current expansion stack */
-static int n_loaded = 0, n_loading = 0;
+/* The marker that turns a directory into a project. Its contents are not read:
+ * it exists so the compiler can find the root, and so that a project which
+ * moves does not have to be told where it moved to.
+ *
+ * `config.z` and not, say, `project.z`: the file lives in `.zignore`, beside the
+ * patterns already ignored there, so it is skipped as a source by the same rule
+ * that skips them. A marker named after its location rather than its contents
+ * would have to be matched separately.
+ *
+ * It is also the surface manifest (SURFACE_FILE, the same string), so this name
+ * now describes what is in it. A project with an empty `config.z` gets a project
+ * and the shipped names; a project with mappings in it gets a dialect too. */
+#define PROJECT_MARKER ".zignore/config.z"
+
+/* Files already expanded into the unit, and the ones on the current expansion
+ * stack.
+ *
+ * Grown rather than fixed. 64 was generous for an import tree -- a cap rather
+ * than a number anyone hit -- but a project is every `.z` under its root, and a
+ * tree of a hundred files would have failed with "too many imported files" and
+ * no way to raise it. */
+static const char **loaded_path = NULL; /* already expanded (arena-owned) */
+static int n_loaded = 0, loaded_cap = 0;
+static const char **loading_path = NULL; /* on the current expansion stack */
+static int n_loading = 0, loading_cap = 0;
+
+static void list_push(const char ***list, int *n, int *cap, const char *path) {
+    if (*n == *cap) {
+        int ncap = *cap == 0 ? 16 : *cap * 2;
+        const char **bigger = malloc((size_t)ncap * sizeof *bigger);
+        if (bigger == NULL)
+            die_oom();
+        if (*n > 0)
+            memcpy(bigger, *list, (size_t)*n * sizeof *bigger);
+        free(*list);
+        *list = bigger;
+        *cap = ncap;
+    }
+    (*list)[(*n)++] = path;
+}
 
 /* Directory part of `path`, as a fresh string ("." when there is none). */
 static char *dir_of(const char *path) {
@@ -231,6 +269,255 @@ static char *strdup_or_die(const char *s) {
     return out;
 }
 
+/* ---- the project: `.zignore/config.z` ----
+ *
+ * A `gvar` is meant to be visible to every file in a project rather than to one
+ * compilation unit, and "a project" has to be a directory on disk rather than
+ * whatever happened to be imported.
+ *
+ * With a marker, every `.z` under the root joins the unit, so a name declared in
+ * any of them is in scope in all of them. Without one nothing changes: the file
+ * and its imports, which is what a single-file program always got.
+ */
+
+/* The directory holding `.zignore/config.z`, searched upward from the file
+ * being compiled. NULL when there is no project.
+ *
+ * Walked upward rather than asking about one directory, because the marker is the
+ * only statement of where the project is and a source file is usually several
+ * levels below it. Stops when the parent resolves to the directory it started
+ * from, which is how the filesystem root is recognised: `..` of `/` is `/`, and a
+ * walk that trusted it would never end. */
+/* The directory one level up, as a fresh string. "/" for the root, so a
+ * caller walking up stops rather than looping: the parent of "/" is "/". */
+/* `dir` and `name` joined, as a fresh string.
+ *
+ * Not `resolve_import`, which serves import statements and takes the *importer's*
+ * directory via `dir_of`. That returns everything before the last slash, so for
+ * "./src" it is ".", and joining it to a name found inside that directory
+ * rebuilt the path as "./lib.z" -- one level up, where nothing exists. Discovery
+ * needs the directory it was given, joined with what it found, unchanged. */
+static char *join_under(const char *dir, const char *name) {
+    size_t need = strlen(dir) + 1 + strlen(name) + 1;
+    char *out = malloc(need);
+    if (out == NULL)
+        die_oom();
+    snprintf(out, need, "%s/%s", dir, name);
+    return out;
+}
+
+/* `src` as an absolute path, or NULL if the working directory is unreadable.
+ *
+ * Everything about discovery is done in absolute paths, because the walk up from
+ * a file has to end somewhere. On a relative path that end is not decidable:
+ * ".." has no last component to drop, so the parent of ".." is "..", and the
+ * walk never reaches the root. Absolute paths always do. */
+/* `path` with "." and ".." resolved and slashes collapsed, as a fresh string.
+ *
+ * Lexical, not realpath: a ".." that crosses a symlink names a different
+ * directory than the text suggests, but resolving it would mean reading the
+ * filesystem for a path the user merely typed, and it would make the set of
+ * project files depend on which symlink was followed. Textual resolution keeps
+ * the unit reproducible.
+ *
+ * The two spellings of one file have to compare equal as strings, and that is
+ * the whole reason this exists. Compiling "../dmain.z" from a subdirectory and
+ * compiling "/abs/proj/deep/dmain.z" reach the same file; if they compared
+ * unequal, discovery would treat the entry point as a second, unrelated file,
+ * expand it twice, and every declaration in it would collide with itself. */
+static char *normalize_path(const char *path) {
+    size_t cap = strlen(path) + 2;
+    size_t *starts = malloc(cap * sizeof *starts);
+    size_t *lens = malloc(cap * sizeof *lens);
+    if (starts == NULL || lens == NULL)
+        die_oom();
+
+    size_t depth = 0;
+    const char *p = path;
+    while (*p != '\0') {
+        while (*p == '/')
+            p++;
+        if (*p == '\0')
+            break;
+        const char *seg = p;
+        while (*p != '\0' && *p != '/')
+            p++;
+        size_t seglen = (size_t)(p - seg);
+        if (seglen == 1 && seg[0] == '.')
+            continue;
+        if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
+            /* Ascend. On an absolute path there is always the root left to stop
+             * at, so this cannot empty the component list. */
+            if (depth > 0)
+                depth--;
+            continue;
+        }
+        starts[depth] = (size_t)(seg - path);
+        lens[depth] = seglen;
+        depth++;
+    }
+
+    /* "/" when empty, so an absolute path stays absolute. */
+    size_t total = 1;
+    for (size_t i = 0; i < depth; i++)
+        total += lens[i] + 1;
+    char *out = malloc(total);
+    if (out == NULL)
+        die_oom();
+    size_t at = 0;
+    out[at++] = '/';
+    for (size_t i = 0; i < depth; i++) {
+        memcpy(out + at, path + starts[i], lens[i]);
+        at += lens[i];
+        if (i + 1 < depth)
+            out[at++] = '/';
+    }
+    out[at] = '\0';
+    free(starts);
+    free(lens);
+    return out;
+}
+
+static char *abs_path(const char *src) {
+    char *raw;
+    if (src[0] == '/') {
+        raw = strdup_or_die(src);
+    } else {
+        char *cwd = getcwd(NULL, 0);
+        if (cwd == NULL)
+            return NULL;
+        raw = join_under(cwd, src);
+        free(cwd);
+    }
+    char *out = normalize_path(raw);
+    free(raw);
+    return out;
+}
+
+/* The directory one level up, as a fresh string. "/" for the root, so a caller
+ * walking up stops rather than looping: the parent of "/" is "/".
+ *
+ * `dir` must be absolute and free of "." and ".." components -- both are true of
+ * what find_project_root builds, which is why strip_trailing_dots runs first. */
+static char *dir_parent(const char *dir) {
+    size_t len = strlen(dir);
+    while (len > 1 && dir[len - 1] == '/')
+        len--;
+    if (len <= 1)
+        return strdup_or_die("/");
+    size_t cut = len;
+    while (cut > 0 && dir[cut - 1] != '/')
+        cut--;
+    size_t n = cut - 1;
+    if (n == 0)
+        return strdup_or_die("/");
+    char *out = malloc(n + 1);
+    if (out == NULL)
+        die_oom();
+    memcpy(out, dir, n);
+    out[n] = 0;
+    return out;
+}
+
+/* The nearest ancestor of `src` holding the project marker, or NULL. */
+static char *find_project_root(const char *src) {
+    char *full = abs_path(src);
+    if (full == NULL)
+        return NULL;
+    char *dir = dir_of(full);
+    free(full);
+    for (;;) {
+        char *marker = join_under(dir, PROJECT_MARKER);
+        int found = access(marker, F_OK) == 0;
+        free(marker);
+        if (found)
+            return dir;
+        char *up = dir_parent(dir);
+        if (strcmp(up, dir) == 0) {
+            free(up);
+            free(dir);
+            return NULL;
+        }
+        free(dir);
+        dir = up;
+    }
+}
+
+/* qsort over an array of `const char *`, in string order.
+ *
+ * Collection order is the order readdir happens to hand back, which differs
+ * between machines and runs. Sorting is not tidiness: the parser reads one
+ * concatenated token stream, so which file is parsed first decides which
+ * declarations exist by the time a later file is read. */
+static int cmp_str_ptr(const void *a, const void *b) {
+    const char *const *x = a;
+    const char *const *y = b;
+    return strcmp(*x, *y);
+}
+
+static int collect_project_files(const char *dir, const char ***out) {
+    int cap = 16, n = 0;
+    const char **paths = malloc((size_t)cap * sizeof *paths);
+    if (paths == NULL)
+        die_oom();
+
+    DIR *d = opendir(dir);
+    if (d == NULL) {
+        free(paths);
+        return -1;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.')
+            continue;
+        char *full = join_under(dir, ent->d_name);
+        if (full == NULL)
+            continue;
+        struct stat st;
+        if (stat(full, &st) != 0) {
+            free(full);
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            const char **sub = NULL;
+            int nsub = collect_project_files(full, &sub);
+            for (int i = 0; i < nsub; i++) {
+                if (n == cap) {
+                    cap *= 2;
+                    const char **bigger = malloc((size_t)cap * sizeof *bigger);
+                    if (bigger == NULL)
+                        die_oom();
+                    memcpy(bigger, paths, (size_t)n * sizeof *paths);
+                    free(paths);
+                    paths = bigger;
+                }
+                paths[n++] = sub[i];
+            }
+            free(sub);
+        } else if (S_ISREG(st.st_mode)) {
+            size_t len = strlen(ent->d_name);
+            if (len > 2 && strcmp(ent->d_name + len - 2, ".z") == 0) {
+                if (n == cap) {
+                    cap *= 2;
+                    const char **bigger = malloc((size_t)cap * sizeof *bigger);
+                    if (bigger == NULL)
+                        die_oom();
+                    memcpy(bigger, paths, (size_t)n * sizeof *paths);
+                    free(paths);
+                    paths = bigger;
+                }
+                paths[n++] = full;
+                continue;
+            }
+        }
+        free(full);
+    }
+    closedir(d);
+    qsort(paths, (size_t)n, sizeof *paths, cmp_str_ptr);
+    *out = paths;
+    return n;
+}
+
 static int path_listed(const char **list, int n, const char *p) {
     for (int i = 0; i < n; i++)
         if (strcmp(list[i], p) == 0)
@@ -265,10 +552,6 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
      * would all end up naming whichever path was allocated last. */
     char *stable = arena_strdup(arena, path);
     path = stable;
-    if (n_loaded >= MAX_FILES || n_loading >= MAX_FILES) {
-        fprintf(stderr, "%s: too many imported files (limit %d)\n", s_prog, MAX_FILES);
-        return 1;
-    }
     if (path_listed(loaded_path, n_loaded, path))
         return 0; /* already in the unit; a second import is a no-op */
     if (path_listed(loading_path, n_loading, path)) {
@@ -276,7 +559,7 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
                 path);
         return 1;
     }
-    loading_path[n_loading++] = path; /* arena-owned */
+    list_push(&loading_path, &n_loading, &loading_cap, path); /* arena-owned */
 
     long len = 0;
     char *text = read_file(path, &len); /* reports the open failure itself */
@@ -345,8 +628,7 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
     }
 
     n_loading--;
-    if (n_loaded < MAX_FILES)
-        loaded_path[n_loaded++] = path; /* arena-owned, freed with the arena */
+    list_push(&loaded_path, &n_loaded, &loaded_cap, path); /* arena-owned */
     return 0;
 }
 
@@ -410,6 +692,51 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         arena_free(&arena);
         free(text);
         return 1;
+    }
+    /* The project, then the named file.
+     *
+     * The file the command line named goes last so its own declarations are the
+     * ones an error about *this file* is about, and so a build script that
+     * compiles one entry point does not silently get a different unit depending
+     * on which file it named. Files already pulled in by an import are skipped by
+     * expand_file itself, so a project that also imports does not compile any of
+     * them twice. */
+    char *root = find_project_root(src);
+    if (root != NULL) {
+        /* The scan hands back absolute paths, so the file named on the command
+         * line has to be compared in that form too. */
+        char *abs_src = abs_path(src);
+        const char **files = NULL;
+        int nfiles = collect_project_files(root, &files);
+        for (int i = 0; i < nfiles; i++) {
+            /* The file the command line named is skipped here and expanded after
+             * the loop, so the unit reads the project first. Order is not
+             * cosmetic: the parser walks one token stream, so a use that appears
+             * before its declaration is a use of something not yet declared. */
+            if (abs_src != NULL && strcmp(files[i], abs_src) == 0) {
+                free((char *)files[i]);
+                continue;
+            }
+            if (expand_file(&arena, files[i], &toks, &ntoks, &tcap, &strings) != 0) {
+                for (int j = i; j < nfiles; j++)
+                    free((char *)files[j]);
+                free(files);
+                free(root);
+                free(abs_src);
+                arena_free(&arena);
+                free(text);
+                return 1;
+            }
+            free((char *)files[i]);
+        }
+        free(files);
+        free(root);
+        free(abs_src);
+        if (diag_error_count() > 0) {
+            arena_free(&arena);
+            free(text);
+            return 1;
+        }
     }
     if (expand_file(&arena, src, &toks, &ntoks, &tcap, &strings) != 0 || diag_error_count() > 0) {
         arena_free(&arena);
@@ -481,6 +808,32 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
     copt.bounds_checks = bounds_checks;
     copt.debug_info = debug_info;
     copt.opt_level = opt_level;
+
+    /* The gvars, in two passes: one to learn how many there are so the array can
+     * be sized, and one to fill it. A fixed array would be a second thing to
+     * keep in step with the parser, and a project is not a bounded number of
+     * globals. */
+    int nglobals = parse_globals(&arena, program, NULL, 0);
+    copt.globals = NULL;
+    copt.nglobals = 0;
+    if (nglobals > 0) {
+        ParsedGlobal *pg = arena_alloc_array(&arena, (size_t)nglobals, sizeof *pg);
+        parse_globals(&arena, program, pg, nglobals);
+        GlobalTable *gt = arena_alloc_array(&arena, (size_t)nglobals, sizeof *gt);
+        for (int i = 0; i < nglobals; i++) {
+            memset(&gt[i], 0, sizeof gt[i]);
+            gt[i].name = pg[i].name;
+            gt[i].sym = codegen_global_sym(&arena, pg[i].name);
+            gt[i].type = pg[i].type;
+            gt[i].init = pg[i].init;
+            gt[i].is_const = pg[i].is_const;
+            gt[i].ival = pg[i].ival;
+            gt[i].dval = pg[i].dval;
+        }
+        copt.globals = gt;
+        copt.nglobals = nglobals;
+    }
+
     char *asm_text = codegen_emit_opts(&arena, program, &strings, &copt);
 
     if (asm_path != NULL) {

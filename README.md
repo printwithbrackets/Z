@@ -40,12 +40,12 @@ reachable only through one of those, are all still live at exit. Leaks are the
 safe direction to be wrong in, which is why the frees are wired up per type
 rather than all at once.
 
-Leaks are also the only thing the suite is clean of. All 104 golden cases, which
+Leaks are also the only thing the suite is clean of. All 106 golden cases, which
 are the ones that produce a program to run, build and run under
 AddressSanitizer with no use-after-free, no double free and no buffer overflow.
-The rest of the 231 tests are diagnostics and gates, none of which runs a
-program, so "the suite is clean under ASan" is a statement about those 104 and
-not about the other 127. And it is a statement about the suite rather than about
+The rest of the 235 tests are diagnostics and gates, none of which runs a
+program, so "the suite is clean under ASan" is a statement about those 106 and
+not about the other 129. And it is a statement about the suite rather than about
 the language:
 a program outside it can release a captured string's cell instead of its string,
 or hand an already-released field to a destructor. Both are known, and each is
@@ -141,16 +141,19 @@ int main() {
 }
 ```
 
-A `z.surface` file beside your code renames what a program writes for a global —
-the builtins, the standard library, your own globals — so a codebase can be
-written in its own dialect. It is found by walking up from the source file, and
-`--no-surface` ignores it:
+A `.zignore/config.z` renames what a program writes for a global — the builtins,
+the standard library, your own globals — so a codebase can be written in its own
+dialect. It is found by walking up from the source file, and `--no-surface`
+ignores it:
 
 ```sh
-# z.surface:  say = print
+# .zignore/config.z:  say = print
 ./z run hello.z                  # a program in this project's dialect
 ./z run hello.z --no-surface     # the shipped names only
 ```
+
+This is the same file that marks a project root, so a project that renames names
+and a project that spans many files say so in one place.
 
 The output path and those pass-through arguments are handed to the C toolchain
 as a real argument vector, never through a shell, so a path containing a quote,
@@ -227,6 +230,34 @@ let g:z_compiler = '/usr/local/bin/z'
 both run the `z` binary beside this checkout, so a clone needs nothing on `$PATH`.
 
 ## Quick tour
+
+Three tiers of variable share one namespace, and where they collide the
+priority is **lvar, then var, then gvar**:
+
+```csharp
+gvar base = 10;        // a global: its own storage, not a frame slot
+
+int main() {
+    var base = 99;             // a plain var, which shadows the global
+    lvar what = 1;
+    var what = 2;              // both may share a name; lvar wins
+
+    Console.WriteLog(base);          // 99
+    Console.WriteLog(gvar(base));    // 10, the global, named on purpose
+    Console.WriteLog(what);          // 1
+    Console.WriteLog(var(what));     // 2
+    return 0;
+}
+```
+
+`g` and `l` in front of a type name declare a global or a function-local:
+`gvar lvar gint lint gbool lbool gstring lstring gfloat lfloat gFoo lFoo` are one
+rule, so `gFoo` works for a `Foo` that does not exist yet. `gvar(x)`, `var(x)`
+and `lvar(x)` name one tier on purpose, which is the only way to reach the
+declarations the priority rule hides. A `gvar` is visible across a whole project:
+put a `.zignore/config.z` marker in the project root and every `.z` file
+under it compiles as one program, with no `import` needed. See
+[docs/LANGUAGE.md](docs/LANGUAGE.md#three-tiers-of-variable).
 
 ```csharp
 // Top-level statements — no main() boilerplate.
@@ -325,7 +356,7 @@ system assembler — we do not write an ELF encoder.
 - **M3 (done):** C# sugar: properties, `$""` string interpolation, expression-bodied members, `operator` overloading, extension methods.
 - **Surface names (done):** the spelling a program uses for a global is data
   rather than syntax, so a codebase can be written in its own dialect. A
-  `z.surface` manifest beside the code maps each name a project writes to the name
+  `.zignore/config.z` manifest maps each name a project writes to the name
   the compiler knows — builtins, standard-library types and their methods, and the
   project's own globals — and matching ignores case, so `say`, `Say` and `SAY`
   are one name. Nothing else changes: the compiler, the runtime and the emitted
@@ -1009,7 +1040,7 @@ the compiler in this repository implements.
 
 The two documents are kept side by side on purpose. v2 changes the language, not
 the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
-diagnostics system, the 104 golden tests — are still the spec for the parts that
+diagnostics system, the 106 golden tests — are still the spec for the parts that
 do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License

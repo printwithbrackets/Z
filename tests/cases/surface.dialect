@@ -6,3 +6,11 @@ Buffer = StringBuilder
 add = append
 addInt = appendInt
 finish = toString
+
+# A right-hand side may itself be an alias, followed to a name nothing maps
+# further. Written the way a person would: reaching for the name already
+# aliased rather than for the compiler's own.
+show = console.writelog
+
+# ...and through a chain of them.
+report = show

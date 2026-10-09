@@ -1,0 +1,14 @@
+// A project compiles all of its files as one program, so the globals and
+// functions in src/ are in scope here with no import statement anywhere.
+int main() {
+    Console.WriteLog(total);         // 10, declared in src/state.z
+    Console.WriteLog(label);         // shared
+    Console.WriteLog(double_it(4));  // 8, from src/lib.z
+
+    total = total + 5;               // a global is writable from any file
+    Console.WriteLog(total);         // 15
+
+    var total = 99;                  // a plain local may shadow a global
+    Console.WriteLog(total);         // 99
+    return 0;
+}

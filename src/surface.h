@@ -77,7 +77,7 @@ int surface_load(Surface *s, const char *path);
 /* Finds the manifest that governs `src_path` and loads it, if there is one.
  *
  * The search starts at the directory holding `src_path` and walks up to the
- * filesystem root, taking the first `z.surface` it finds. Taking the *nearest*
+ * filesystem root, taking the first SURFACE_FILE it finds. Taking the *nearest*
  * one is what makes a dialect a property of a subtree: a project vendored inside
  * another keeps its own. One manifest governs the whole compilation rather than
  * one per file, because `import` splices rather than isolates -- a file has no
@@ -86,10 +86,17 @@ int surface_load(Surface *s, const char *path);
  * therefore read in that project's dialect, and that is the same rule `import`
  * already follows.
  *
+ * This finds the same file the project marker is. One file doing both jobs is
+ * the point: a project that renames a name and a project that spans many files
+ * are the same decision about where this code ends, and a project that had to
+ * keep a manifest and a project marker in step would eventually not.
+ *
  * Returns 1 if a manifest was loaded, 0 if there was none, -1 on error. */
 int surface_discover(Surface *s, const char *src_path);
 
-/* The file name a manifest is looked for under. */
-#define SURFACE_FILE "z.surface"
+/* The file a manifest is looked for under, and the same file that marks a
+ * project root. It is a manifest, not just a marker: it may be empty, and an
+ * empty one is a project with the shipped names. */
+#define SURFACE_FILE ".zignore/config.z"
 
 #endif /* Z_SURFACE_H */
