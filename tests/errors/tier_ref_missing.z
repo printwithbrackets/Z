@@ -1,0 +1,5 @@
+// `gvar(x)` names the global and only the global, so naming one that does not
+// exist is a diagnostic rather than a fall back to whatever the plain name
+// would have resolved to. Silently reading the var instead would make the form
+// useless exactly where it is most needed.
+int main() { Console.WriteLog(gvar(missing)); return 0; }

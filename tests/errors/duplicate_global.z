@@ -1,0 +1,7 @@
+// Two globals of one name. The second is a diagnostic rather than a second
+// symbol, because a duplicate label is the assembler's problem to find and not
+// something a program can be correct about.
+gint counter = 1;
+gint counter = 2;
+
+int main() { return counter; }

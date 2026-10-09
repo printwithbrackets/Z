@@ -341,11 +341,6 @@ typedef struct {
      * needing a separate priority rule. */
     GlobalDef *globals;
     int nglobals;
-    /* The file being parsed, for a diagnostic that has to name it. A global is
-     * the one declaration that can be written in a file other than the one
-     * reading it, so "already declared" is only actionable with the other file's
-     * name in it. */
-    const char *cur_file_name;
     /* Set while parsing an `lvar`, so declare_var can tell a tier change from a
      * genuine duplicate. See the check there. */
     int declaring_lvar;
@@ -1088,8 +1083,6 @@ static Var *resolve_var(Parser *p, const char *name, int mark) {
     GlobalDef *g = find_global(p, name);
     if (g != NULL) {
         Var *v = global_var_ref(p, g);
-        if (getenv("Z_DEBUG_GLOBAL") != NULL)
-            fprintf(stderr, "[gvar] resolve '%s' -> global gidx=%d\n", name, g->gidx);
         if (v != NULL && mark)
             v->used = 1;
         return v;
@@ -3831,6 +3824,9 @@ static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
 }
 
 /* Postfix suffixes: indexing, .length, postfix ++/--, and `?`. */
+static Expr *parse_postfix(Parser *p, Expr *e);
+static void expect_semi(Parser *p);
+
 static Expr *parse_postfix(Parser *p, Expr *e) {
     for (;;) {
         if (at(p, T_QUESTION) && type_is_result(e->type)) {
@@ -4707,7 +4703,132 @@ static Expr *parse_qualified(Parser *p, char *base, Span span) {
     return parse_call(p, (char *)internal, span, 1);
 }
 
+/* ---- naming one tier on purpose: `gvar(x)`, `var(x)`, `lvar(x)` ----
+ *
+ * With three tiers under one name, the priority rule answers almost every read
+ * and hides the other two. `var what = 2; lvar what = 1;` means 1 everywhere in
+ * that body, and there is no spelling that reaches the 2 -- which is fine until
+ * the 2 is what you meant.
+ *
+ * So the three tier keywords are also names of their own when they are followed
+ * by a parenthesis: `gvar(why)` is the global and only the global, `var(why)`
+ * is the plain one, `lvar(why)` the local. It reads like a cast and is not one:
+ * it is a way of saying which declaration, of three with one name, a line means.
+ *
+ * `var` is a keyword and `gvar`/`lvar` are not, so both token kinds are accepted
+ * here. Without the parenthesis these are declarations, which is why the `(` is
+ * what tells the two apart -- the same test that separates a prefixed
+ * declaration from an expression, and for the same reason.
+ */
+static int at_tier_ref(Parser *p, int *prefix) {
+    const char *t;
+    if (at(p, T_IDENT))
+        t = cur(p)->text;
+    else if (at(p, T_KW_VAR))
+        t = "var";
+    else
+        return 0;
+    if (peek(p, 1)->kind != T_LPAREN)
+        return 0;
+    if (strcmp(t, "var") == 0)
+        *prefix = 0;
+    else if (strcmp(t, "lvar") == 0)
+        *prefix = 'l';
+    else if (strcmp(t, "gvar") == 0)
+        *prefix = 'g';
+    else
+        return 0;
+    return 1;
+}
+
+/* The binding `name` denotes in exactly one tier. NULL when there is none.
+ *
+ * The scope walk is the ordinary one with the other tiers skipped, rather than a
+ * separate search, so a name reached from a nested block is reached the same way
+ * a bare one is -- `gvar(x)` inside three blocks of a function still finds the
+ * gvar, which is the only thing that makes the form worth having. */
+static Var *resolve_tier(Parser *p, const char *name, int prefix, int mark) {
+    if (prefix == 'g') {
+        GlobalDef *g = find_global(p, name);
+        if (g == NULL)
+            return NULL;
+        Var *v = global_var_ref(p, g);
+        if (mark)
+            v->used = 1;
+        return v;
+    }
+    for (Scope *sc = p->scope; sc != NULL; sc = sc->parent) {
+        for (Var *v = sc->vars; v != NULL; v = v->next) {
+            if (strcmp(v->name, name) != 0)
+                continue;
+            /* is_lvar is exactly "is an lvar", so the plain tier is its negation
+             * -- and is_global covers neither, though a global has no scope to
+             * be found in anyway. `prefix` is a character rather than a flag, so
+             * it is asked as the question it stands for. */
+            if (v->is_global || (v->is_lvar != 0) != (prefix == 'l'))
+                continue;
+            if (mark)
+                v->used = 1;
+            return v;
+        }
+        if (sc->is_fn_body)
+            break;
+    }
+    return NULL;
+}
+
+static Expr *parse_tier_ref(Parser *p, int prefix) {
+    Span start = cur(p)->span;
+    advance(p); /* the keyword */
+    advance(p); /* '(' */
+    Span nspan = cur(p)->span;
+    if (!at(p, T_IDENT)) {
+        diag_error(cur(p)->span, "expected a variable name inside '%s(...)'",
+                   prefix == 'g' ? "gvar" : (prefix == 'l' ? "lvar" : "var"));
+        expect_semi(p);
+        return new_expr(p, E_INT, start);
+    }
+    char *name = cur(p)->text;
+    advance(p);
+    if (!match(p, T_RPAREN)) {
+        diag_error(cur(p)->span, "expected ')' after '%s(%s'", prefix == 'g' ? "gvar" : "var",
+                   name);
+        while (at(p, T_IDENT) || at(p, T_RPAREN))
+            advance(p);
+        match(p, T_RPAREN);
+        return new_expr(p, E_INT, start);
+    }
+
+    Var *v = resolve_tier(p, name, prefix, 1);
+    if (v == NULL) {
+        const char *what = prefix == 'g' ? "global" : (prefix == 'l' ? "lvar" : "variable");
+        diag_error_code(nspan, "undefined_variable", "no %s named '%s' is in scope here", what,
+                        name);
+        Expr *e = new_expr(p, E_VAR, nspan);
+        e->name = name;
+        return e;
+    }
+
+    Expr *e = new_expr(p, E_VAR, nspan);
+    e->name = name;
+    if (v->is_global) {
+        GlobalDef *g = find_global(p, name);
+        e->gidx = g != NULL ? g->gidx : -1;
+        e->slot = -1;
+    } else {
+        e->slot = v->offset;
+    }
+    e->type = v->type;
+    e->agg_param = v->agg_param;
+    return parse_postfix(p, e);
+}
+
 static Expr *parse_primary(Parser *p) {
+    {
+        int prefix = 0;
+        if (at_tier_ref(p, &prefix))
+            return parse_tier_ref(p, prefix);
+    }
     Token *t = cur(p);
     switch (t->kind) {
     case T_INT: {
@@ -4987,9 +5108,6 @@ static Expr *parse_primary(Parser *p) {
             GlobalDef *g = find_global(p, name);
             e->gidx = g != NULL ? g->gidx : -1;
             e->slot = -1;
-            if (getenv("Z_DEBUG_GLOBAL") != NULL)
-                fprintf(stderr, "[gvar] use '%s' v->is_global=1 g=%p gidx=%d\n", name, (void *)g,
-                        e->gidx);
         } else {
             e->slot = v->offset;
         }
@@ -5786,9 +5904,14 @@ static int init_is_constant(Expr *e) {
     case E_INT:
     case E_F64:
     case E_BOOL:
-    case E_STRING:
     case E_NULL:
         return 1;
+    /* Deliberately not E_STRING. A Z string is a `{len, cap}` header followed by
+     * the bytes, and the header is written by the runtime's string constructor --
+     * a literal is an instruction to build one, not a pointer to a finished
+     * value. Emitting the pointer as data gave a global whose length was zero, so
+     * it printed as the empty string however long the literal was. It goes
+     * through z_ginit like any other constructed value. */
     default:
         return 0;
     }
@@ -5801,8 +5924,13 @@ static int init_is_constant(Expr *e) {
 static Var *declare_global(Parser *p, const char *name, Type *type, Expr *init, Span span) {
     for (GlobalDef *g = p->globals; g != NULL; g = g->next) {
         if (strcmp(g->name, name) == 0) {
-            diag_error_code(span, "duplicate_global", "global '%s' is already declared in %s", name,
-                            g->file != NULL ? g->file : "another file");
+            /* Naming the file is the whole point of the diagnostic once a
+             * project has more than one: a name declared twice in one file is a
+             * mistake in a paragraph, and the same name in two files is a
+             * disagreement about what it means. The span carries the path, so
+             * there is nothing to keep in sync. */
+            diag_error_code(span, "duplicate_global", "global '%s' is already declared at %s:%d",
+                            name, g->file != NULL ? g->file : "?", g->decl_span.line);
             return NULL;
         }
     }
@@ -5812,7 +5940,7 @@ static Var *declare_global(Parser *p, const char *name, Type *type, Expr *init, 
     g->type = type;
     g->init = init;
     g->decl_span = span;
-    g->file = p->cur_file_name;
+    g->file = span.file;
     g->init_is_const = init_is_constant(init);
     /* Prepended, so the list runs newest-first; gidx counts the other way so the
      * emitted table is in declaration order. Two orders for one list would be a

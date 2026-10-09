@@ -363,6 +363,7 @@ int main(int argc, char **argv) {
         "destructors",
         "strreturn",
         "return_param",
+        "gvar_lvar",
         "stdin",
         "surface",
         "typeof",
@@ -519,6 +520,8 @@ int main(int argc, char **argv) {
     static const char *errs[] = {
         "undefined_var",
         "return_owned_local",
+        "duplicate_global",
+        "tier_ref_missing",
         "type_mismatch",
         "dup_struct_method",
         "bare_return_nonvoid",

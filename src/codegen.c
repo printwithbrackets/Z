@@ -697,6 +697,15 @@ static void gen_float(CG *cg, Expr *e) {
          * own lambda is rewritten to `*env[k]` and so arrives as an E_DEREF; this
          * case is the enclosing function reading the same variable, and it has to
          * dereference too. */
+        const char *gsym = global_sym(cg, e->gidx);
+        if (gsym != NULL) {
+            /* gen_float has its own E_VAR arm, so the arm gen_expr was given
+             * does not cover a float read -- and `slot` is -1 for a global,
+             * which here read as `[rbp - -1]`: the saved frame pointer, as a
+             * denormal about 1e-38. */
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + %s]\n", XMM_ACC, gsym);
+            return;
+        }
         if (e->agg_param)
             buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
         else if (e->boxed) {
@@ -946,7 +955,12 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         return;
     switch (e->kind) {
     case E_VAR:
-        li_use(cg, e->slot, idx);
+        /* A global is not in the allocator: it has no slot, and slot -1 handed
+         * to li_for would create a LocalInfo for it, which the register
+         * allocator would then keep. Reads and writes would both go to that
+         * invented register and the global in memory would never change. */
+        if (e->gidx < 0)
+            li_use(cg, e->slot, idx);
         break;
     case E_ADDR:
         /* `&x` materializes the value of x; for a scalar that is a load, but
@@ -990,9 +1004,14 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         walk_alloc_expr(cg, e->lhs, idx); /* pointer value */
         break;
     case E_ASSIGN:
-        if (e->lhs != NULL && e->lhs->kind == E_VAR) {
+        if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0) {
             li_def(cg, e->lhs->slot, idx);
             li_for(cg, e->lhs->slot)->reassigned = 1;
+        } else if (e->lhs != NULL && e->lhs->kind == E_VAR) {
+            /* A global destination: no slot to define. mark_addr_taken is not
+             * wanted either -- it would disqualify a base that has no frame
+             * slot -- and there is nothing else to record, because the write is
+             * visible to every function in the program. */
         } else {
             /* The one that shows. Unlike the four above, this walks the
              * destination without marking it ineligible, because the
@@ -2576,8 +2595,9 @@ static void gen_expr_body(CG *cg, Expr *e) {
         /* The two orders, which is the entire point of the node: read the old
          * value, write the new one, and yield the old. A register-resident local
          * is two instructions. */
-        const char *lreg =
-            (e->lhs->kind == E_VAR && !e->lhs->agg_param) ? local_reg(cg, e->lhs->slot) : NULL;
+        const char *lreg = (e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !e->lhs->agg_param)
+                               ? local_reg(cg, e->lhs->slot)
+                               : NULL;
         if (lreg != NULL) {
             buf_printf(cg->out, "  mov rax, %s\n", lreg);
             buf_printf(cg->out, "  %s %s, 1\n", e->op == T_PLUS ? "add" : "sub", lreg);
@@ -3098,7 +3118,8 @@ static void gen_expr_body(CG *cg, Expr *e) {
         int t_old = -1;
         if (e->frees_old) {
             t_old = temp_alloc(cg);
-            if (e->lhs != NULL && e->lhs->kind == E_VAR && !e->lhs->agg_param && !e->lhs->boxed) {
+            if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !e->lhs->agg_param &&
+                !e->lhs->boxed) {
                 const char *oreg = local_reg(cg, e->lhs->slot);
                 if (oreg != NULL)
                     buf_printf(cg->out, "  mov %s, %s\n", "rax", oreg);
@@ -3221,7 +3242,8 @@ static void gen_expr_body(CG *cg, Expr *e) {
         /* A scalar LHS that lives in a register is written in place; no
          * address is materialized. */
         const char *lreg = NULL;
-        if (e->lhs != NULL && e->lhs->kind == E_VAR && !is_aggregate(e->type) && !e->lhs->agg_param)
+        if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !is_aggregate(e->type) &&
+            !e->lhs->agg_param)
             lreg = local_reg(cg, e->lhs->slot);
 
         if (lreg != NULL) {
@@ -3476,7 +3498,8 @@ static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
         long long cr;
         int lhs_direct = 0;
         const char *lreg = NULL;
-        if (cond->lhs->kind == E_VAR && !cond->lhs->agg_param && !is_aggregate(cond->lhs->type))
+        if (cond->lhs->kind == E_VAR && cond->lhs->gidx < 0 && !cond->lhs->agg_param &&
+            !is_aggregate(cond->lhs->type))
             lreg = local_reg(cg, cond->lhs->slot);
         if (lreg != NULL)
             lhs_direct = 1; /* compare the register directly, no rax copy */
@@ -3546,7 +3569,10 @@ static void gen_void_expr(CG *cg, Expr *e) {
      * to the value inside it. Those go to gen_expr, which dereferences. */
     if (e != NULL && e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR &&
         !is_aggregate(e->type) && !e->lhs->agg_param && !e->lhs->boxed) {
-        const char *lreg = local_reg(cg, e->lhs->slot);
+        /* Never a register for a global: it has no slot, so this is NULL and the
+         * path below falls through to an address-and-store, which is what a
+         * global needs. */
+        const char *lreg = e->lhs->gidx < 0 ? local_reg(cg, e->lhs->slot) : NULL;
         if (lreg != NULL) {
             if (e->compound) {
                 long long cr;
