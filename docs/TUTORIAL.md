@@ -1458,6 +1458,32 @@ parenthesised forms are how you reach them — `gvar(x)` is the global and only
 the global, `var(x)` the plain one, `lvar(x)` the local. Ask for a tier that
 isn't there and it is an error rather than a quiet fall back to the other one.
 
+A `gvar` is visible everywhere in the project, not just the file it is written
+in. To say where the project starts, put an empty marker file at
+`.zignore/prjlocation.z`:
+
+```text
+myapp/
+  .zignore/prjlocation.z
+  main.z
+  src/state.z                  // gint total = 10;
+```
+
+```csharp
+// main.z -- nothing imports src/state.z
+int main() {
+    Console.WriteLog(total);   // 10
+    return 0;
+}
+```
+
+`gzz build main.z` walks up from `main.z`, finds the marker in `myapp/`, and
+compiles every `.z` file below it as one program. That is the whole rule: no
+`import`, and no order to keep straight, because one program has one namespace.
+
+It does mean one entry point. Two files that each define `main` is a compile
+error naming both, not a duplicate symbol the linker catches for you.
+
 ### `move`
 
 A value has one owner. To hand one on rather than share it, `move` it: the

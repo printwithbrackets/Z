@@ -732,12 +732,41 @@ constructed value.
 Zeros before `z_ginit` runs rather than whatever was in `.bss`: a program reading
 an uninitialized global reads zero, which is diagnosable.
 
-**A `gvar` is visible across everything one `gzz build` compiles, which today is
-the file and whatever it imports.** The intent is a whole project — a marker at
-`.zignore/prjlocation.z` naming the root, and every `.z` under it compiled as one
-program — and that is not built yet. A name declared `gvar` in one file is
-currently *not* visible from another that does not import it, and saying so here
-is better than letting the silence read as a bug.
+**A `gvar` is visible across a whole project.** A marker at
+`.zignore/prjlocation.z` names the root: the first directory found by walking up
+from the file being compiled that holds one. Every `.z` file under that root is
+then compiled as one program, so a name declared `gvar` in one file is visible
+from every other without an `import`.
+
+```text
+myapp/
+  .zignore/prjlocation.z      # the marker; its contents are not read
+  main.z                      # gzz build main.z
+  src/state.z                 # gint total = 10;
+```
+
+```csharp
+// main.z -- no import of src/state.z anywhere
+int main() {
+    Console.WriteLog(total);  // 10
+    return 0;
+}
+```
+
+Three things follow from "the whole project is one program", and each is a
+consequence rather than a rule of its own:
+
+- **Order is the parser's, not the file system's.** Files are collected
+  recursively and sorted, and the file named on the command line is compiled
+  last, so a use is never parsed before the declaration it names. Files are not
+  ordered by dependency; there are no cycles to order around.
+- **One entry point.** Two files that each define `main` is an error naming both,
+  not two symbols at link time.
+- **Dot-directories are skipped.** `.zignore` holds the marker and never joins
+  the unit, and neither does anything else whose name starts with a dot.
+
+With no marker anywhere above the file, nothing changes: the file and whatever it
+imports is the program, exactly as before.
 
 ## References and ownership
 

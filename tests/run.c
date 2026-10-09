@@ -270,7 +270,6 @@ int main(int argc, char **argv) {
     const char *err_dir = "tests/errors";
     const char *rt_dir = "tests/runtime";
     const char *io_dir = "tests/interop";
-    const char *imp_dir = "tests/imports";
     const char *warn_dir = "tests/warnings";
     int pass = 0, fail = 0;
 
@@ -1428,13 +1427,17 @@ int main(int argc, char **argv) {
     }
 
     /* Module cases: the harness runs a program that pulls in sibling files, so
-     * the import graph is exercised end to end. */
+     * the import graph is exercised end to end.
+     *
+     * Paths are relative to the repository root, because project_main is reached
+     * through its own marker rather than by an import. */
     static const char *modules[] = {
-        "import_main",
+        "imports/import_main",
+        "project/project_main",
     };
     for (size_t i = 0; i < sizeof modules / sizeof modules[0]; i++) {
-        snprintf(path, sizeof path, "%s/%s.z", imp_dir, modules[i]);
-        snprintf(exp_path, sizeof exp_path, "%s/%s.expected", imp_dir, modules[i]);
+        snprintf(path, sizeof path, "tests/%s.z", modules[i]);
+        snprintf(exp_path, sizeof exp_path, "tests/%s.expected", modules[i]);
         char expected[1 << 16];
         if (!slurp(exp_path, expected, sizeof expected)) {
             fprintf(stderr, "FAIL %s (missing .expected)\n", modules[i]);
@@ -1451,6 +1454,24 @@ int main(int argc, char **argv) {
         }
         printf("ok   %s (modules)\n", modules[i]);
         pass++;
+    }
+
+    /* A project with two entry points.
+     *
+     * Checked by substring rather than against a .expected file: the diagnostic
+     * names the file holding the first main by absolute path, so a golden
+     * comparison would fail on every machine but this one. */
+    {
+        char actual[1 << 16];
+        snprintf(cmd, sizeof cmd, "%s run tests/project_dup/b.z 2>&1", zq);
+        run_cmd_capture(cmd, actual, sizeof actual);
+        if (strstr(actual, "a second function named 'main'") != NULL) {
+            printf("ok   project_dup_main (rejected)\n");
+            pass++;
+        } else {
+            fprintf(stderr, "FAIL project_dup_main (a second main was not rejected)\n");
+            fail++;
+        }
     }
 
     /* The -O3 unroll gate.

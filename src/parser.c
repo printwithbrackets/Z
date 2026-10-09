@@ -9236,6 +9236,12 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
     int cap = 8, n = 0;
     Stmt **items = arena_alloc_array(arena, (size_t)cap, sizeof(Stmt *));
     int has_main = 0;
+    /* Where `main` was found. Two entry points in one program was only
+     * unreachable because one program was one file; a project compiles every
+     * file under its root as one unit, so two files that each define `main` now
+     * reach codegen together and emit `z_main` twice. The assembler reports it as
+     * "symbol is already defined", which names neither file. */
+    Span main_span = {0};
     int top_stmts = 0;
 
     while (!at(&p, T_EOF)) {
@@ -9248,8 +9254,18 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
         }
         if (at_func_decl(&p)) {
             Stmt *fn = parse_func(&p, 0);
-            if (fn->is_entry)
-                has_main = 1;
+            if (fn->is_entry) {
+                if (has_main) {
+                    diag_error(fn->span,
+                               "a second function named 'main' is declared here; the first is at "
+                               "%s:%d, and a program has one entry point",
+                               main_span.file != NULL ? main_span.file : "another file",
+                               main_span.line);
+                } else {
+                    has_main = 1;
+                    main_span = fn->span;
+                }
+            }
             items[n++] = fn;
         } else if ((at(&p, T_KW_CLASS) || at(&p, T_KW_STRUCT)) && peek(&p, 1)->kind == T_IDENT &&
                    peek(&p, 2)->kind == T_LT && find_gtype(&p, peek(&p, 1)->text) != NULL) {
