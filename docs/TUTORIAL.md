@@ -370,9 +370,9 @@ be the one thing a diagnostic must not do.
 
 #### A project picks its own dialect
 
-The names above ship with Z. A project overrides them in a `z.surface` file
-beside its code, one mapping per line — what the program writes, then `=`, then
-what the compiler calls it:
+The names above ship with Z. A project overrides them in a `.zignore/config.z`
+file, one mapping per line — what the program writes, then `=`, then what the
+compiler calls it:
 
 ```
 # a comment
@@ -390,15 +390,15 @@ b.push("hello ");
 say(b.finish());
 ```
 
-The compiler looks for `z.surface` starting in the source file's own directory
-and walking up, and takes the first one it finds. The nearest wins, so a project
+The compiler looks for `.zignore/config.z` starting in the source file's own
+directory and walking up, and takes the first one it finds. The nearest wins, so a project
 vendored inside another keeps its own dialect. **One** manifest governs the whole
 compilation rather than one per file, because `import` splices rather than
 isolates: a library you import is read in *your* dialect, which is the same rule
 `import` already follows.
 
 ```sh
-z run main.z                      # uses ./z.surface if the walk finds one
+z run main.z                      # uses ./.zignore/config.z if the walk finds one
 z run main.z --no-surface         # ignore it; the shipped names only
 z run main.z --surface=path/to/x  # use this one instead of searching
 ```

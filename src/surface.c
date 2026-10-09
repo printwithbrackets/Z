@@ -193,6 +193,9 @@ int surface_discover(Surface *s, const char *src_path) {
         FILE *probe = fopen(cand, "r");
         if (probe != NULL) {
             fclose(probe);
+            /* Empty is fine. It is a project with the shipped names, and loading
+             * it costs one open of a file with no lines. Rejecting it would mean
+             * a project could not be marked without inventing a setting. */
             return surface_load(s, cand) == 0 ? 1 : -1;
         }
         if (strcmp(dir, "/") == 0)

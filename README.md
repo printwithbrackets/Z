@@ -141,16 +141,19 @@ int main() {
 }
 ```
 
-A `z.surface` file beside your code renames what a program writes for a global —
-the builtins, the standard library, your own globals — so a codebase can be
-written in its own dialect. It is found by walking up from the source file, and
-`--no-surface` ignores it:
+A `.zignore/config.z` renames what a program writes for a global — the builtins,
+the standard library, your own globals — so a codebase can be written in its own
+dialect. It is found by walking up from the source file, and `--no-surface`
+ignores it:
 
 ```sh
-# z.surface:  say = print
+# .zignore/config.z:  say = print
 ./z run hello.z                  # a program in this project's dialect
 ./z run hello.z --no-surface     # the shipped names only
 ```
+
+This is the same file that marks a project root, so a project that renames names
+and a project that spans many files say so in one place.
 
 The output path and those pass-through arguments are handed to the C toolchain
 as a real argument vector, never through a shell, so a path containing a quote,
@@ -353,7 +356,7 @@ system assembler — we do not write an ELF encoder.
 - **M3 (done):** C# sugar: properties, `$""` string interpolation, expression-bodied members, `operator` overloading, extension methods.
 - **Surface names (done):** the spelling a program uses for a global is data
   rather than syntax, so a codebase can be written in its own dialect. A
-  `z.surface` manifest beside the code maps each name a project writes to the name
+  `.zignore/config.z` manifest maps each name a project writes to the name
   the compiler knows — builtins, standard-library types and their methods, and the
   project's own globals — and matching ignores case, so `say`, `Say` and `SAY`
   are one name. Nothing else changes: the compiler, the runtime and the emitted

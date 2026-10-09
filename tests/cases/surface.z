@@ -1,6 +1,6 @@
 // A project manifest renames what the compiler already has.
 //
-// The names a program writes for a global are data, not syntax: `z.surface` maps
+// The names a program writes for a global are data, not syntax: a manifest maps
 // each spelling a project uses to the name the compiler knows. This is the whole
 // of it -- nothing here is a second compiler, a second runtime, or a second set
 // of emitted symbols. `say` reaches the `print` that has always been there, and

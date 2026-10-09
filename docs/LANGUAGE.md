@@ -973,7 +973,7 @@ a local variable named after a surface name is untouched. A renamed method is
 called and emitted under the internal name, which is what keeps `b.push(x)` from
 type-checking and then failing to link.
 
-The table is the shipped defaults plus a project manifest: `z.surface`, found by
+The table is the shipped defaults plus a project manifest: `.zignore/config.z`, found by
 walking up from the source file, nearest first, one `written = internal` mapping
 per line, `#` for comments. One manifest governs the whole compilation, because
 `import` splices rather than isolates. `--no-surface` ignores it and
@@ -1343,7 +1343,7 @@ is real and tested today, and stays:
   plain `var`, and `gvar(x)`/`var(x)`/`lvar(x)` to name one of them
   ([Three tiers of variable](#three-tiers-of-variable))
 - **surface names**: what a program writes for a global is data, not syntax. A
-  `z.surface` manifest gives a codebase its own dialect over the builtins, the
+  `.zignore/config.z` manifest gives a codebase its own dialect over the builtins, the
   standard library and its own globals, matched without regard to case, and always
   as a fallback so a declared spelling wins. `Console.WriteLog` is one; there is
   no bare `print`, so a program may define its own

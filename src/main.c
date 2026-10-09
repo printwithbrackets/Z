@@ -196,9 +196,11 @@ static char *strdup_or_die(const char *s);
  * `config.z` and not, say, `project.z`: the file lives in `.zignore`, beside the
  * patterns already ignored there, so it is skipped as a source by the same rule
  * that skips them. A marker named after its location rather than its contents
- * would have to be matched separately. The name does promise more than it
- * delivers today -- nothing in it is configuration yet -- and that is worth
- * remembering before it starts looking like the place to put settings. */
+ * would have to be matched separately.
+ *
+ * It is also the surface manifest (SURFACE_FILE, the same string), so this name
+ * now describes what is in it. A project with an empty `config.z` gets a project
+ * and the shipped names; a project with mappings in it gets a dialect too. */
 #define PROJECT_MARKER ".zignore/config.z"
 
 /* Files already expanded into the unit, and the ones on the current expansion
