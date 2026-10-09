@@ -1460,11 +1460,11 @@ isn't there and it is an error rather than a quiet fall back to the other one.
 
 A `gvar` is visible everywhere in the project, not just the file it is written
 in. To say where the project starts, put an empty marker file at
-`.zignore/prjlocation.z`:
+`.zignore/config.z`:
 
 ```text
 myapp/
-  .zignore/prjlocation.z
+  .zignore/config.z
   main.z
   src/state.z                  // gint total = 10;
 ```

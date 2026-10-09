@@ -733,14 +733,14 @@ Zeros before `z_ginit` runs rather than whatever was in `.bss`: a program readin
 an uninitialized global reads zero, which is diagnosable.
 
 **A `gvar` is visible across a whole project.** A marker at
-`.zignore/prjlocation.z` names the root: the first directory found by walking up
+`.zignore/config.z` names the root: the first directory found by walking up
 from the file being compiled that holds one. Every `.z` file under that root is
 then compiled as one program, so a name declared `gvar` in one file is visible
 from every other without an `import`.
 
 ```text
 myapp/
-  .zignore/prjlocation.z      # the marker; its contents are not read
+  .zignore/config.z           # the marker; its contents are not read
   main.z                      # gzz build main.z
   src/state.z                 # gint total = 10;
 ```

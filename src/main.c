@@ -191,8 +191,15 @@ static char *strdup_or_die(const char *s);
 
 /* The marker that turns a directory into a project. Its contents are not read:
  * it exists so the compiler can find the root, and so that a project which
- * moves does not have to be told where it moved to. */
-#define PROJECT_MARKER ".zignore/prjlocation.z"
+ * moves does not have to be told where it moved to.
+ *
+ * `config.z` and not, say, `project.z`: the file lives in `.zignore`, beside the
+ * patterns already ignored there, so it is skipped as a source by the same rule
+ * that skips them. A marker named after its location rather than its contents
+ * would have to be matched separately. The name does promise more than it
+ * delivers today -- nothing in it is configuration yet -- and that is worth
+ * remembering before it starts looking like the place to put settings. */
+#define PROJECT_MARKER ".zignore/config.z"
 
 /* Files already expanded into the unit, and the ones on the current expansion
  * stack.
@@ -260,7 +267,7 @@ static char *strdup_or_die(const char *s) {
     return out;
 }
 
-/* ---- the project: `.zignore/prjlocation.z` ----
+/* ---- the project: `.zignore/config.z` ----
  *
  * A `gvar` is meant to be visible to every file in a project rather than to one
  * compilation unit, and "a project" has to be a directory on disk rather than
@@ -271,7 +278,7 @@ static char *strdup_or_die(const char *s) {
  * and its imports, which is what a single-file program always got.
  */
 
-/* The directory holding `.zignore/prjlocation.z`, searched upward from the file
+/* The directory holding `.zignore/config.z`, searched upward from the file
  * being compiled. NULL when there is no project.
  *
  * Walked upward rather than asking about one directory, because the marker is the

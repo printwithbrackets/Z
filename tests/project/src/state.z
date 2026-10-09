@@ -1,4 +1,4 @@
 // Project-wide state. Nothing imports this file: the marker
-// tests/project/.zignore/prjlocation.z is the only reason main.z can see it.
+// tests/project/.zignore/config.z is the only reason main.z can see it.
 gint total = 10;
 gstring label = "shared";

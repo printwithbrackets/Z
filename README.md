@@ -252,7 +252,7 @@ int main() {
 rule, so `gFoo` works for a `Foo` that does not exist yet. `gvar(x)`, `var(x)`
 and `lvar(x)` name one tier on purpose, which is the only way to reach the
 declarations the priority rule hides. A `gvar` is visible across a whole project:
-put a `.zignore/prjlocation.z` marker in the project root and every `.z` file
+put a `.zignore/config.z` marker in the project root and every `.z` file
 under it compiles as one program, with no `import` needed. See
 [docs/LANGUAGE.md](docs/LANGUAGE.md#three-tiers-of-variable).
 
