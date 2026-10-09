@@ -732,6 +732,13 @@ constructed value.
 Zeros before `z_ginit` runs rather than whatever was in `.bss`: a program reading
 an uninitialized global reads zero, which is diagnosable.
 
+**A `gvar` is visible across everything one `gzz build` compiles, which today is
+the file and whatever it imports.** The intent is a whole project — a marker at
+`.zignore/prjlocation.z` naming the root, and every `.z` under it compiled as one
+program — and that is not built yet. A name declared `gvar` in one file is
+currently *not* visible from another that does not import it, and saying so here
+is better than letting the silence read as a bug.
+
 ## References and ownership
 
 **[new]** This is the v2 core. See decision 1.

@@ -251,7 +251,9 @@ int main() {
 `gvar lvar gint lint gbool lbool gstring lstring gfloat lfloat gFoo lFoo` are one
 rule, so `gFoo` works for a `Foo` that does not exist yet. `gvar(x)`, `var(x)`
 and `lvar(x)` name one tier on purpose, which is the only way to reach the
-declarations the priority rule hides. See
+declarations the priority rule hides. A `gvar` is visible across everything one
+build compiles — for now the file and its imports; project-wide visibility is
+not built yet. See
 [docs/LANGUAGE.md](docs/LANGUAGE.md#three-tiers-of-variable).
 
 ```csharp
