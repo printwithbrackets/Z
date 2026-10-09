@@ -1432,6 +1432,32 @@ SUMMARY: AddressSanitizer: 8008 byte(s) leaked in 1 allocation(s).
 The direction is deliberate: a leak is visible under AddressSanitizer and costs
 memory, whereas a double free corrupts the heap.
 
+### Three tiers of variable
+
+One name can mean three variables. A `gvar` has its own storage and is visible
+everywhere; an `lvar` is a local that outranks a plain `var` of the same name.
+Where they collide, a bare name means **`lvar`, then `var`, then `gvar`**:
+
+```csharp
+gvar base = 10;                 // a global
+
+int main() {
+    var base = 99;              // a var, which shadows the global
+    Console.WriteLog(base);         // 99
+    Console.WriteLog(gvar(base));   // 10, named on purpose
+    return 0;
+}
+```
+
+`gvar` and `lvar` are two spellings of one rule: a prefix and any type name, so
+`gint lint gbool lbool gstring lstring gfloat lfloat` all work, and so does
+`gPoint` for a class you declared yourself.
+
+The other two declarations are hidden behind the priority rule, and the three
+parenthesised forms are how you reach them — `gvar(x)` is the global and only
+the global, `var(x)` the plain one, `lvar(x)` the local. Ask for a tier that
+isn't there and it is an error rather than a quiet fall back to the other one.
+
 ### `move`
 
 A value has one owner. To hand one on rather than share it, `move` it: the

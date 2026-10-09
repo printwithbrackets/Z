@@ -40,12 +40,12 @@ reachable only through one of those, are all still live at exit. Leaks are the
 safe direction to be wrong in, which is why the frees are wired up per type
 rather than all at once.
 
-Leaks are also the only thing the suite is clean of. All 104 golden cases, which
+Leaks are also the only thing the suite is clean of. All 106 golden cases, which
 are the ones that produce a program to run, build and run under
 AddressSanitizer with no use-after-free, no double free and no buffer overflow.
-The rest of the 231 tests are diagnostics and gates, none of which runs a
-program, so "the suite is clean under ASan" is a statement about those 104 and
-not about the other 127. And it is a statement about the suite rather than about
+The rest of the 235 tests are diagnostics and gates, none of which runs a
+program, so "the suite is clean under ASan" is a statement about those 106 and
+not about the other 129. And it is a statement about the suite rather than about
 the language:
 a program outside it can release a captured string's cell instead of its string,
 or hand an already-released field to a destructor. Both are known, and each is
@@ -227,6 +227,32 @@ let g:z_compiler = '/usr/local/bin/z'
 both run the `z` binary beside this checkout, so a clone needs nothing on `$PATH`.
 
 ## Quick tour
+
+Three tiers of variable share one namespace, and where they collide the
+priority is **lvar, then var, then gvar**:
+
+```csharp
+gvar base = 10;        // a global: its own storage, not a frame slot
+
+int main() {
+    var base = 99;             // a plain var, which shadows the global
+    lvar what = 1;
+    var what = 2;              // both may share a name; lvar wins
+
+    Console.WriteLog(base);          // 99
+    Console.WriteLog(gvar(base));    // 10, the global, named on purpose
+    Console.WriteLog(what);          // 1
+    Console.WriteLog(var(what));     // 2
+    return 0;
+}
+```
+
+`g` and `l` in front of a type name declare a global or a function-local:
+`gvar lvar gint lint gbool lbool gstring lstring gfloat lfloat gFoo lFoo` are one
+rule, so `gFoo` works for a `Foo` that does not exist yet. `gvar(x)`, `var(x)`
+and `lvar(x)` name one tier on purpose, which is the only way to reach the
+declarations the priority rule hides. See
+[docs/LANGUAGE.md](docs/LANGUAGE.md#three-tiers-of-variable).
 
 ```csharp
 // Top-level statements — no main() boilerplate.
@@ -1009,7 +1035,7 @@ the compiler in this repository implements.
 
 The two documents are kept side by side on purpose. v2 changes the language, not
 the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
-diagnostics system, the 104 golden tests — are still the spec for the parts that
+diagnostics system, the 106 golden tests — are still the spec for the parts that
 do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License
