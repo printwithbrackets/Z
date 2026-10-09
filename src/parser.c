@@ -49,8 +49,46 @@ typedef struct Var {
      * different amounts of help. */
     int is_moved;
     Span move_span; /* where the move was written, for the note */
+    /* `lvar`: a local that outranks a plain `var` of the same name in the same
+     * scope. The two can coexist there, so the redeclaration check below has to
+     * compare tiers and not just names -- otherwise `var what = 2; lvar what = 1;`
+     * in one body, which is the whole point of having both, would be rejected as
+     * a duplicate. */
+    int is_lvar;
+    /* `gvar`: project storage rather than a frame slot, so `offset` above is
+     * meaningless for it and the symbol comes from GlobalDef instead. */
+    int is_global;
     struct Var *next;
 } Var;
+
+/* A `gvar`, `gint`, `gbool`, `gstring`, `gfloat` or `gFoo`: one declaration,
+ * visible to every file in the project.
+ *
+ * Not a frame slot and not a compile-time constant. A constant initializer is
+ * folded into `.data` at compile time; anything else is zeroed in `.bss` and
+ * filled by a generated init function that runs before the entry point, which is
+ * what lets `gvar x = new R(5);` mean the same thing here as it does in a
+ * function. */
+typedef struct GlobalDef {
+    char *name;
+    Type *type;
+    Expr *init;        /* the initializer, or NULL for a declaration with none */
+    Span decl_span;    /* where it was written, for diagnostics */
+    const char *file;  /* the file that declared it */
+    int init_is_const; /* the initializer is a literal: emit it into .data */
+    /* The Var this global is referred to by, built on first use. See
+     * global_var_ref: a use site has to be an E_VAR for codegen, and every pass
+     * downstream of here keys off Var. */
+    struct Var *ref;
+    /* Assigned in the init function, and zero in .bss before it. */
+    int needs_init;
+    /* Position in the emitted table, which is declaration order. Stamped at
+     * registration so a use site found during a later pass -- a function body
+     * parsed after the declarations, which is the normal case -- can say which
+     * global it means without searching for it again. */
+    int gidx;
+    struct GlobalDef *next;
+} GlobalDef;
 
 typedef struct Scope {
     Var *vars;
@@ -293,6 +331,24 @@ typedef struct {
      * has already failed, so it renames the standard library and the builtins
      * without ever getting between a program and a name it declared itself. */
     struct Surface *surf;
+
+    /* ---- gvar: project-wide variables ----
+     *
+     * `gvar` and the other `g`-prefixed declarations register here, and every
+     * file compiled into the same program shares one list. A name resolves
+     * against it only after the scope walk has failed, which is what makes
+     * `lvar` > `var` > `gvar` fall out of the existing structure rather than
+     * needing a separate priority rule. */
+    GlobalDef *globals;
+    int nglobals;
+    /* The file being parsed, for a diagnostic that has to name it. A global is
+     * the one declaration that can be written in a file other than the one
+     * reading it, so "already declared" is only actionable with the other file's
+     * name in it. */
+    const char *cur_file_name;
+    /* Set while parsing an `lvar`, so declare_var can tell a tier change from a
+     * genuine duplicate. See the check there. */
+    int declaring_lvar;
 } Parser;
 
 /* The internal name for `name`, or `name` itself. See the surface rules in
@@ -544,6 +600,7 @@ static Expr *new_expr(Parser *p, ExprKind kind, Span span) {
     e->span = span;
     e->type = NULL;
     e->slot = -1;
+    e->gidx = -1;
     e->str_id = -1;
     return e;
 }
@@ -979,6 +1036,10 @@ static void mark_synth(Parser *p, const char *name) {
         v->is_synth = 1;
 }
 
+struct Var;
+static Var *global_var_ref(Parser *p, struct GlobalDef *g);
+static struct GlobalDef *find_global(Parser *p, const char *name);
+
 /* Resolves a name to its binding, walking outward through the scopes still
  * open. `mark` records a use, which is right when something read the variable
  * and wrong when the caller was only asking which one a name means.
@@ -989,16 +1050,49 @@ static void mark_synth(Parser *p, const char *name) {
  * compile, and returned 0, because slot numbers are assigned per function and f
  * read whatever f's own frame happened to hold. */
 static Var *resolve_var(Parser *p, const char *name, int mark) {
+    /* Within one scope an `lvar` outranks a plain `var` of the same name, so a
+     * scope can hold both and the plain one is only reachable as `var(x)`.
+     *
+     * Two passes over the same list rather than one that remembers a candidate:
+     * the list is a prepend list, so a plain `var` declared *after* an `lvar`
+     * is found first, and "first match wins" would give the wrong answer in that
+     * order and the right one in the other. `var what = 2; lvar what = 1;` and
+     * `lvar what = 1; var what = 2;` have to mean the same thing. */
+    Var *plain = NULL;
     for (Scope *s = p->scope; s != NULL; s = s->parent) {
         for (Var *v = s->vars; v != NULL; v = v->next) {
-            if (strcmp(v->name, name) == 0) {
+            if (strcmp(v->name, name) != 0)
+                continue;
+            if (v->is_lvar) {
                 if (mark)
                     v->used = 1;
                 return v;
             }
+            if (plain == NULL)
+                plain = v;
+        }
+        if (plain != NULL) {
+            if (mark)
+                plain->used = 1;
+            return plain;
         }
         if (s->is_fn_body)
             break;
+    }
+
+    /* Past the function body the scope walk deliberately stops, because a value
+     * declared outside a function lives in a different frame. A global is the
+     * exception that proves the rule: it has its own storage rather than
+     * anyone's frame, so naming one from inside a function is reading what it
+     * says rather than reading a slot that happens to hold a number. */
+    GlobalDef *g = find_global(p, name);
+    if (g != NULL) {
+        Var *v = global_var_ref(p, g);
+        if (getenv("Z_DEBUG_GLOBAL") != NULL)
+            fprintf(stderr, "[gvar] resolve '%s' -> global gidx=%d\n", name, g->gidx);
+        if (v != NULL && mark)
+            v->used = 1;
+        return v;
     }
     return NULL;
 }
@@ -1187,14 +1281,32 @@ static int declare_var(Parser *p, const char *name, Type *type) {
     /* Shadowing an outer variable in a nested block is legal (as in C#); only
      * redeclaring within the same scope is an error. */
     Var *existing = lookup_var_local(p, name);
-    if (existing != NULL) {
+    /* `lvar` and `var` of one name in one scope are two declarations, not a
+     * duplicate: the whole point is that the `lvar` is the one the name resolves
+     * to, and the plain `var` is still reachable as `var(x)`. Refusing the pair
+     * would make the disambiguation syntax unreachable.
+     *
+     * So the check is on the tier rather than on the name: two declarations
+     * collide only when they are the same kind. The order they are written in
+     * does not matter, which is what `resolve_var` needs too. */
+    int same_tier = existing != NULL && existing->is_lvar == p->declaring_lvar;
+    if (same_tier) {
         diag_error(cur(p)->span, "variable '%s' is already declared in this scope", name);
         return -1;
     }
     /* Shadowing an outer variable in a nested block is legal; it is also almost
      * always a mistake, because the inner value is what the rest of the block
      * sees and the outer one silently stops evolving. */
-    if (warn_enabled(W_SHADOWED_LOCAL) && lookup_var(p, name) != NULL)
+    /* Not a global: a plain `var` in front of a `gvar` is the documented
+     * relationship between the two tiers, not a nested shadow someone should be
+     * told off for. shadowed-local is about a *block* shadowing something around
+     * it, which is where the mistake actually happens. */
+    /* Not the other tier in the same scope, either: `var x` beside `lvar x` is
+     * the documented pairing, and telling someone off for writing the two the
+     * feature is named after is noise. */
+    Var *shadow = lookup_var(p, name);
+    if (warn_enabled(W_SHADOWED_LOCAL) && shadow != NULL && !shadow->is_global &&
+        !(shadow->is_lvar != p->declaring_lvar && shadow->owner == p->cur_owner))
         diag_warn(W_SHADOWED_LOCAL, cur(p)->span,
                   "'%s' shadows a declaration in an enclosing scope", name);
     /* Locals live inline in the frame, growing *upward* from their base but
@@ -4868,7 +4980,19 @@ static Expr *parse_primary(Parser *p) {
         }
         Expr *e = new_expr(p, E_VAR, span);
         e->name = name;
-        e->slot = v->offset;
+        /* A global has no frame offset, so the index into the emitted table
+         * travels instead and codegen reads storage by symbol. The offset stays
+         * -1, which every local-only path already treats as "not a local". */
+        if (v->is_global) {
+            GlobalDef *g = find_global(p, name);
+            e->gidx = g != NULL ? g->gidx : -1;
+            e->slot = -1;
+            if (getenv("Z_DEBUG_GLOBAL") != NULL)
+                fprintf(stderr, "[gvar] use '%s' v->is_global=1 g=%p gidx=%d\n", name, (void *)g,
+                        e->gidx);
+        } else {
+            e->slot = v->offset;
+        }
         e->type = v->type;
         e->agg_param = v->agg_param;
         /* Reading a value that `move` already took. The slot itself is null by
@@ -5588,11 +5712,185 @@ static Stmt *parse_const_decl(Parser *p) {
     return new_stmt(p, S_EXPR, start);
 }
 
-static Stmt *parse_var_decl(Parser *p) {
+/* ---- gvar / lvar: the `g`- and `l`-prefixed declarations ----
+ *
+ * A declaration is spelled `<prefix><TypeName> <name> = <init>;`, where the
+ * prefix is `g` or `l` and the type word is any type name the compiler knows:
+ * `var`, `auto`, `int`, `bool`, `string`, `float`, or a class or struct the
+ * project declared. So `gvar`, `lvar`, `gint`, `lint`, `gPoint` are all one
+ * rule rather than a list of keywords.
+ *
+ * They are lexed as ordinary identifiers, which is what keeps the list open --
+ * a new keyword per user type would be impossible, and `gFoo` for a `Foo` the
+ * compiler has not seen yet is the only way the spelling can work at all.
+ *
+ * What tells a prefixed declaration apart from an expression statement is the
+ * token after the name: `gvar why = 1;` is IDENT IDENT `=`, and no expression
+ * in Z is two identifiers in a row. `gvar(why)` -- the disambiguation form -- is
+ * IDENT `(`, so it is not mistaken for one, which is convenient rather than
+ * lucky.
+ */
+static int at_prefixed_decl(Parser *p) {
+    if (!at(p, T_IDENT))
+        return 0;
+    const char *t = cur(p)->text;
+    if (t[0] != 'g' && t[0] != 'l')
+        return 0;
+    if (t[1] == '\0')
+        return 0;
+    return peek(p, 1)->kind == T_IDENT;
+}
+
+/* The type a prefixed declaration names, after the prefix. `infer` is set for
+ * `var` and `auto`, which take the type from the initializer the way a plain
+ * `var` does. A name that is neither a built-in nor a declared type is left to
+ * the caller's type check rather than diagnosed here: `gFoo x = 1;` in a file
+ * that has not declared `Foo` should say the type is unknown, which is what
+ * parse_type would have said for `Foo x = 1;`. */
+static Type *prefixed_type(Parser *p, const char *word, int *infer) {
+    if (strcmp(word, "var") == 0 || strcmp(word, "auto") == 0) {
+        *infer = 1;
+        return NULL;
+    }
+    if (strcmp(word, "int") == 0)
+        return type_int(p->ty);
+    if (strcmp(word, "bool") == 0)
+        return type_bool(p->ty);
+    if (strcmp(word, "string") == 0)
+        return type_string(p->ty);
+    if (strcmp(word, "float") == 0)
+        return type_f64(p->ty);
+    Type *st = type_find_struct(p->ty, word);
+    if (st == NULL)
+        st = type_find_struct(p->ty, surf(p, word));
+    if (st != NULL)
+        return st;
+    Type *un = type_find_union(p->ty, word);
+    if (un == NULL)
+        un = type_find_union(p->ty, surf(p, word));
+    return un;
+}
+
+/* True when the expression is something a constant initializer can be built
+ * from, which decides whether the global's storage can be filled at compile
+ * time or needs the init function.
+ *
+ * Only literals and the operators over them. Not a string concatenation and not
+ * an enum access, though both are constants a C compiler would fold: this is the
+ * shape a single machine instruction can encode, and anything wider is easier to
+ * reason about at run time than to convince the reader it was folded. */
+static int init_is_constant(Expr *e) {
+    if (e == NULL)
+        return 1;
+    switch (e->kind) {
+    case E_INT:
+    case E_F64:
+    case E_BOOL:
+    case E_STRING:
+    case E_NULL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Registers a `gvar`. Returns the Var that stands for it, or NULL if the name is
+ * already taken -- a second declaration of the same global would otherwise emit
+ * two symbols and let the assembler pick, which is not a decision to leave to
+ * the assembler. */
+static Var *declare_global(Parser *p, const char *name, Type *type, Expr *init, Span span) {
+    for (GlobalDef *g = p->globals; g != NULL; g = g->next) {
+        if (strcmp(g->name, name) == 0) {
+            diag_error_code(span, "duplicate_global", "global '%s' is already declared in %s", name,
+                            g->file != NULL ? g->file : "another file");
+            return NULL;
+        }
+    }
+
+    GlobalDef *g = arena_alloc(p->arena, sizeof *g);
+    g->name = arena_strdup(p->arena, name);
+    g->type = type;
+    g->init = init;
+    g->decl_span = span;
+    g->file = p->cur_file_name;
+    g->init_is_const = init_is_constant(init);
+    /* Prepended, so the list runs newest-first; gidx counts the other way so the
+     * emitted table is in declaration order. Two orders for one list would be a
+     * mistake waiting to happen, so the index is what everything else uses. */
+    g->gidx = p->nglobals++;
+    g->next = p->globals;
+    p->globals = g;
+
+    Var *v = arena_alloc(p->arena, sizeof *v);
+    memset(v, 0, sizeof *v);
+    v->name = g->name;
+    v->type = type;
+    v->is_global = 1;
+    v->offset = -1; /* not a frame slot; the symbol comes from the GlobalDef */
+    v->decl_span = span;
+    v->used = 1; /* a global is not a local, so -Wunused-local never applies */
+    return v;
+}
+
+/* The global named `name`, or NULL. Kept separate from resolve_var so the
+ * disambiguation forms and the ordinary lookup share one source of truth. */
+static GlobalDef *find_global(Parser *p, const char *name) {
+    for (GlobalDef *g = p->globals; g != NULL; g = g->next)
+        if (strcmp(g->name, name) == 0)
+            return g;
+    return NULL;
+}
+
+/* The Var a GlobalDef is referred to by.
+ *
+ * One is built per GlobalDef and cached on it, because a use site has to be an
+ * `E_VAR` to reach codegen and every other path -- register allocation, the drop
+ * pass, the DWARF walk -- keys off `Var`. Handing each use site its own Var
+ * would work and would also make `-Wunused-local` fire once per mention, so the
+ * one binding is shared.
+ *
+ * The list is walked rather than the globals indexed, because there are no more
+ * than a handful per program and an array of pointers would be a second thing to
+ * keep in step. */
+static Var *global_var_ref(Parser *p, GlobalDef *g) {
+    if (g->ref != NULL)
+        return g->ref;
+    Var *v = arena_alloc(p->arena, sizeof *v);
+    memset(v, 0, sizeof *v);
+    v->name = g->name;
+    v->type = g->type;
+    v->is_global = 1;
+    v->offset = -1;
+    v->decl_span = g->decl_span;
+    v->used = 1;
+    g->ref = v;
+    return v;
+}
+
+static Stmt *parse_var_decl(Parser *p);
+static Stmt *parse_var_decl_kind(Parser *p, int prefix);
+
+static Stmt *parse_var_decl(Parser *p) { return parse_var_decl_kind(p, 0); }
+
+/* `prefix` is 0 for an ordinary `var`/`T name = ...` declaration, 'g' for a
+ * global and 'l' for a function-local that outranks a plain `var`.
+ *
+ * The three share every rule below the type -- the assignability check, the
+ * string ownership dance, the "needs an initializer" error -- because a global
+ * that was checked less carefully than a local would be checked less carefully
+ * than the only thing a local is for. Only the storage differs, and that is two
+ * branches. */
+static Stmt *parse_var_decl_kind(Parser *p, int prefix) {
     Span start = cur(p)->span;
     Type *declared = NULL;
     int infer = 0;
-    if (match(p, T_KW_VAR)) {
+    if (prefix != 0) {
+        const char *word = cur(p)->text + 1;
+        advance(p);
+        declared = prefixed_type(p, word, &infer);
+        if (!infer && declared == NULL)
+            diag_error(start, "unknown type '%s'", word);
+    } else if (match(p, T_KW_VAR)) {
         infer = 1;
     } else {
         declared = parse_type(p);
@@ -5653,7 +5951,25 @@ static Stmt *parse_var_decl(Parser *p) {
              * declaration in every other language; default to int* so the
              * variable is assignable later. */
             t = init->kind == E_NULL ? type_ptr(p->ty, type_int(p->ty)) : type_int(p->ty);
+        /* A global has no frame slot, so none of the frame machinery below it
+         * applies. The initializer is kept on the GlobalDef instead and emitted
+         * into the project's init function. */
+        if (prefix == 'g') {
+            declare_global(p, name, t, init, start);
+            expect_semi(p);
+            return new_stmt(p, S_BLOCK, start);
+        }
+
+        p->declaring_lvar = prefix == 'l';
         int slot = declare_var(p, name, t);
+        p->declaring_lvar = 0;
+        if (slot >= 0 && prefix == 'l') {
+            /* Marked after the fact because declare_var is shared with `var`,
+             * and the tier is a property of this one declaration. */
+            Var *v = lookup_var_local(p, name);
+            if (v != NULL)
+                v->is_lvar = 1;
+        }
         expect_semi(p);
         Stmt *s = new_stmt(p, S_VAR, start);
         s->name = name;
@@ -8490,6 +8806,14 @@ static Stmt *parse_stmt(Parser *p) {
      * cannot swallow `Console.WriteLog(x);` (no leading type), `var v = 1;` (`var` is not a
      * type token), or `P p = ...;` (an '=' where the '(' would be). It also
      * tolerates a leading `extern`/`export`, which parse_func then rejects. */
+    /* A `g`/`l`-prefixed declaration, before at_func_decl: `gPoint p = new
+     * Point(1, 2);` is a type-then-name-then-`=`, and at_func_decl wants a `(`
+     * where the `=` is, so it declines this on its own -- but checking here
+     * first means the error message is about the prefixed form rather than
+     * whatever at_func_decl decides to say about something that is not one. */
+    if (at_prefixed_decl(p))
+        return parse_var_decl_kind(p, cur(p)->text[0]);
+
     if (at_func_decl(p)) {
         parse_func(p, 1);
         /* The declaration emits nothing where it stands; the function is emitted
@@ -8820,6 +9144,18 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
              * it may sit alongside an explicit main(). It folds to a literal
              * and emits no code. */
             items[n++] = parse_const_decl(&p);
+        } else if (at_prefixed_decl(&p) && cur(&p)->text[0] == 'g') {
+            /* Same reasoning, and it matters for exactly the same reason: a
+             * `gvar` is a declaration with storage of its own, emitted as data
+             * and as an initializer, so counting it as a top-level statement
+             * would put a project that declares one global beside an explicit
+             * main() into the "cannot combine" error -- which is the right
+             * error for a statement and the wrong one here.
+             *
+             * An `lvar` at the top level is the other thing, and it stays a
+             * statement: at file scope an lvar is a plain var, so it belongs in
+             * the synthesized entry exactly as a var does. */
+            items[n++] = parse_var_decl_kind(&p, 'g');
         } else {
             items[n++] = parse_stmt(&p);
             top_stmts++;
@@ -8897,6 +9233,28 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
     inline_program(&p, program);
     report_unused_locals(&p);
     scope_pop(&p);
+    /* Handed to the driver through the program, because `p` is about to go out
+     * of scope and the globals list would go with it. Reversed first: the list is
+     * built by prepending, so it currently reads newest-first, and both the
+     * emitted table and z_ginit want declaration order -- the order a reader can
+     * predict, and the order initializers run in. */
+    program->globals_head = NULL;
+    {
+        GlobalDef *reversed = NULL;
+        for (GlobalDef *g = p.globals; g != NULL;) {
+            GlobalDef *next = g->next;
+            g->next = reversed;
+            reversed = g;
+            g = next;
+        }
+        program->globals_head = reversed;
+        /* gidx was assigned as the list grew, so after the reversal the two
+         * disagree. Re-stamped so index i names the i-th declaration, which is
+         * what a use site recorded when it resolved. */
+        int i = 0;
+        for (GlobalDef *g = reversed; g != NULL; g = g->next)
+            g->gidx = i++;
+    }
     return program;
 }
 
@@ -10410,4 +10768,50 @@ static int inline_param_top(Stmt *fn) {
             top = s;
     }
     return top;
+}
+
+/* The gvars a program declared, in declaration order.
+ *
+ * The list lives on the Parser, which is a stack local of parse_program and is
+ * gone by the time the driver asks. It is reachable from the program Stmt,
+ * which is the one thing that outlives the call.
+ *
+ * Order matters twice over: the emitted table is indexed by it, so a use site's
+ * index and the storage it names have to agree, and z_ginit assigns in it, so it
+ * is also the order initializers run in. Both are declaration order because that
+ * is the only order a reader can predict. */
+static GlobalDef *program_globals(Stmt *program) {
+    return program != NULL ? (GlobalDef *)program->globals_head : NULL;
+}
+
+int parse_globals(Arena *arena, Stmt *program, ParsedGlobal *out, int cap) {
+    (void)arena;
+    GlobalDef *g = program_globals(program);
+    int n = 0;
+    for (; g != NULL; g = g->next) {
+        if (out == NULL || n >= cap) {
+            n++;
+            continue;
+        }
+        ParsedGlobal *pg = &out[n];
+        pg->name = g->name;
+        pg->type = g->type;
+        pg->init = g->init_is_const ? NULL : g->init;
+        pg->span = g->decl_span;
+        pg->is_const = g->init_is_const;
+        pg->ival = 0;
+        pg->dval = 0.0;
+        if (g->init_is_const && g->init != NULL) {
+            if (g->init->kind == E_INT || g->init->kind == E_BOOL)
+                pg->ival = g->init->ival;
+            else if (g->init->kind == E_F64)
+                pg->dval = g->init->dval;
+        }
+        /* Assigned by the driver, which owns the symbol namespace: a global's
+         * symbol has to be mangled the same way a function's is, and that
+         * mangling is the codegen module's business. */
+        pg->sym = NULL;
+        n++;
+    }
+    return n;
 }

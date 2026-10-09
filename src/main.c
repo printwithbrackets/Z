@@ -481,6 +481,32 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
     copt.bounds_checks = bounds_checks;
     copt.debug_info = debug_info;
     copt.opt_level = opt_level;
+
+    /* The gvars, in two passes: one to learn how many there are so the array can
+     * be sized, and one to fill it. A fixed array would be a second thing to
+     * keep in step with the parser, and a project is not a bounded number of
+     * globals. */
+    int nglobals = parse_globals(&arena, program, NULL, 0);
+    copt.globals = NULL;
+    copt.nglobals = 0;
+    if (nglobals > 0) {
+        ParsedGlobal *pg = arena_alloc_array(&arena, (size_t)nglobals, sizeof *pg);
+        parse_globals(&arena, program, pg, nglobals);
+        GlobalTable *gt = arena_alloc_array(&arena, (size_t)nglobals, sizeof *gt);
+        for (int i = 0; i < nglobals; i++) {
+            memset(&gt[i], 0, sizeof gt[i]);
+            gt[i].name = pg[i].name;
+            gt[i].sym = codegen_global_sym(&arena, pg[i].name);
+            gt[i].type = pg[i].type;
+            gt[i].init = pg[i].init;
+            gt[i].is_const = pg[i].is_const;
+            gt[i].ival = pg[i].ival;
+            gt[i].dval = pg[i].dval;
+        }
+        copt.globals = gt;
+        copt.nglobals = nglobals;
+    }
+
     char *asm_text = codegen_emit_opts(&arena, program, &strings, &copt);
 
     if (asm_path != NULL) {
