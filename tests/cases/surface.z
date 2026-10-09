@@ -40,6 +40,11 @@ int main() {
     // declares the spelling keeps the declaration.
     say(shout("quiet"));
 
+    // A right-hand side may be an alias itself: `report` is reached through
+    // `show`, which is reached through `console.writelog`, which is the shipped
+    // name for `print`. Each hop is one a reader would have written.
+    report("through the chain");
+
     return 0;
 }
 
