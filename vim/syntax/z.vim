@@ -74,6 +74,18 @@ syn match   zDestructor '\%(\.\)\@<!\~\zs\u\w*'
 " The two surface names a program can write. `print` is reachable only through
 " one of them, and both word orders are listed because case folding does not
 " join `WriteLog` to `LogWrite`.
+" `gvar`/`lvar` and the g/l-prefixed form of every type name.
+syn match zGlobal '\<\%(g\%(var\|int\|bool\|string\|float\|auto\)\|g\u\w*\)\>'
+syn match zLocal  '\<\%(l\%(var\|int\|bool\|string\|float\|auto\)\|l\u\w*\)\>'
+" `gvar(x)`, `var(x)`, `lvar(x)`: the same words followed by a parenthesis,
+" which is how a reader tells a declaration from the name of a tier. `\ze`
+" leaves the bracket out of the highlight.
+"
+" One group for all three spellings rather than one per tier: which tier a name
+" selects changes what the expression means, not how it reads, and splitting them
+" only gives a reader three colours to learn for one idea.
+syn match zTierRef '\%(gvar\|lvar\|var\)\ze\s*('
+
 syn match   zBuiltin 'Console\.\zs\%(WriteLog\|LogWrite\)\>'
 " The names that resolve to the runtime rather than to something the program
 " could have written: the intrinsics, then Z_BUILTIN_LIST. Longest name first,
@@ -94,9 +106,9 @@ syn match   zEscape '\\\%(x\x\x\|u\x\x\x\x\|[ntr0\\{}"]\)'
 " effect here, and the lists are the only thing keeping holes nestable.
 syn region zInterpString matchgroup=zStringQuote start=+\$"+ end=+"+ contains=zEscape,zInterpHole
 syn region zString matchgroup=zStringQuote start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=zEscape
-syn region zInterpHole matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zDestructor,zOperator,zDelimiter,zComment,zInterpHole2
-syn region zInterpHole2 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zDestructor,zOperator,zDelimiter,zComment,zInterpHole3
-syn region zInterpHole3 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zDestructor,zOperator,zDelimiter,zComment
+syn region zInterpHole matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment,zInterpHole2
+syn region zInterpHole2 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment,zInterpHole3
+syn region zInterpHole3 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment
 
 " Comments come last: `//` and `/*` start at the same column as the `/`
 " operator, and whichever is defined last is the one that wins.
@@ -149,6 +161,9 @@ hi def link zKeyword         Keyword
 hi def link zFunction        Function
 hi def link zProperty        Identifier
 hi def link zBuiltin         Function
+hi def link zGlobal          StorageClass
+hi def link zLocal           StorageClass
+hi def link zTierRef        StorageClass
 hi def link zDestructor      Function
 hi def link zOperator        Operator
 hi def link zDelimiter       Delimiter

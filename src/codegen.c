@@ -183,6 +183,11 @@ typedef struct {
 typedef struct {
     Buf *out;
     StringTable *strings;
+    /* The program's gvars. Reached through the CG rather than passed down every
+     * call: a global reference is an E_VAR like any other, so the only thing
+     * that has to know about them is the E_VAR path and the emitter. */
+    const GlobalTable *globals;
+    int nglobals;
     int label_counter;
     LoopCtx loops[MAX_LOOP_DEPTH];
     int loop_depth;
@@ -366,6 +371,8 @@ static int emit_magic_divmod(CG *cg, TokenKind op, uint64_t d) {
 static void gen_expr(CG *cg, Expr *e);
 static void gen_addr(CG *cg, Expr *e);
 static void gen_stmt(CG *cg, Stmt *s);
+static const char *global_sym(CG *cg, int gidx);
+static int globals_need_init(CG *cg);
 
 static int is_kind(Type *t, TypeKind k) { return t != NULL && t->kind == k; }
 /* A union is also a multi-word aggregate value represented by its address. */
@@ -690,6 +697,15 @@ static void gen_float(CG *cg, Expr *e) {
          * own lambda is rewritten to `*env[k]` and so arrives as an E_DEREF; this
          * case is the enclosing function reading the same variable, and it has to
          * dereference too. */
+        const char *gsym = global_sym(cg, e->gidx);
+        if (gsym != NULL) {
+            /* gen_float has its own E_VAR arm, so the arm gen_expr was given
+             * does not cover a float read -- and `slot` is -1 for a global,
+             * which here read as `[rbp - -1]`: the saved frame pointer, as a
+             * denormal about 1e-38. */
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + %s]\n", XMM_ACC, gsym);
+            return;
+        }
         if (e->agg_param)
             buf_printf(cg->out, "  movsd %s, QWORD PTR [rax]\n", XMM_ACC);
         else if (e->boxed) {
@@ -939,7 +955,12 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         return;
     switch (e->kind) {
     case E_VAR:
-        li_use(cg, e->slot, idx);
+        /* A global is not in the allocator: it has no slot, and slot -1 handed
+         * to li_for would create a LocalInfo for it, which the register
+         * allocator would then keep. Reads and writes would both go to that
+         * invented register and the global in memory would never change. */
+        if (e->gidx < 0)
+            li_use(cg, e->slot, idx);
         break;
     case E_ADDR:
         /* `&x` materializes the value of x; for a scalar that is a load, but
@@ -983,9 +1004,14 @@ static void walk_alloc_expr(CG *cg, Expr *e, int idx) {
         walk_alloc_expr(cg, e->lhs, idx); /* pointer value */
         break;
     case E_ASSIGN:
-        if (e->lhs != NULL && e->lhs->kind == E_VAR) {
+        if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0) {
             li_def(cg, e->lhs->slot, idx);
             li_for(cg, e->lhs->slot)->reassigned = 1;
+        } else if (e->lhs != NULL && e->lhs->kind == E_VAR) {
+            /* A global destination: no slot to define. mark_addr_taken is not
+             * wanted either -- it would disqualify a base that has no frame
+             * slot -- and there is nothing else to record, because the write is
+             * visible to every function in the program. */
         } else {
             /* The one that shows. Unlike the four above, this walks the
              * destination without marking it ineligible, because the
@@ -1266,7 +1292,7 @@ static int const_fold_val(CG *cg, Expr *e, long long *out) {
         *out = e->ival;
         return 1;
     case E_VAR: {
-        if (e->agg_param)
+        if (e->agg_param || e->gidx >= 0)
             return 0;
         LocalInfo *li = li_lookup(cg, e->slot);
         if (li != NULL && li->is_const) {
@@ -1409,6 +1435,16 @@ static void gen_leaf_to_reg(CG *cg, Expr *e, const char *reg) {
         buf_printf(cg->out, "  mov %s, %lld\n", reg, e->ival);
         return;
     }
+    /* Answered before the allocator is consulted, because a global has no slot
+     * to be keyed by and -1 would be looked up as a local. */
+    const char *gsym = global_sym(cg, e->gidx);
+    if (gsym != NULL) {
+        if (is_kind(e->type, TK_F64))
+            buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + %s]\n", reg, gsym);
+        else
+            buf_printf(cg->out, "  mov %s, QWORD PTR [rip + %s]\n", reg, gsym);
+        return;
+    }
     /* A captured variable has to be loaded through its box, exactly as the E_VAR
      * arm of gen_expr does it. Reaching here with a boxed slot meant loading the
      * pointer instead, which is the same defect leaf_live_reg has to refuse. */
@@ -1432,10 +1468,36 @@ static void gen_leaf_to_reg(CG *cg, Expr *e, const char *reg) {
         buf_printf(cg->out, "  mov %s, QWORD PTR [rbp - %d]\n", reg, e->slot);
 }
 
+/* ---- gvar: reading and writing project storage ----
+ *
+ * A global is a real symbol, not a frame slot, so every access is rip-relative
+ * against it. `gen_addr` produces the address and the existing load and store
+ * paths do the rest, which is why a global goes through `E_VAR` at all rather
+ * than needing a parallel expression kind: there is one way to name one and it
+ * lands where a local's name lands.
+ *
+ * The register allocator is keyed by slot and a global's slot is -1, so
+ * gen_leaf_to_reg has to answer for it before the allocator is consulted -- a
+ * slot of -1 would otherwise be looked up as a local and read whatever -1 is
+ * standing for.
+ */
+static const char *global_sym(CG *cg, int gidx) {
+    if (gidx < 0 || gidx >= cg->nglobals || cg->globals == NULL)
+        return NULL;
+    return cg->globals[gidx].sym;
+}
+
 /* Computes the address of an lvalue expression into rax. */
 static void gen_addr(CG *cg, Expr *e) {
     switch (e->kind) {
-    case E_VAR:
+    case E_VAR: {
+        const char *gsym = global_sym(cg, e->gidx);
+        /* rip-relative: there is no frame to be relative to, and .data or .bss
+         * may sit further than any absolute form this target offers. */
+        if (gsym != NULL) {
+            buf_printf(cg->out, "  lea rax, [rip + %s]\n", gsym);
+            return;
+        }
         if (e->boxed) {
             /* The address of a captured variable is inside its box. */
             buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->slot);
@@ -1449,6 +1511,7 @@ static void gen_addr(CG *cg, Expr *e) {
             buf_printf(cg->out, "  lea rax, [rbp - %d]\n", e->slot);
         }
         break;
+    }
     case E_DEREF:
         /* The pointer operand *is* the address, so it is checked for null here
          * before any load or store goes through it. Both reads and writes reach
@@ -2440,6 +2503,21 @@ static void gen_expr_body(CG *cg, Expr *e) {
         buf_printf(cg->out, "  lea rax, [rip + .Lstr%d + 16]\n", e->str_id);
         break;
     case E_VAR: {
+        /* A global, before anything that consults a slot. It has none: `slot` is
+         * -1, which the constant-propagation lookup below would treat as a
+         * local and the fast path would read as `[rbp - -1]` -- the saved frame
+         * pointer and the return address, so a global read returned whatever the
+         * call chain happened to leave there. */
+        const char *gsym = global_sym(cg, e->gidx);
+        if (gsym != NULL) {
+            if (is_kind(e->type, TK_F64))
+                buf_printf(cg->out, "  movsd %s, QWORD PTR [rip + %s]\n", XMM_ACC, gsym);
+            else if (!is_aggregate(e->type))
+                buf_printf(cg->out, "  mov rax, QWORD PTR [rip + %s]\n", gsym);
+            else
+                buf_printf(cg->out, "  lea rax, [rip + %s]\n", gsym);
+            break;
+        }
         if (!e->agg_param && !is_aggregate(e->type)) {
             LocalInfo *li = li_lookup(cg, e->slot);
             if (li != NULL && li->is_const) {
@@ -2517,8 +2595,9 @@ static void gen_expr_body(CG *cg, Expr *e) {
         /* The two orders, which is the entire point of the node: read the old
          * value, write the new one, and yield the old. A register-resident local
          * is two instructions. */
-        const char *lreg =
-            (e->lhs->kind == E_VAR && !e->lhs->agg_param) ? local_reg(cg, e->lhs->slot) : NULL;
+        const char *lreg = (e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !e->lhs->agg_param)
+                               ? local_reg(cg, e->lhs->slot)
+                               : NULL;
         if (lreg != NULL) {
             buf_printf(cg->out, "  mov rax, %s\n", lreg);
             buf_printf(cg->out, "  %s %s, 1\n", e->op == T_PLUS ? "add" : "sub", lreg);
@@ -3039,7 +3118,8 @@ static void gen_expr_body(CG *cg, Expr *e) {
         int t_old = -1;
         if (e->frees_old) {
             t_old = temp_alloc(cg);
-            if (e->lhs != NULL && e->lhs->kind == E_VAR && !e->lhs->agg_param && !e->lhs->boxed) {
+            if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !e->lhs->agg_param &&
+                !e->lhs->boxed) {
                 const char *oreg = local_reg(cg, e->lhs->slot);
                 if (oreg != NULL)
                     buf_printf(cg->out, "  mov %s, %s\n", "rax", oreg);
@@ -3162,7 +3242,8 @@ static void gen_expr_body(CG *cg, Expr *e) {
         /* A scalar LHS that lives in a register is written in place; no
          * address is materialized. */
         const char *lreg = NULL;
-        if (e->lhs != NULL && e->lhs->kind == E_VAR && !is_aggregate(e->type) && !e->lhs->agg_param)
+        if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !is_aggregate(e->type) &&
+            !e->lhs->agg_param)
             lreg = local_reg(cg, e->lhs->slot);
 
         if (lreg != NULL) {
@@ -3417,7 +3498,8 @@ static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
         long long cr;
         int lhs_direct = 0;
         const char *lreg = NULL;
-        if (cond->lhs->kind == E_VAR && !cond->lhs->agg_param && !is_aggregate(cond->lhs->type))
+        if (cond->lhs->kind == E_VAR && cond->lhs->gidx < 0 && !cond->lhs->agg_param &&
+            !is_aggregate(cond->lhs->type))
             lreg = local_reg(cg, cond->lhs->slot);
         if (lreg != NULL)
             lhs_direct = 1; /* compare the register directly, no rax copy */
@@ -3487,7 +3569,10 @@ static void gen_void_expr(CG *cg, Expr *e) {
      * to the value inside it. Those go to gen_expr, which dereferences. */
     if (e != NULL && e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR &&
         !is_aggregate(e->type) && !e->lhs->agg_param && !e->lhs->boxed) {
-        const char *lreg = local_reg(cg, e->lhs->slot);
+        /* Never a register for a global: it has no slot, so this is NULL and the
+         * path below falls through to an address-and-store, which is what a
+         * global needs. */
+        const char *lreg = e->lhs->gidx < 0 ? local_reg(cg, e->lhs->slot) : NULL;
         if (lreg != NULL) {
             if (e->compound) {
                 long long cr;
@@ -4006,6 +4091,12 @@ static int licm_invariant(Expr *e, const unsigned char *written) {
     case E_BOOL:
         return 1;
     case E_VAR:
+        /* Never a global. A global is writable by any call anywhere in the loop,
+         * including one in another file, so a read of one is not provably
+         * invariant however obviously loop-local it looks -- and `e->slot` is -1
+         * for a global, which the next line would happily call invariant. */
+        if (e->gidx >= 0)
+            return 0;
         /* A slot past the end of the table is one the pass cannot track, so it
          * is not *provably* invariant and is treated as not invariant. Reading
          * it as invariant silently hoisted every expression over it out of its
@@ -5007,6 +5098,19 @@ static void dbg_write_info(CG *cg) {
  * it `export`; both bypass this function. */
 #define Z_SYM_PREFIX "z$"
 
+/* The symbol a global is emitted under. Separate from z_sym only in spelling --
+ * `z$g_` rather than `z$` -- so a global can never collide with a function of
+ * the same name, which matters because both are program-global symbols and a
+ * collision would be the assembler's problem rather than the compiler's. */
+char *codegen_global_sym(Arena *arena, const char *name) {
+    static const char pre[] = Z_SYM_PREFIX "g_";
+    size_t n = strlen(name);
+    char *out = arena_alloc(arena, n + sizeof pre);
+    memcpy(out, pre, sizeof pre);
+    memcpy(out + sizeof pre - 1, name, n + 1);
+    return out;
+}
+
 static const char *z_sym(CG *cg, const char *name) {
     if (name == NULL)
         return Z_SYM_PREFIX "<null>";
@@ -5272,6 +5376,141 @@ static void emit_escaped_n(CG *cg, const char *s, int n) {
     }
 }
 
+/* ---- gvar: storage and the init pass ----
+ *
+ * Two shapes, and which one a global gets is decided by its initializer rather
+ * than by its type:
+ *
+ *   - a literal initializer is emitted as data. `gint n = 5;` is one
+ *     instruction's worth of constant, and a `.quad` in .data is both smaller
+ *     and impossible to get wrong at run time.
+ *   - anything else is zeroed in .bss and filled by z_ginit, which the shim
+ *     calls before the entry point. `gvar x = new R(5);` cannot be a constant,
+ *     and the alternative -- requiring every global to be a literal -- would
+ *     leave out most of what a global is for.
+ *
+ * Zero rather than left undefined on purpose: a program that reads a global
+ * whose initializer has not run yet reads zero, which is diagnosable, where
+ * reading whatever was in .bss is not. z_ginit runs before any user code, so
+ * that window is only reachable from another initializer.
+ */
+/* Whether anything needs the run-time init pass at all. Both the emitter and the
+ * entry shim ask this, and they have to agree: a program whose globals are all
+ * literals emits no z_ginit, so a shim that called it unconditionally would not
+ * link. */
+static int globals_need_init(CG *cg) {
+    for (int i = 0; i < cg->nglobals; i++)
+        if (!cg->globals[i].is_const && cg->globals[i].init != NULL)
+            return 1;
+    return 0;
+}
+
+static void emit_global_storage(CG *cg) {
+    if (cg->nglobals == 0 || cg->globals == NULL)
+        return;
+
+    int any_const = 0, any_zero = 0;
+    for (int i = 0; i < cg->nglobals; i++) {
+        if (cg->globals[i].is_const)
+            any_const = 1;
+        else
+            any_zero = 1;
+    }
+
+    if (any_const) {
+        buf_puts(cg->out, "  .section .data\n");
+        for (int i = 0; i < cg->nglobals; i++) {
+            const GlobalTable *g = &cg->globals[i];
+            if (!g->is_const)
+                continue;
+            buf_printf(cg->out, "  .globl %s\n", g->sym);
+            if (is_kind(g->type, TK_F64)) {
+                /* The raw 8 bytes of the double, which is what .quad needs.
+                 * Going through an assembler-visible float directive would
+                 * work too, but this keeps every global one shape to read. */
+                unsigned long long bits;
+                double d = g->dval;
+                memcpy(&bits, &d, sizeof bits);
+                buf_printf(cg->out, "%s:\n  .quad %llu\n", g->sym, bits);
+            } else if (is_kind(g->type, TK_BOOL)) {
+                buf_printf(cg->out, "%s:\n  .byte %d\n", g->sym, g->ival != 0 ? 1 : 0);
+            } else if (is_kind(g->type, TK_PTR)) {
+                buf_printf(cg->out, "%s:\n  .quad 0\n", g->sym);
+            } else {
+                buf_printf(cg->out, "%s:\n  .quad %lld\n", g->sym, g->ival);
+            }
+        }
+    }
+
+    if (any_zero) {
+        buf_puts(cg->out, "  .bss\n");
+        for (int i = 0; i < cg->nglobals; i++) {
+            const GlobalTable *g = &cg->globals[i];
+            if (g->is_const)
+                continue;
+            buf_printf(cg->out, "  .globl %s\n  .align 8\n%s:\n  .zero %d\n", g->sym, g->sym,
+                       type_size(g->type) > 0 ? type_size(g->type) : 8);
+        }
+    }
+    buf_puts(cg->out, "  .text\n");
+}
+
+/* The initializer pass. Emitted only when something actually needs it, so a
+ * program with no computed global carries no extra symbol and no extra call.
+ *
+ * It runs at the default optimization level whatever the command line asked
+ * for. These are assignments at run time with no enclosing control flow, so
+ * there is nothing for a level to do to them, and emitting it at -O3 would mean
+ * the allocator's frame sizing had to be right in a body no other path reaches
+ * -- for no gain. */
+static void emit_global_init(CG *cg) {
+    if (!globals_need_init(cg))
+        return;
+
+    /* The body needs the same scratch state a function does, since gen_expr may
+     * spill a temporary or want a label. Reset rather than inherited from the
+     * last function emitted, so an initializer cannot start inside somebody
+     * else's frame. */
+    cg->cur_locals_bytes = 0;
+    cg->cur_ret_struct = 0;
+    cg->cur_ret_slot = 0;
+    cg->temp_top = 0;
+    cg->temp_high = 0;
+    cg->cur_sym = "z_ginit";
+
+    /* Measured first and discarded, exactly as emit_function does: the frame
+     * cannot be sized until the body has said how deep it went, and emitting
+     * before knowing that would put a prologue in the way of the rollback. */
+    size_t saved_len = cg->out->len;
+    cg->measuring = 1;
+    for (int i = 0; i < cg->nglobals; i++) {
+        const GlobalTable *g = &cg->globals[i];
+        if (g->is_const || g->init == NULL)
+            continue;
+        gen_expr(cg, g->init);
+    }
+    cg->measuring = 0;
+    cg->out->len = saved_len;
+    if (cg->out->data != NULL)
+        cg->out->data[saved_len] = '\0';
+    cg->temp_top = 0;
+
+    int frame = align16(8 + cg->cur_locals_bytes + 8 * (cg->temp_high + 1));
+    buf_printf(cg->out, "  .globl z_ginit\nz_ginit:\n  push rbp\n  mov rbp, rsp\n");
+    buf_printf(cg->out, "  sub rsp, %d\n", frame);
+    for (int i = 0; i < cg->nglobals; i++) {
+        const GlobalTable *g = &cg->globals[i];
+        if (g->is_const || g->init == NULL)
+            continue;
+        gen_expr(cg, g->init);
+        if (is_kind(g->type, TK_F64))
+            buf_printf(cg->out, "  movsd QWORD PTR [rip + %s], %s\n", g->sym, XMM_ACC);
+        else
+            buf_printf(cg->out, "  mov QWORD PTR [rip + %s], rax\n", g->sym);
+    }
+    buf_puts(cg->out, "  mov rsp, rbp\n  pop rbp\n  ret\n");
+}
+
 char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
                         const CodegenOptions *opts) {
     Buf out;
@@ -5286,6 +5525,8 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
         cg.bounds_checks = opts->bounds_checks;
         cg.debug_info = opts->debug_info;
         cg.opt = opts->opt_level;
+        cg.globals = opts->globals;
+        cg.nglobals = opts->nglobals;
         if (cg.opt < Z_OPT_MIN)
             cg.opt = Z_OPT_MIN;
         if (cg.opt > Z_OPT_MAX)
@@ -5335,11 +5576,20 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
         }
     }
 
+    emit_global_storage(&cg);
+    emit_global_init(&cg);
+
     /* The C runtime calls main(); our entry point is renamed z_main so it
      * never collides with the user's own `main`. The `push rbp` realigns the
      * stack for the ABI. */
     if (entry != NULL) {
         buf_puts(&out, "  .globl main\nmain:\n  push rbp\n  mov rbp, rsp\n");
+        /* Before the entry point, so every global is initialized by the time any
+         * user code can read one. That is the whole reason this is a function
+         * rather than a .data initializer: `gvar x = other;` depends on `other`
+         * being set first, and only a run-time pass can honour that order. */
+        if (globals_need_init(&cg))
+            buf_puts(&out, "  call z_ginit\n");
         buf_puts(&out, "  call z_main\n");
         if (!is_kind(entry->ret_type, TK_INT))
             buf_puts(&out, "  xor eax, eax\n");

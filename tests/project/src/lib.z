@@ -1,0 +1,4 @@
+// Also unpulled: every .z file under the marker joins the same unit.
+int double_it(int n) {
+    return n * 2;
+}

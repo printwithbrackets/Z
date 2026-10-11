@@ -97,11 +97,16 @@ struct Expr {
     ExprKind kind;
     Span span;
     Type *type;
-    long long ival;   /* E_INT, E_BOOL */
-    double dval;      /* E_F64 */
-    int str_id;       /* E_STRING */
-    char *name;       /* E_VAR, E_CALL, E_FIELD (field name) */
-    int slot;         /* E_VAR: local slot index (resolved during parse) */
+    long long ival; /* E_INT, E_BOOL */
+    double dval;    /* E_F64 */
+    int str_id;     /* E_STRING */
+    char *name;     /* E_VAR, E_CALL, E_FIELD (field name) */
+    int slot;       /* E_VAR: local slot index (resolved during parse) */
+    /* E_VAR: index into the program's GlobalTable, or -1 for a frame slot.
+     * A global has no slot at all -- `offset` would be meaningless -- so which
+     * of the two this is has to travel with the expression rather than be
+     * re-derived from the name at every pass. */
+    int gidx;
     int agg_param;    /* E_VAR param of struct/union type: slot holds a pointer */
     int field_off;    /* E_FIELD: byte offset of the field */
     int vtable_index; /* E_VCALL: slot index into the receiver's vtable */
@@ -187,6 +192,12 @@ struct Stmt {
     /* S_BLOCK and the top-level program */
     Stmt **items;
     int nitems;
+    /* The top-level program's `gvar` list, so it outlives the Parser that owns
+     * it -- parse_program's Parser is a stack local and is gone before the
+     * driver can ask what the program declared. Typed as void* because the list
+     * is the parser's business; ast.h is the shared vocabulary and does not get
+     * to know what a GlobalDef is. */
+    void *globals_head;
     /* S_BLOCK: the scope this block introduced, so the destructor pass can find
      * the locals it owns. NULL on a block that shares its enclosing scope. */
     struct Scope *own_scope;

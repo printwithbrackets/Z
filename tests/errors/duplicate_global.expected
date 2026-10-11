@@ -1,0 +1,1 @@
+error: global 'counter' is already declared at tests/errors/duplicate_global.z:4

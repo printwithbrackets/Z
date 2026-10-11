@@ -1,0 +1,48 @@
+// `gvar` and `lvar`: three tiers under one name, and how to reach each.
+//
+// A `gvar` is project storage rather than a frame slot, so it is declared with
+// a `g` in front of the type name and read by name from anywhere. A `lvar` is a
+// local that outranks a plain `var` of the same name in the same scope -- which
+// is why the two may be declared together at all.
+//
+// Where all three exist, the priority is lvar, then var, then gvar. The three
+// forms `gvar(x)`, `var(x)` and `lvar(x)` reach one tier on purpose, which is
+// what makes the plain `var` above reachable at all.
+gint base = 10;    // a literal initializer, so its storage is .data
+gint total = 0;    // no initializer to fold, so .bss and z_ginit fills it
+gfloat scale = 1.5;
+gbool verbose = true;
+gstring label = "ready";
+
+int tiers() {
+    var what = 2;
+    lvar what = 1;
+    Console.WriteLog(var(what));   // 2: the plain one, named on purpose
+    Console.WriteLog(lvar(what));  // 1: the lvar, named on purpose
+    Console.WriteLog(what);        // 1: the priority rule
+    return 0;
+}
+
+int main() {
+    Console.WriteLog(base);          // 10
+    total = base + 5;
+    Console.WriteLog(total);         // 15
+    total = total + 2;               // a compound store, still through the global
+    Console.WriteLog(total);         // 17
+    Console.WriteLog(scale * 4.0);   // 6
+    if (verbose) {
+        Console.WriteLog(label);     // ready
+    }
+
+    // A `var` in front of a `gvar` of the same name. Reading `base` gives the
+    // var; `gvar(base)` is the only way back to the global.
+    var base = 99;
+    Console.WriteLog(base);          // 99
+    Console.WriteLog(gvar(base));    // 10
+
+    // And a global written through a call, which is the reason the tier is not
+    // resolved once at compile time but per read.
+    tiers();
+    Console.WriteLog(base);          // 99, the var is still in scope
+    return 0;
+}

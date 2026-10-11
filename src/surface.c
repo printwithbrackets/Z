@@ -70,14 +70,46 @@ int surface_add(Surface *s, const char *surface, const char *internal) {
     return 0;
 }
 
-const char *surface_lookup(const Surface *s, const char *name, size_t n) {
-    if (s == NULL)
-        return NULL;
+/* One step: what `name` maps to, or NULL if it maps to nothing. */
+static const char *lookup_once(const Surface *s, const char *name, size_t n) {
     for (int i = 0; i < s->n; i++) {
         if (strlen(s->entries[i].surface) == n && eq_ci(s->entries[i].surface, name, n))
             return s->entries[i].internal;
     }
     return NULL;
+}
+
+const char *surface_lookup(const Surface *s, const char *name, size_t n) {
+    if (s == NULL)
+        return NULL;
+    const char *hit = lookup_once(s, name, n);
+    if (hit == NULL)
+        return NULL;
+
+    /* Follow the chain to a name nothing maps further.
+     *
+     * A mapping's right-hand side is written the way a person would write it, and
+     * they reach for the name they already aliased: `say = console.writelog`
+     * when `Console.WriteLog = print` is in the same file. Resolving one step and
+     * stopping leaves that reading a name no code has, so `say(...)` fails with
+     * "undefined function 'console.writelog'" -- pointing at the alias as though
+     * the program had asked for one by that name.
+     *
+     * Bounded by the entry count, which is also what makes a cycle terminate:
+     * `aa = bb` and `bb = aa` cannot both be honoured, and returning the entry
+     * that started it is the one outcome that cannot be wrong about what the
+     * project asked for. It still fails to resolve, which is the honest result
+     * for a mapping that has no meaning.
+     */
+    for (int steps = 0; steps < s->n; steps++) {
+        const char *next = lookup_once(s, hit, strlen(hit));
+        if (next == NULL)
+            break;
+        if (strcmp(next, name) == 0)
+            break; /* back where it started: a cycle */
+        hit = next;
+    }
+    return hit;
 }
 
 const char *surface_name(const Surface *s, const char *name) {
@@ -193,6 +225,9 @@ int surface_discover(Surface *s, const char *src_path) {
         FILE *probe = fopen(cand, "r");
         if (probe != NULL) {
             fclose(probe);
+            /* Empty is fine. It is a project with the shipped names, and loading
+             * it costs one open of a file with no lines. Rejecting it would mean
+             * a project could not be marked without inventing a setting. */
             return surface_load(s, cand) == 0 ? 1 : -1;
         }
         if (strcmp(dir, "/") == 0)

@@ -370,9 +370,9 @@ be the one thing a diagnostic must not do.
 
 #### A project picks its own dialect
 
-The names above ship with Z. A project overrides them in a `z.surface` file
-beside its code, one mapping per line — what the program writes, then `=`, then
-what the compiler calls it:
+The names above ship with Z. A project overrides them in a `.zignore/config.z`
+file, one mapping per line — what the program writes, then `=`, then what the
+compiler calls it:
 
 ```
 # a comment
@@ -390,15 +390,15 @@ b.push("hello ");
 say(b.finish());
 ```
 
-The compiler looks for `z.surface` starting in the source file's own directory
-and walking up, and takes the first one it finds. The nearest wins, so a project
+The compiler looks for `.zignore/config.z` starting in the source file's own
+directory and walking up, and takes the first one it finds. The nearest wins, so a project
 vendored inside another keeps its own dialect. **One** manifest governs the whole
 compilation rather than one per file, because `import` splices rather than
 isolates: a library you import is read in *your* dialect, which is the same rule
 `import` already follows.
 
 ```sh
-z run main.z                      # uses ./z.surface if the walk finds one
+z run main.z                      # uses ./.zignore/config.z if the walk finds one
 z run main.z --no-surface         # ignore it; the shipped names only
 z run main.z --surface=path/to/x  # use this one instead of searching
 ```
@@ -1431,6 +1431,58 @@ SUMMARY: AddressSanitizer: 8008 byte(s) leaked in 1 allocation(s).
 
 The direction is deliberate: a leak is visible under AddressSanitizer and costs
 memory, whereas a double free corrupts the heap.
+
+### Three tiers of variable
+
+One name can mean three variables. A `gvar` has its own storage and is visible
+everywhere; an `lvar` is a local that outranks a plain `var` of the same name.
+Where they collide, a bare name means **`lvar`, then `var`, then `gvar`**:
+
+```csharp
+gvar base = 10;                 // a global
+
+int main() {
+    var base = 99;              // a var, which shadows the global
+    Console.WriteLog(base);         // 99
+    Console.WriteLog(gvar(base));   // 10, named on purpose
+    return 0;
+}
+```
+
+`gvar` and `lvar` are two spellings of one rule: a prefix and any type name, so
+`gint lint gbool lbool gstring lstring gfloat lfloat` all work, and so does
+`gPoint` for a class you declared yourself.
+
+The other two declarations are hidden behind the priority rule, and the three
+parenthesised forms are how you reach them — `gvar(x)` is the global and only
+the global, `var(x)` the plain one, `lvar(x)` the local. Ask for a tier that
+isn't there and it is an error rather than a quiet fall back to the other one.
+
+A `gvar` is visible everywhere in the project, not just the file it is written
+in. To say where the project starts, put an empty marker file at
+`.zignore/config.z`:
+
+```text
+myapp/
+  .zignore/config.z
+  main.z
+  src/state.z                  // gint total = 10;
+```
+
+```csharp
+// main.z -- nothing imports src/state.z
+int main() {
+    Console.WriteLog(total);   // 10
+    return 0;
+}
+```
+
+`gzz build main.z` walks up from `main.z`, finds the marker in `myapp/`, and
+compiles every `.z` file below it as one program. That is the whole rule: no
+`import`, and no order to keep straight, because one program has one namespace.
+
+It does mean one entry point. Two files that each define `main` is a compile
+error naming both, not a duplicate symbol the linker catches for you.
 
 ### `move`
 

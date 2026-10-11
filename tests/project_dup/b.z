@@ -1,0 +1,5 @@
+// A second entry point. One program has one main, and now that a project is one
+// program this is reachable, so it has to be reported rather than assembled.
+int main() {
+    return 0;
+}
