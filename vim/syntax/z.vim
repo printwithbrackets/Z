@@ -6,7 +6,8 @@
 " the decoder in lex_string_escape() there, the builtins mirror
 " Z_INTRINSIC_LIST and Z_BUILTIN_LIST in src/limits.h, the duration units mirror
 " duration_unit_us() in src/lexer.c, and the surface names mirror the defaults
-" in surface_new() (src/surface.c).
+" in surface_new() (src/surface.c). Keep the builtin list below in sync with
+" Z_INTRINSIC_LIST and Z_BUILTIN_LIST in src/limits.h by hand.
 "
 " NOTE 1: `:syn` does not support line continuation, so every item is one line.
 " NOTE 2: every pattern is in single quotes. In a double-quoted Vim string `\<`

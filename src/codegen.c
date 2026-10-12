@@ -1,5 +1,6 @@
 #include "codegen.h"
-#include "limits.h"
+#include "limits.h" /* project-local: Z_MAX_ARGS etc. */
+#include <limits.h> /* system: INT_MAX for checked growth */
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -20,11 +21,19 @@ static void die_oom(void) {
 }
 
 static void buf_reserve(Buf *b, size_t extra) {
-    if (b->len + extra + 1 <= b->cap)
+    if (extra > SIZE_MAX - b->len - 1)
+        die_oom();
+    size_t need = b->len + extra + 1;
+    if (need <= b->cap)
         return;
     size_t ncap = b->cap == 0 ? 4096 : b->cap;
-    while (ncap < b->len + extra + 1)
+    while (ncap < need) {
+        if (ncap > SIZE_MAX / 2) {
+            ncap = need;
+            break;
+        }
         ncap *= 2;
+    }
     char *nd = realloc(b->data, ncap);
     if (nd == NULL)
         die_oom();
@@ -76,6 +85,9 @@ typedef struct {
     int type_code; /* dbg_type_of result, or 0 for untyped */
 } DbgVar;
 
+/* Debug-only cap: at most 256 described locals per function. Only affects -g
+ * DWARF output; past the cap the first 256 variables are described and one
+ * warning is emitted (see dbg_add_var). Codegen itself is unaffected. */
 #define DBUG_MAX_VARS 256
 
 typedef struct {
@@ -93,10 +105,14 @@ typedef struct {
     int nvars;
 } DbgFunc;
 
+/* Legacy cap, now unused: DbgFunc storage is grown dynamically with realloc
+ * (see emit_function), so there is no function-count limit. Kept so the
+ * historical bound stays visible. */
 #define DBUG_MAX_FUNCS 1024
 
-/* Distinct source files a compilation unit spans (an `import` pulls in more),
- * which is how many entries the DWARF file table can hold. */
+/* Debug-only cap: at most 128 distinct source files in the DWARF file table
+ * (an `import` pulls in more). Past the cap line markers reuse file 1 and one
+ * warning is emitted (see dbg_file); the program itself is unaffected. */
 #define MAX_DBG_FILES 128
 
 /* Callee-saved registers used to hold local variables whose address is never
@@ -122,19 +138,28 @@ typedef struct {
     IfaceDef *idef;
 } ItabUse;
 
+/* Correctness cap: at most 256 distinct (implementing type, interface) pairs
+ * per compilation. Past the cap compilation fails with an explicit error
+ * (see iface_note_itab) rather than emitting a reference to a table that was
+ * never written, which would fail later at link time with no Z-level message. */
 #define MAX_ITABS 256
 
 /* The symbol an itab is emitted under. Derived from both names, so two types
  * implementing one interface get two arrays, and one type implementing two
- * interfaces gets two arrays. */
-static const char *iface_itab_symbol(IfaceDef *id, StructDef *impl) {
-    static char bufs[8][160];
-    static int next = 0;
-    char *b = bufs[next];
-    next = (next + 1) % 8;
-    snprintf(b, sizeof bufs[0], "$itab$%s$%s", impl != NULL ? impl->name : "?",
-             id != NULL ? id->name : "?");
-    return b;
+ * interfaces gets two arrays. Sized dynamically on the arena: a fixed buffer
+ * here truncated long type names so two distinct pairs shared one symbol.
+ * Takes the arena directly so this helper can live before the CG definition. */
+static const char *iface_itab_symbol(Arena *arena, IfaceDef *id, StructDef *impl) {
+    const char *an = impl != NULL && impl->name != NULL ? impl->name : "?";
+    const char *bn = id != NULL && id->name != NULL ? id->name : "?";
+    int need = snprintf(NULL, 0, "$itab$%s$%s", an, bn);
+    if (need < 0)
+        die_oom();
+    char *out = arena_alloc(arena, (size_t)need + 1);
+    if (out == NULL)
+        die_oom();
+    snprintf(out, (size_t)need + 1, "$itab$%s$%s", an, bn);
+    return out;
 }
 
 /* Per-scalar-local register-allocation info, keyed by frame slot. */
@@ -191,7 +216,8 @@ typedef struct {
     int label_counter;
     LoopCtx loops[MAX_LOOP_DEPTH];
     int loop_depth;
-    int bounds_checks; /* emit a runtime range check on every array index */
+    int bounds_checks; /* array/string range checks and `*` null checks; one flag
+                            covers both (--no-bounds disables both) */
     int debug_info;    /* emit DWARF: line table plus function/local DIEs */
     int opt;           /* Z_OPT_* level this function is generated at */
     int measuring;     /* 1 during the sizing pass, which emits no code */
@@ -269,7 +295,12 @@ static int rodata_add(CG *cg, uint64_t v) {
         if (cg->rodata[i] == v)
             return i;
     if (cg->nrodata == cg->ro_cap) {
-        cg->ro_cap = cg->ro_cap ? cg->ro_cap * 2 : 8;
+        if (cg->ro_cap > INT_MAX / 2)
+            die_oom();
+        int ncap = cg->ro_cap ? cg->ro_cap * 2 : 8;
+        if ((size_t)ncap > SIZE_MAX / sizeof(uint64_t))
+            die_oom();
+        cg->ro_cap = ncap;
         cg->rodata = realloc(cg->rodata, (size_t)cg->ro_cap * sizeof(uint64_t));
         if (cg->rodata == NULL)
             die_oom();
@@ -508,9 +539,10 @@ static void assign_args(Type **ptypes, int n, int hidden, ArgAssign *out) {
 
 /* Emits a null check on the address in rax before it is loaded through or
  * stored through. A null pointer otherwise faults at a low address that the
- * OS maps to nothing, which is a bare SIGSEGV with no message. Turned off by
- * --no-bounds along with the array checks, so the one flag still means "trust
- * the program". Preserves rax; clobbers only rdi. */
+ * OS maps to nothing, which is a bare SIGSEGV with no message. Controlled by
+ * the same flag as the array checks: --no-bounds turns off both, so the one
+ * flag means "trust the program" (there is no separate --no-null-check).
+ * Preserves rax; clobbers only rdi. */
 static void emit_null_check(CG *cg) {
     if (!cg->bounds_checks)
         return;
@@ -874,7 +906,12 @@ static LocalInfo *li_for(CG *cg, int slot) {
         if (cg->locals[i].slot == slot)
             return &cg->locals[i];
     if (cg->nlocals == cg->loc_cap) {
-        cg->loc_cap = cg->loc_cap ? cg->loc_cap * 2 : 16;
+        if (cg->loc_cap > INT_MAX / 2)
+            die_oom();
+        int ncap = cg->loc_cap ? cg->loc_cap * 2 : 16;
+        if ((size_t)ncap > SIZE_MAX / sizeof(LocalInfo))
+            die_oom();
+        cg->loc_cap = ncap;
         cg->locals = realloc(cg->locals, (size_t)cg->loc_cap * sizeof(LocalInfo));
         if (cg->locals == NULL)
             die_oom();
@@ -1837,7 +1874,11 @@ static const char *note_type_name(CG *cg, const char *name) {
         if (strcmp(cg->tname[i], name) == 0)
             return name;
     if (cg->ntname == cg->tname_cap) {
+        if (cg->tname_cap > INT_MAX / 2)
+            die_oom();
         int ncap = cg->tname_cap == 0 ? 8 : cg->tname_cap * 2;
+        if ((size_t)ncap > SIZE_MAX / sizeof(char *))
+            die_oom();
         const char **bigger = realloc(cg->tname, (size_t)ncap * sizeof(char *));
         if (bigger == NULL)
             die_oom();
@@ -2373,16 +2414,18 @@ static void gen_intrinsic(CG *cg, Expr *e) {
  * calling the override rather than the implementation the conversion site
  * happened to name. */
 
-/* Records that this pair is needed. Returns 0 if the table is full, which the
- * caller treats as "do not emit": a program needing more distinct interface
- * conversions than this has been tested against should fail to link rather than
- * silently call the wrong thing. */
+/* Records that this pair is needed. Fails the compilation with an explicit
+ * error when the table is full, rather than emitting a reference to a table
+ * that was never written (which would fail later at link time with no
+ * Z-level message) or silently calling the wrong entry. */
 static int iface_note_itab(CG *cg, StructDef *impl, IfaceDef *idef) {
     for (int i = 0; i < cg->nitabs; i++)
         if (cg->itabs[i].impl == impl && cg->itabs[i].idef == idef)
             return 1;
-    if (cg->nitabs >= MAX_ITABS)
-        return 0;
+    if (cg->nitabs >= MAX_ITABS) {
+        fprintf(stderr, "z: too many distinct interface conversions (max %d)\n", MAX_ITABS);
+        exit(1);
+    }
     cg->itabs[cg->nitabs].impl = impl;
     cg->itabs[cg->nitabs].idef = idef;
     cg->nitabs++;
@@ -2399,7 +2442,11 @@ static void gen_stmt_body(CG *cg, Stmt *s);
  * unpinned slot would be handed straight back out to them. */
 static void pin_temp(CG *cg, int t) {
     if (cg->npinned == cg->pin_cap) {
+        if (cg->pin_cap > INT_MAX / 2)
+            die_oom();
         int ncap = cg->pin_cap == 0 ? 8 : cg->pin_cap * 2;
+        if ((size_t)ncap > SIZE_MAX / sizeof(int))
+            die_oom();
         int *nd = realloc(cg->pinned, (size_t)ncap * sizeof(int));
         if (nd == NULL) {
             fprintf(stderr, "z: out of memory\n");
@@ -2814,7 +2861,7 @@ static void gen_expr_body(CG *cg, Expr *e) {
         store_temp(cg, rtmp);
         if (!cg->measuring)
             iface_note_itab(cg, impl, id);
-        buf_printf(cg->out, "  lea rdi, [rip + %s]\n", iface_itab_symbol(id, impl));
+        buf_printf(cg->out, "  lea rdi, [rip + %s]\n", iface_itab_symbol(cg->arena, id, impl));
         load_temp(cg, rtmp, "rsi");
         buf_printf(cg->out, "  call z_newiface\n");
         cg->temp_top = rtmp;
@@ -4766,8 +4813,18 @@ static int dbg_file(CG *cg, const char *path) {
         if (strcmp(cg->dbg_file_names[i], path) == 0)
             return i + 1;
     }
-    if (cg->dbg_file_count >= MAX_DBG_FILES)
+    if (cg->dbg_file_count >= MAX_DBG_FILES) {
+        /* Debug-only degradation: attribute further files to file 1 and warn
+         * once, rather than silently misattributing or asserting. The program
+         * itself is unaffected. */
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "z: warning: too many debug files (max %d), keeping first %d\n",
+                    MAX_DBG_FILES, MAX_DBG_FILES);
+        }
         return 1;
+    }
     cg->dbg_file_names[cg->dbg_file_count] = path;
     cg->dbg_file_count++;
     buf_printf(cg->out, "  .file %d \"%s\"\n", cg->dbg_file_count, path);
@@ -4834,11 +4891,20 @@ static int dbg_type_of(Type *t) {
 }
 
 /* Records a described variable for a function, ignoring the ones that cannot be
- * described honestly or do not fit. */
+ * described honestly. Past DBUG_MAX_VARS the first 256 are kept and one
+ * warning is emitted: debug-only degradation, never a silent truncation of the
+ * program itself. */
 static void dbg_add_var(CG *cg, DbgFunc *f, const char *name, Span span, int slot, int reg,
                         int type_code) {
-    if (f->nvars >= DBUG_MAX_VARS)
+    if (f->nvars >= DBUG_MAX_VARS) {
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "z: warning: too many debug variables (max %d), keeping first %d\n",
+                    DBUG_MAX_VARS, DBUG_MAX_VARS);
+        }
         return;
+    }
     if (name == NULL || name[0] == '\0')
         return;
     /* A name the compiler generated, not one the user wrote. */
@@ -5184,7 +5250,11 @@ static void emit_function(CG *cg, Stmt *fn) {
         snprintf(dbg_begin, sizeof dbg_begin, ".Ldbg_b%d", cg->dbg_nfuncs);
         snprintf(dbg_end, sizeof dbg_end, ".Ldbg_e%d", cg->dbg_nfuncs);
         if (cg->dbg_nfuncs == cg->dbg_funcs_cap) {
+            if (cg->dbg_funcs_cap > INT_MAX / 2)
+                die_oom();
             int ncap = cg->dbg_funcs_cap == 0 ? 32 : cg->dbg_funcs_cap * 2;
+            if ((size_t)ncap > SIZE_MAX / sizeof(DbgFunc))
+                die_oom();
             DbgFunc *nf = realloc(cg->dbg_funcs, (size_t)ncap * sizeof(DbgFunc));
             if (nf == NULL)
                 die_oom();
@@ -5644,7 +5714,7 @@ char *codegen_emit_opts(Arena *arena, Stmt *program, StringTable *strings,
             }
             buf_puts(&out, "  .section .rodata\n");
         }
-        buf_printf(&out, "%s:\n", iface_itab_symbol(id, impl));
+        buf_printf(&out, "%s:\n", iface_itab_symbol(cg.arena, id, impl));
         for (int m = 0; m < id->nmethods; m++) {
             StructMethod *sm = struct_find_method(impl, id->methods[m].name);
             if (impl->is_class) {

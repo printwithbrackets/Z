@@ -1,0 +1,6 @@
+iter 0
+drop 20
+drop 21
+iter 2
+drop 22
+after continue

@@ -1,0 +1,88 @@
+/* File I/O: the `Result` layer over the raw descriptor builtins.
+ *
+ * The builtins (`open`, `close`, `read_byte`, `write_bytes`, `read_line`,
+ * `io_errno`, `io_eof`) are the floor: they report failure as -1 and leave the
+ * reason in errno. This file is the layer the roadmap asks for, turning that
+ * into a value: `Result<File*, IoError*>` from the opener, `Result<_, IoError*>`
+ * from everything that can fail afterwards.
+ *
+ * Both sides are classes because a `Result` payload must be one machine word.
+ * A class handle is a pointer, so it fits; a struct by value does not. That is
+ * also what lets the error carry a message without the `Result` growing.
+ *
+ * End of file is an `Err` with code 0 rather than a third state, so a loop
+ * ends in the same arm an error does and tells the two apart by the code.
+ * `readLine` follows the builtin it wraps: a line without its terminator, and
+ * an `Err` only when nothing was read because the end was already there. An
+ * empty line in the middle of a file is `Ok("")`, not the end.
+ */
+
+class IoError {
+    int code;
+    string message;
+
+    IoError(int c, string m) { this.code = c; this.message = m; }
+
+    string describe() { return this.message + " (errno " + int_to_string(this.code) + ")"; }
+}
+
+class File {
+    int fd;
+    bool closed;
+
+    File(int f) { this.fd = f; this.closed = false; }
+
+    /* Closes on scope end if the program did not. An explicitly closed file
+     * stays closed rather than closing twice. */
+    ~File() { if (!this.closed) { close(this.fd); } }
+
+    /* The bytes written, or why the write failed. */
+    Result<int, IoError*> write(string s) {
+        var n = write_bytes(this.fd, s);
+        if (n < 0) { return Err(new IoError(io_errno(), "write failed")); }
+        return Ok(n);
+    }
+
+    /* One byte in 0..255, or the end (`code == 0`) or why the read failed. */
+    Result<int, IoError*> readByte() {
+        var b = read_byte(this.fd);
+        if (b >= 0) { return Ok(b); }
+        if (io_eof() != 0) { return Err(new IoError(0, "end of file")); }
+        return Err(new IoError(io_errno(), "read failed"));
+    }
+
+    /* A line without its terminator, or the end when nothing was left to read.
+     * A read error partway through is the line so far: the builtin it wraps
+     * reports the end and the error the same way, and inventing a distinction
+     * here would be guessing rather than reporting.
+     *
+     * `move` hands the line to the `Ok` rather than sharing it: without it the
+     * scope teardown releases the local's bytes on the way out, leaving the
+     * payload pointing at memory nothing owns. An `int` payload needs none of
+     * this, which is why `readByte` above does not say it. */
+    Result<string, IoError*> readLine() {
+        var line = read_line(this.fd);
+        if (len(line) == 0 && io_eof() != 0) { return Err(new IoError(0, "end of file")); }
+        return Ok(move line);
+    }
+
+    /* Closes, and remembers it did so the destructor does not again. Closing
+     * twice is `Ok(0)` rather than an error: the file is closed either way,
+     * which is what the caller asked about. */
+    Result<int, IoError*> close() {
+        if (this.closed) { return Ok(0); }
+        var r = close(this.fd);
+        this.closed = true;
+        if (r < 0) { return Err(new IoError(io_errno(), "close failed")); }
+        return Ok(r);
+    }
+}
+
+/* Opens `path` in mode "r", "w" or "a" ("w" truncates, "a" appends). A bad
+ * mode and a missing file are both an `Err` carrying errno and the path,
+ * which is the part with any use in it. */
+Result<File*, IoError*> openFile(string path, string mode) {
+    var fd = open(path, mode);
+    if (fd < 0) { return Err(new IoError(io_errno(), "open failed: " + path)); }
+    return Ok(new File(fd));
+}

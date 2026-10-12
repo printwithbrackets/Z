@@ -129,7 +129,8 @@ makes them fail the build. Anything the compiler does not recognize is passed
 through to the linker.
 
 `--no-bounds` also drops the null-pointer check on `*`, so it is not only a
-throughput flag. With checks on, dereferencing a null pointer prints
+throughput flag. There is no separate `--no-null-check` flag: one flag covers
+both. With checks on, dereferencing a null pointer prints
 `runtime error: null pointer dereference` and exits 134; with `--no-bounds` it is
 a bare SIGSEGV and exit 139. The check covers the `*` operator only — `p.field`
 through a null pointer is still a bare SIGSEGV either way.

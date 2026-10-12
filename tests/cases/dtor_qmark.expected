@@ -1,0 +1,6 @@
+drop 100
+drop 200
+try err no
+drop 100
+try err no
+done

@@ -1,0 +1,6 @@
+// Two `main` functions in one file are rejected, the same way two across a
+// project are (see the project_dup_main gate in tests/run.c, which checks the
+// same diagnostic across tests/project_dup/a.z + b.z without an .expected
+// file because the path in the message is absolute).
+int main() { return 0; }
+int main() { return 1; }

@@ -53,6 +53,15 @@ void *z_alloc(size_t size) {
  * `z_str_free` and `z_array_free`, which are the two the compiler calls. */
 void z_free(void *p) { free(p); }
 
+/* Fatal allocation-size overflow. A wrapped size is not a large allocation,
+ * it is a small one, and the copy that follows would write past it -- so an
+ * overflowing count exits rather than handing back an undersized block. The
+ * message matches the arena's for the same failure. */
+static void z_size_overflow(void) {
+    fprintf(stderr, "z: allocation size overflow\n");
+    exit(1);
+}
+
 /* ---- compiler-facing runtime API ---- */
 
 /* ---- fixed-point trigonometry ----
@@ -157,8 +166,9 @@ void *z_box_n(long n) {
 }
 
 /* Allocates the cell a bound method pointer refers to: the code address and
- * the receiver, side by side. GC-managed, so the receiver is traced and stays
- * alive for as long as the pointer does. */
+ * the receiver, side by side. Plain malloc'd memory like everything else here:
+ * the cell carries the receiver so the call has what it needs, and its
+ * lifetime is the scope's to end rather than anything traced. */
 void *z_newbinding(void *code, void *recv) {
     void **cell = (void **)z_alloc(2 * sizeof(void *));
     cell[0] = code;
@@ -169,7 +179,7 @@ void *z_newbinding(void *code, void *recv) {
 /* The same two-word cell an interface value holds, under a name that says so.
  * Kept separate rather than reusing z_newbinding because the two words mean
  * different things: here they are an itab and a receiver, not a code address and
- * a receiver. The layout, and so the collector's tracing of it, is identical. */
+ * a receiver. The layout is identical. */
 void *z_newiface(void *itab, void *recv) {
     void **cell = (void **)z_alloc(2 * sizeof(void *));
     cell[0] = itab;
@@ -184,12 +194,15 @@ long z_isqrt(long n) {
     if (n < 2)
         return n;
     long hi = 1;
-    while (hi * hi < n)
+    /* `hi <= n / hi` instead of `hi * hi < n`: the multiply overflows for
+     * large n. Doubling is safe here: the test means hi*hi <= n, so hi is at
+     * most sqrt(LONG_MAX) and twice that still fits. */
+    while (hi <= n / hi)
         hi += hi;
     long lo = hi / 2;
     while (lo < hi) {
         long mid = lo + (hi - lo + 1) / 2;
-        if (mid * mid <= n)
+        if (mid <= n / mid)
             lo = mid;
         else
             hi = mid - 1;
@@ -287,6 +300,8 @@ static char *zstr_alloc_impl(long cap) {
      * always distinguishable from a literal. See the header comment. */
     if (cap < 1)
         cap = 1;
+    if ((size_t)cap > SIZE_MAX - sizeof(ZStrHdr) - 1)
+        z_size_overflow();
     /* The header goes in the block, not in front of it. It used to be written
      * sixteen bytes *before* whatever the allocator returned, which was only in
      * bounds because the collector's own 24-byte block header left room for it:
@@ -379,6 +394,13 @@ void z_null_deref_fail(void) {
 void *z_newarray(long count, long elemsize) {
     if (count < 0)
         count = 0;
+    if (elemsize < 0)
+        elemsize = 0;
+    /* Checked in size_t so a wrapped byte count cannot come back small: the
+     * single test covers both the multiply and the header addition, since
+     * count*elemsize <= SIZE_MAX - sizeof(long) implies the sum fits. */
+    if (count > 0 && (size_t)elemsize > (SIZE_MAX - sizeof(long)) / (size_t)count)
+        z_size_overflow();
     size_t payload = (size_t)count * (size_t)elemsize;
     unsigned char *base = (unsigned char *)z_alloc(sizeof(long) + payload);
     *(long *)base = count;
@@ -406,13 +428,16 @@ void *z_newobj(long size) {
 
 char *z_concat(char *a, char *b) {
     long la = zlen(a), lb = zlen(b);
-    char *out = zstr_alloc_impl(la + lb);
+    if (la > LONG_MAX - lb)
+        z_size_overflow();
+    long total = la + lb;
+    char *out = zstr_alloc_impl(total);
     if (la > 0)
         memcpy(out, a, (size_t)la);
     if (lb > 0)
         memcpy(out + la, b, (size_t)lb);
-    out[la + lb] = '\0';
-    ZH(out)->len = la + lb;
+    out[total] = '\0';
+    ZH(out)->len = total;
     return out;
 }
 
@@ -766,6 +791,10 @@ char *z_read_line(long fd) {
             break;
         ZStrHdr *h = ZH(buf);
         if (h->cap - h->len < 1) {
+            /* Checked like the builder's growth: a wrapped cap is a small
+             * allocation the copy below would write past. */
+            if (h->cap > LONG_MAX - h->cap / 2)
+                z_size_overflow();
             long cap = h->cap + h->cap / 2;
             if (cap < 8)
                 cap = 8;
@@ -844,7 +873,10 @@ char *z_sub(const char *s, long start, long count) {
         count = 0;
     if (start > n)
         start = n;
-    if (start + count > n)
+    /* `count > n - start` instead of `start + count > n`: the sum can wrap
+     * past LONG_MAX while both inputs are valid. n - start is safe here
+     * because 0 <= start <= n. */
+    if (count > n - start)
         count = n - start;
     return zstr_copy(s + start, (size_t)count);
 }
@@ -987,7 +1019,9 @@ char *z_replace(const char *s, const char *from, const char *to) {
     /* Count first, then allocate exactly: the collector can run during either,
      * and sizing the result up front keeps the second pass allocation-free. */
     long count = 0;
-    for (long i = 0; i + lf <= n;) {
+    /* `i <= n - lf` instead of `i + lf <= n`: the sum can wrap while both
+     * inputs are valid. n - lf is safe because lf > 0. */
+    for (long i = 0; i <= n - lf;) {
         if (memcmp(s + i, from, (size_t)lf) == 0) {
             count++;
             i += lf;
@@ -995,10 +1029,19 @@ char *z_replace(const char *s, const char *from, const char *to) {
             i++;
         }
     }
-    char *out = zstr_alloc_impl(n + count * lt - count * lf);
+    /* Result length is (n - count*lf) + count*lt. count*lf <= n for
+     * non-overlapping matches, but both products are still checked so no
+     * multiply can wrap before the allocation they size. */
+    if (count > 0 && lf > LONG_MAX / count)
+        z_size_overflow();
+    long base = n - count * lf;
+    if (count > 0 && lt > (LONG_MAX - base) / count)
+        z_size_overflow();
+    long need = base + count * lt;
+    char *out = zstr_alloc_impl(need);
     char *w = out;
     for (long i = 0; i < n;) {
-        if (i + lf <= n && memcmp(s + i, from, (size_t)lf) == 0) {
+        if (lf <= n - i && memcmp(s + i, from, (size_t)lf) == 0) {
             if (lt > 0)
                 memcpy(w, to, (size_t)lt);
             w += lt;
@@ -1016,13 +1059,16 @@ char *z_repeat(const char *s, long n) {
     long ls = zlen(s);
     if (n < 0)
         n = 0;
-    char *out = zstr_alloc_impl(ls * n);
+    if (ls > 0 && n > LONG_MAX / ls)
+        z_size_overflow();
+    long total = ls * n;
+    char *out = zstr_alloc_impl(total);
     for (long i = 0; i < n; i++) {
         if (ls > 0)
             memcpy(out + ls * i, s, (size_t)ls);
     }
-    out[ls * n] = '\0';
-    ZH(out)->len = ls * n;
+    out[total] = '\0';
+    ZH(out)->len = total;
     return out;
 }
 
@@ -1044,6 +1090,10 @@ char *z_reverse(const char *s) {
  * someone's data is not what "make this 20 wide" means. */
 static char *z_pad_signed(const char *s, long width, char pad) {
     long n = zlen(s);
+    /* `-width` overflows for LONG_MIN, whose magnitude does not fit in a
+     * long. That width is far past any allocation, so it is an overflow. */
+    if (width == LONG_MIN)
+        z_size_overflow();
     long target = width < 0 ? -width : width;
     if (target <= n)
         return zstr_copy(s, (size_t)n);
@@ -1069,7 +1119,12 @@ static char *z_pad_signed(const char *s, long width, char pad) {
  * negative width reads as a mistake at every call site. */
 char *z_pad_left(const char *s, long width, char pad) { return z_pad_signed(s, width, pad); }
 
-char *z_pad_right(const char *s, long width, char pad) { return z_pad_signed(s, -width, pad); }
+char *z_pad_right(const char *s, long width, char pad) {
+    /* Negated below, so LONG_MIN would overflow before the call. */
+    if (width == LONG_MIN)
+        z_size_overflow();
+    return z_pad_signed(s, -width, pad);
+}
 
 /* Splits on every occurrence of `sep` and returns a heap array of strings, so
  * the result is used like any other array: `parts.length`, `parts[i]`.
@@ -1138,9 +1193,20 @@ void *z_split(const char *s, const char *sep) {
 char *z_join(const char *sep, void *parts) {
     long ls = zlen(sep);
     long n = parts != NULL ? *(long *)((char *)parts - 8) : 0;
+    if (n < 0)
+        n = 0;
     long total = 0;
-    for (long i = 0; i < n; i++)
-        total += zlen(((char **)parts)[i]) + (i > 0 ? ls : 0);
+    for (long i = 0; i < n; i++) {
+        long add = zlen(((char **)parts)[i]);
+        if (i > 0) {
+            if (ls > LONG_MAX - add)
+                z_size_overflow();
+            add += ls;
+        }
+        if (add > LONG_MAX - total)
+            z_size_overflow();
+        total += add;
+    }
     char *out = zstr_alloc_impl(total);
     char *w = out;
     for (long i = 0; i < n; i++) {
@@ -1253,27 +1319,42 @@ long z_pow(long base, long e) {
     return result;
 }
 
+/* Absolute value in the unsigned domain: `-v` overflows for LONG_MIN, while
+ * `0UL - (unsigned long)v` wraps to the magnitude, which is defined. */
+static unsigned long z_abs_u(long v) { return v < 0 ? 0UL - (unsigned long)v : (unsigned long)v; }
+
 long z_gcd(long a, long b) {
     /* Take the absolute value first: gcd of 0 and anything is that thing, and
      * the C99 % keeps the sign of the dividend, which would make the loop
-     * oscillate on mixed signs. */
-    if (a < 0)
-        a = -a;
-    if (b < 0)
-        b = -b;
-    while (b != 0) {
-        long t = a % b;
-        a = b;
-        b = t;
+     * oscillate on mixed signs. Unsigned throughout so LONG_MIN needs no
+     * special case: its magnitude is 2^63, which fits in an unsigned long. */
+    unsigned long ua = z_abs_u(a), ub = z_abs_u(b);
+    while (ub != 0) {
+        unsigned long t = ua % ub;
+        ua = ub;
+        ub = t;
     }
-    return a;
+    /* ua holds the magnitude. Every value fits except 2^63 from
+     * gcd(LONG_MIN, 0), whose bit pattern is LONG_MIN back in long. */
+    if (ua == (unsigned long)LONG_MAX + 1UL)
+        return LONG_MIN;
+    return (long)ua;
 }
 
 long z_lcm(long a, long b) {
-    long g = z_gcd(a, b);
-    if (g == 0)
+    unsigned long ua = z_abs_u(a), ub = z_abs_u(b);
+    if (ua == 0 || ub == 0)
         return 0;
-    long q = a / g * b;
-    return q < 0 ? -q : q;
+    unsigned long x = ua, y = ub;
+    while (y != 0) {
+        unsigned long t = x % y;
+        x = y;
+        y = t;
+    }
+    /* ua/g is exact, so only the multiply can overflow. */
+    unsigned long div = ua / x;
+    if (div > (unsigned long)LONG_MAX / ub)
+        z_size_overflow();
+    return (long)(div * ub);
 }
 

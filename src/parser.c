@@ -7239,10 +7239,22 @@ static Stmt *parse_func(Parser *p, int nested) {
      * bodies do not collide. Everything the reader sees -- diagnostics, the
      * mapping from the written name -- keeps using the name as written. */
     char *src_name = name;
-    char symbuf[64];
     if (nested) {
-        snprintf(symbuf, sizeof symbuf, "$fn%d_%s", saved_owner, src_name);
-        name = arena_strdup(p->arena, symbuf);
+        /* Sized dynamically: a fixed buffer here truncated long function names
+         * so two distinct nested functions shared one symbol. */
+        int need = snprintf(NULL, 0, "$fn%d_%s", saved_owner, src_name);
+        if (need < 0) {
+            diag_error(start, "could not name a nested function '$fn%d_%s'", saved_owner, src_name);
+        } else {
+            char *sym = arena_alloc(p->arena, (size_t)need + 1);
+            if (sym == NULL) {
+                diag_error(start, "could not name a nested function '$fn%d_%s'", saved_owner,
+                           src_name);
+            } else {
+                snprintf(sym, (size_t)need + 1, "$fn%d_%s", saved_owner, src_name);
+                name = sym;
+            }
+        }
     }
     /* `extern` and `export` name a symbol deliberately, and a local has no
      * outside to be visible to. */
@@ -8194,9 +8206,20 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
 
     /* Qualified with the receiver, because a bare method name in a message
      * ("has no method 'lenght'") does not say which type's method list was
-     * searched, and there may be ten. */
-    char ctxlabel[256];
-    snprintf(ctxlabel, sizeof ctxlabel, "%s.%s", sname, mname);
+     * searched, and there may be ten. Sized dynamically so long type/method
+     * names are not truncated in the diagnostic context. */
+    int ctxneed = snprintf(NULL, 0, "%s.%s", sname, mname);
+    if (ctxneed < 0) {
+        diag_error(start, "could not name method '%s.%s'", sname, mname);
+    }
+    char *ctxlabel = arena_alloc(p->arena, (size_t)(ctxneed >= 0 ? ctxneed + 1 : 1));
+    if (ctxlabel == NULL) {
+        diag_error(start, "could not name method '%s.%s'", sname, mname);
+    } else if (ctxneed >= 0) {
+        snprintf(ctxlabel, (size_t)ctxneed + 1, "%s.%s", sname, mname);
+    } else {
+        ctxlabel[0] = '\0';
+    }
     diag_push_ctx(DIAG_CTX_METHOD, ctxlabel, start);
 
     int pcap = 4, pn = 0;

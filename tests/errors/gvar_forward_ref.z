@@ -1,0 +1,10 @@
+// A `gvar` must be declared before it is used in the same file.
+//
+// Functions forward-reference (a `main` above its helper compiles), but a
+// global does not: this reads `shared` before `gint shared` is declared and
+// is rejected as an undefined variable rather than resolved in a later pass.
+// Cross-file visibility is the project case (tests/project/project_main.z);
+// order within one file is still declaration-before-use.
+int get() { return shared; }
+gint shared = 77;
+int main() { Console.WriteLog(get()); return 0; }

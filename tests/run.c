@@ -382,6 +382,14 @@ int main(int argc, char **argv) {
         "capture_param_spill",
         "capture_drop_box",
         "mangle_collision",
+        "vec_grow_owned",
+        "map_rehash_owned",
+        "dtor_break",
+        "dtor_continue",
+        "dtor_qmark",
+        "gvar_string_init",
+        "map_tombstone_stress",
+        "overflow_isqrt",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -601,6 +609,9 @@ int main(int argc, char **argv) {
         "enclosing_fn",
         "sig_note",
         "argtype_note",
+        "gvar_forward_ref",
+        "duplicate_main",
+        "lvar_top_level",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -1197,6 +1208,8 @@ int main(int argc, char **argv) {
     static const char *aborts[] = {
         "bounds_read",        "bounds_write",  "bounds_negative",
         "bounds_runtime_len", "bounds_string", "bounds_in_loop",
+        "vec_pop_empty",      "vec_remove_empty",
+        "overflow_array",     "overflow_repeat", "overflow_lcm",
     };
     for (size_t i = 0; i < sizeof aborts / sizeof aborts[0]; i++) {
         snprintf(path, sizeof path, "%s/%s.z", rt_dir, aborts[i]);
@@ -1286,7 +1299,8 @@ int main(int argc, char **argv) {
      * container is still live at exit and the report is not empty. Only the
      * string blocks are asserted about, which is the part a container's
      * destructor is responsible for. */
-    static const char *leaks[] = {"vec_string", "map_string"};
+    static const char *leaks[] = {"vec_string", "map_string", "vec_grow_owned",
+                                    "map_rehash_owned"};
     const char *lk_dir = "tests/leaks";
     if (asan_available(zq)) {
         char leak_out[256];

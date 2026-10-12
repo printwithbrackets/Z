@@ -391,7 +391,8 @@ begins a fraction only when a **digit** follows it, so `21.Twice()` is a member
 access. A float literal too large to represent saturates rather than erroring.
 
 **[now]** Duration literals: a decimal number with a unit stuck to it, where the
-unit is `h` for hours, `m` for minutes and `s` for seconds (either case).
+unit is `h` for hours, `m` for minutes, `s` for seconds, `ms` for milliseconds
+and `us` for microseconds (either case).
 Components run together with nothing between them, and a trailing number with no
 unit of its own is seconds. So `2h21m37`, `37s`, `37` and `0h0m37` are all
 durations, and the first is 8497 seconds.
@@ -405,8 +406,10 @@ The value is an ordinary integer count of seconds, which is the whole design.
 Everything downstream — the parser, the type checker, the code generator — sees an
 `int`, so there is no duration type anywhere and `hold(2h)` is visibly the same
 call as `hold(7200)`. The cost is that `Console.WriteLog(2h)` prints `7200` rather than
-`2h`, and that there is no sub-second duration: a duration literal is an integer,
-so `1.5h` is a float followed by an identifier, and `hold` takes an `int`.
+`2h`. A duration with a sub-second part (`500ms`, `1m500ms`) is a `float` count
+of seconds instead — there is no integer to give for half a second — and `hold`
+takes an `int` or a `float` accordingly. `1.5h` is still not a duration: it is
+a float followed by an identifier.
 
 Only decimal literals may carry a unit, since `0xffh` is not a duration anyone
 meant. This is also the one place a digit may be followed by a letter without it

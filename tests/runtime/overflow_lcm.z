@@ -1,0 +1,14 @@
+// `lcm` whose magnitude does not fit in a signed `long` overflows rather
+// than wrapping: `z: allocation size overflow` and exit 1. LONG_MIN is
+// 2^63 in magnitude; `lcm(LONG_MIN, 2)` is 2^63, one past LONG_MAX, so the
+// `div > LONG_MAX/ub` check in `z_lcm` fires. `lcm(LONG_MIN, 0)` is 0 (the
+// zero rule) and `gcd(LONG_MIN, 12)` is 4 -- see
+// tests/cases/overflow_isqrt.z for the non-overflowing edges.
+// LONG_MIN is spelled `0 - 9223372036854775807 - 1` because the literal
+// 9223372036854775808 does not fit in `int`.
+int main() {
+    var m = 0 - 9223372036854775807 - 1;
+    Console.WriteLog(lcm(m, 2));
+    Console.WriteLog("unreachable");
+    return 0;
+}

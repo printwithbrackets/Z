@@ -1,0 +1,11 @@
+// An `lvar` at the top level of a file that also defines `main`.
+//
+// Docs (LANGUAGE.md) say an `lvar` at the top level without `main` is an
+// ordinary `var` (file-scoped, and `lvar x = 5; Console.WriteLog(x);` with no
+// main prints 5). With a `main` it is the same error any top-level statement
+// gives: a program is either top-level statements or a `main`, not both. The
+// diagnostic below names the `main` collision, and the read of `x` inside
+// `main` is additionally undefined because the top-level `lvar` never entered
+// a scope `main` can see.
+lint x = 5;
+int main() { Console.WriteLog(x); return 0; }

@@ -1,0 +1,47 @@
+// Destructor on `?` early return: drops run when `?` propagates an Err.
+//
+// Same note as dtor_break.z: README:54-59 says `?` does not unwind, but it
+// does now (the `?` arm builds `try_drops` where it is written, so a local
+// declared after the `?` is correctly excluded). `tryOwner` owns a `Tracked`
+// across the `?`; the Err path must drop both the callee's `inner` (100) and
+// the caller's `owned` (200) before the caller sees the Err. `tryLaterLocal`
+// proves the drop list is built at the `?`, not by the later pass: `late`
+// (404) is declared after the `?` and must NOT be dropped on the early path
+// (dropping it would run a destructor on an uninitialised slot).
+//
+// Verified passing 2026-10-11; golden, not xfail. A regression would leak
+// one of the drops or crash on the uninitialised slot.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+Result<int, string> tryFail(bool fail) {
+    var inner = new Tracked(100);
+    if (fail) { return Err("no"); }
+    return Ok(7);
+}
+Result<int, string> tryOwner() {
+    var owned = new Tracked(200);
+    var v = tryFail(true)?;
+    Console.WriteLog("unreachable " + v);
+    return Ok(v);
+}
+Result<int, string> tryLaterLocal() {
+    var v = tryFail(true)?;
+    var late = new Tracked(404);
+    Console.WriteLog("unreachable " + v);
+    return Ok(v);
+}
+string describe(Result<int, string> r) {
+    return match (r) {
+        Ok(v) => "ok " + v,
+        Err(e) => "err " + e,
+    };
+}
+int main() {
+    Console.WriteLog("try " + describe(tryOwner()));
+    Console.WriteLog("try " + describe(tryLaterLocal()));
+    Console.WriteLog("done");
+    return 0;
+}

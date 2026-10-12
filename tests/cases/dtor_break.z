@@ -1,0 +1,27 @@
+// Destructor on `break`: drops run when a loop is left early.
+//
+// README:54-59 says destructors do NOT run on `break`, but the compiler now
+// unwinds them (see `build_drops_to` in src/parser.c and the `jumps` case in
+// tests/cases/destructors.z, which passes). This test pins that behavior with
+// owning locals: each iteration owns a `Tracked`, and `break` must drop the
+// current iteration's value without dropping the outer scope's.
+//
+// Actual behavior (verified 2026-10-11, `make test` green): drops run on
+// `break`, innermost first, and the harness has no xfail support so this is a
+// passing golden test, not an expected failure. If the compiler regresses to
+// the README behavior, the `drop 11` line below will be missing.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    var outer = new Tracked(1);
+    for (var i = 0; i < 5; i = i + 1) {
+        var owned = new Tracked(10 + i);
+        if (i == 1) { break; }
+        Console.WriteLog("iter " + i);
+    }
+    Console.WriteLog("after break");
+    return 0;
+}

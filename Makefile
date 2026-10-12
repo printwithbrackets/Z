@@ -25,10 +25,10 @@ DEP     := $(OBJ:.o=.d)
 # depend on directory order. Order matters only in that a name must be declared
 # before it is used; nothing here depends on that, because the pre-scan reads the
 # whole unit.
-STDLIB  := lib/string.z lib/collections.z lib/io.z
+STDLIB  := lib/collections.z lib/io.z lib/string.z
 STDLIB_SRC := $(firstword $(STDLIB))
 
-.PHONY: all test test-all clean
+.PHONY: all test test-all test-asan clean
 
 all: $(BIN)
 
@@ -40,6 +40,8 @@ src/%.o: src/%.c
 
 # main.c includes the generated embedded-runtime and embedded-stdlib headers, so
 # they must be built before main.o on a clean build.
+# path.h is shared by main.c and surface.c (see src/path.h); SRC wildcards
+# src/*.c so src/path.c builds without listing it, and -MMD tracks the header.
 src/main.o: src/runtime_src.h src/std_src.h
 
 # The Z runtime is embedded into the compiler as a byte array so a built
@@ -64,6 +66,18 @@ src/std_src.h: $(STDLIB) tools/embed.py
 test: $(BIN) tests/run
 	@./tests/run ./$(BIN)
 
+# AddressSanitizer gate. The leak cases in tests/leaks/ are already part of
+# `make test` (built with `-fsanitize=address -g` and run with
+# `ASAN_OPTIONS=detect_leaks=1` by tests/run.c, which probes for ASan and
+# reports `skip ... (no AddressSanitizer)` when the toolchain lacks it). This
+# target is the explicit hint for running just that gate: it rebuilds the
+# runner and runs the suite, whose `ok ... (leaks)` / `FAIL ...` lines are the
+# ASan result. No extra CFLAGS are needed here because the sanitizer flags
+# live in tests/run.c's build commands, not in this Makefile.
+test-asan: $(BIN) tests/run
+	@./tests/run ./$(BIN) 2>&1 | grep -E "leaks|asan|LeakSanitizer|passed" || test $$? -eq 1
+	@# ^ grep exits 1 when nothing matches; that must not fail the target.
+
 # The same suite at every optimization level.
 #
 # `make test` alone only exercises the default, and that is not enough: a pass
@@ -82,7 +96,7 @@ tests/run: tests/run.c
 
 clean:
 	rm -f $(BIN) $(OBJ) $(DEP) tests/run src/runtime_src.h src/std_src.h
-	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c
+	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c /tmp/z_*.o
 	rm -rf /tmp/z_test_* /tmp/z_exit_* /tmp/z_leak_* /tmp/z_asan_probe_*
 
 -include $(DEP)

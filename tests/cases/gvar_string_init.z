@@ -1,0 +1,25 @@
+// `gvar` initializers: a literal goes to .data, a computed value to .bss/z_ginit.
+//
+// `gvar_lvar.z` covers ints, floats, bools and one string literal. This pins
+// the remaining shape: a computed string (`"a" + "b"`, `int_to_string`) and a
+// computed int must also be visible from any function, and a global written
+// through a call must read back. All three tiers still resolve per read.
+gstring lit = "ready";
+gstring computed = "a" + "b";
+gstring viaCall = int_to_string(42);
+gint total = 3 + 4;
+int readAll() {
+    Console.WriteLog(lit);
+    Console.WriteLog(computed);
+    Console.WriteLog(viaCall);
+    Console.WriteLog(total);
+    return 0;
+}
+int main() {
+    readAll();
+    total = total + 1;
+    Console.WriteLog(total);       // 8
+    lit = lit + "!";
+    Console.WriteLog(lit);         // ready!
+    return 0;
+}

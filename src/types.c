@@ -217,8 +217,18 @@ Type *type_result(TypeCtx *ctx, Type *ok, Type *err) {
             return r;
     }
 
-    char nm[128];
-    snprintf(nm, sizeof nm, "Result<%s, %s>", type_name(ctx, ok), type_name(ctx, err));
+    const char *ok_name = type_name(ctx, ok);
+    const char *err_name = type_name(ctx, err);
+    /* Sized dynamically: a fixed buffer here truncated long pairs (e.g. nested
+     * Result or long struct names) so two distinct pairs interned under one
+     * name. Query the length first, then render into an arena buffer. The two
+     * names above sit in distinct rotating type_name slots (or arena memory
+     * for fn types), so neither call clobbers the other. */
+    int need = snprintf(NULL, 0, "Result<%s, %s>", ok_name, err_name);
+    if (need < 0)
+        return NULL;
+    char *nm = arena_alloc(ctx->arena, (size_t)need + 1);
+    snprintf(nm, (size_t)need + 1, "Result<%s, %s>", ok_name, err_name);
     UnionDef *ud = type_define_union(ctx, nm);
     if (ud == NULL) {
         /* type_define_union registers by name, and the name is derived from the
@@ -396,13 +406,22 @@ void struct_add_method(TypeCtx *ctx, StructDef *sd, StructMethod *m) {
 
 /* Destructors are registered under `dtor<Name>`. See struct_find_dtor. */
 StructMethod *struct_find_dtor(StructDef *sd) {
-    size_t n = strlen(sd->name);
-    char buf[256];
-    if (n + 5 > sizeof buf)
+    /* Matched directly against the method table: building `dtor<Name>` in a
+     * fixed buffer silently skipped the lookup for long struct names, so a
+     * type that owns something stopped being dropped (a leak). No buffer, no
+     * cap, no silent skip. */
+    if (sd == NULL || sd->name == NULL)
         return NULL;
-    memcpy(buf, "dtor", 4);
-    memcpy(buf + 4, sd->name, n + 1);
-    return struct_find_method(sd, buf);
+    for (int i = 0; i < sd->nmethods; i++) {
+        const char *mn = sd->methods[i] != NULL ? sd->methods[i]->name : NULL;
+        if (mn == NULL)
+            continue;
+        if (strncmp(mn, "dtor", 4) != 0)
+            continue;
+        if (strcmp(mn + 4, sd->name) == 0)
+            return sd->methods[i];
+    }
+    return NULL;
 }
 
 int type_needs_drop(Type *t) {

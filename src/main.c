@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "arena.h"
@@ -5,11 +6,15 @@
 #include "diag.h"
 #include "lexer.h"
 #include "parser.h"
+#include "path.h"
 
 #include "surface.h"
 
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +58,7 @@
  * diagnostic emitted before main() -- still names something. */
 static const char *s_prog = "z";
 
-static void SetProgName(const char *argv0) {
+static void set_prog_name(const char *argv0) {
     if (argv0 == NULL || argv0[0] == '\0')
         return;
     const char *slash = strrchr(argv0, '/');
@@ -61,29 +66,77 @@ static void SetProgName(const char *argv0) {
 }
 
 /* Reads an entire file into a NUL-terminated heap buffer. */
+#define READ_FILE_INIT_CAP 8192
+#define READ_FILE_MAX ((size_t)64 * 1024 * 1024)
 static char *read_file(const char *path, long *out_len) {
+    assert(path != NULL);
+    assert(out_len != NULL);
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
         fprintf(stderr, "%s: cannot open '%s'\n", s_prog, path);
         return NULL;
     }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len < 0) {
-        fclose(f);
-        return NULL;
-    }
-    char *buf = malloc((size_t)len + 1);
+    /* Streamed to EOF rather than fseek/ftell: pipes, /dev/stdin and files
+     * that grow between open and read have no meaningful end position, and
+     * unchecked fseek/ftell broke on all of them. Checked doubling with a
+     * 64 MiB cap keeps a /dev/zero-style infinite input from eating memory. */
+    size_t cap = READ_FILE_INIT_CAP;
+    size_t len = 0;
+    char *buf = malloc(cap + 1);
     if (buf == NULL) {
         fclose(f);
         fprintf(stderr, "%s: out of memory reading '%s'\n", s_prog, path);
         return NULL;
     }
-    size_t got = fread(buf, 1, (size_t)len, f);
+    for (;;) {
+        if (len == cap) {
+            if (cap >= READ_FILE_MAX) {
+                fclose(f);
+                free(buf);
+                fprintf(stderr, "%s: file too large '%s'\n", s_prog, path);
+                return NULL;
+            }
+            size_t ncap = cap * 2;
+            if (ncap <= cap || ncap > READ_FILE_MAX)
+                ncap = READ_FILE_MAX;
+            assert(ncap > cap && ncap <= READ_FILE_MAX);
+            char *nbuf = realloc(buf, ncap + 1);
+            if (nbuf == NULL) {
+                fclose(f);
+                free(buf);
+                fprintf(stderr, "%s: out of memory reading '%s'\n", s_prog, path);
+                return NULL;
+            }
+            buf = nbuf;
+            cap = ncap;
+        }
+        assert(len < cap);
+        size_t want = cap - len;
+        size_t got = fread(buf + len, 1, want, f);
+        len += got;
+        if (got < want) {
+            if (feof(f))
+                break;
+            if (ferror(f)) {
+                fclose(f);
+                free(buf);
+                fprintf(stderr, "%s: error reading '%s'\n", s_prog, path);
+                return NULL;
+            }
+            /* Short read with neither EOF nor error should not happen; treat
+             * a zero-progress one as an error rather than spinning. */
+            if (got == 0) {
+                fclose(f);
+                free(buf);
+                fprintf(stderr, "%s: error reading '%s'\n", s_prog, path);
+                return NULL;
+            }
+        }
+    }
     fclose(f);
-    buf[got] = '\0';
-    *out_len = (long)got;
+    buf[len] = '\0';
+    assert(len <= (size_t)LONG_MAX);
+    *out_len = (long)len;
     return buf;
 }
 
@@ -147,8 +200,9 @@ static void usage(void) {
             "  -O1 default: folding, register allocation, strength reduction\n"
             "  -O2 adds loop-invariant code motion\n"
             "  -O3 adds loop unrolling\n"
-            "  --no-bounds  drop the array and string index checks, which are on\n"
-            "               by default; measured and trusted code only\n"
+            "  --no-bounds  drop the array and string index checks, and the pointer\n"
+            "               null checks (which are on by default); measured and trusted\n"
+            "               code only; there is no separate --no-null-check flag.\n"
             "  -g        emit DWARF debug info (line table, functions, locals)\n"
             "  -w         silence all warnings\n"
             "  -Werror    treat warnings as errors\n"
@@ -230,20 +284,22 @@ static void list_push(const char ***list, int *n, int *cap, const char *path) {
     (*list)[(*n)++] = path;
 }
 
+/* Path helpers live in src/path.c (see path.h); the wrappers below only add
+ * die-on-OOM so call sites stay unchanged. surface.c uses the same module
+ * directly instead of its old fixed-buffer dir_of. */
+static char *strdup_or_die(const char *s) {
+    char *out = path_strdup(s);
+    if (out == NULL)
+        die_oom();
+    return out;
+}
+
 /* Directory part of `path`, as a fresh string ("." when there is none). */
 static char *dir_of(const char *path) {
-    const char *slash = strrchr(path, '/');
-    if (slash == NULL)
-        return strdup_or_die(".");
-    size_t n = (size_t)(slash - path);
-    if (n == 0)
-        n = 1; /* "/foo.z" -> "/" */
-    char *d = malloc(n + 1);
-    if (d == NULL)
+    char *out = path_dir_of(path);
+    if (out == NULL)
         die_oom();
-    memcpy(d, path, n);
-    d[n] = 0;
-    return d;
+    return out;
 }
 
 /* Joins the importing file's directory with a relative import path. */
@@ -251,21 +307,10 @@ static char *resolve_import(const char *importer, const char *rel) {
     if (rel[0] == '/')
         return strdup_or_die(rel);
     char *dir = dir_of(importer);
-    size_t need = strlen(dir) + 1 + strlen(rel) + 1;
-    char *out = malloc(need);
-    if (out == NULL)
-        die_oom();
-    snprintf(out, need, "%s/%s", dir, rel);
+    char *out = path_join(dir, rel);
     free(dir);
-    return out;
-}
-
-static char *strdup_or_die(const char *s) {
-    size_t n = strlen(s) + 1;
-    char *out = malloc(n);
     if (out == NULL)
         die_oom();
-    memcpy(out, s, n);
     return out;
 }
 
@@ -288,8 +333,6 @@ static char *strdup_or_die(const char *s) {
  * levels below it. Stops when the parent resolves to the directory it started
  * from, which is how the filesystem root is recognised: `..` of `/` is `/`, and a
  * walk that trusted it would never end. */
-/* The directory one level up, as a fresh string. "/" for the root, so a
- * caller walking up stops rather than looping: the parent of "/" is "/". */
 /* `dir` and `name` joined, as a fresh string.
  *
  * Not `resolve_import`, which serves import statements and takes the *importer's*
@@ -298,11 +341,9 @@ static char *strdup_or_die(const char *s) {
  * rebuilt the path as "./lib.z" -- one level up, where nothing exists. Discovery
  * needs the directory it was given, joined with what it found, unchanged. */
 static char *join_under(const char *dir, const char *name) {
-    size_t need = strlen(dir) + 1 + strlen(name) + 1;
-    char *out = malloc(need);
+    char *out = path_join(dir, name);
     if (out == NULL)
         die_oom();
-    snprintf(out, need, "%s/%s", dir, name);
     return out;
 }
 
@@ -311,86 +352,31 @@ static char *join_under(const char *dir, const char *name) {
  * Everything about discovery is done in absolute paths, because the walk up from
  * a file has to end somewhere. On a relative path that end is not decidable:
  * ".." has no last component to drop, so the parent of ".." is "..", and the
- * walk never reaches the root. Absolute paths always do. */
-/* `path` with "." and ".." resolved and slashes collapsed, as a fresh string.
+ * walk never reaches the root. Absolute paths always do.
  *
- * Lexical, not realpath: a ".." that crosses a symlink names a different
- * directory than the text suggests, but resolving it would mean reading the
- * filesystem for a path the user merely typed, and it would make the set of
- * project files depend on which symlink was followed. Textual resolution keeps
- * the unit reproducible.
- *
- * The two spellings of one file have to compare equal as strings, and that is
- * the whole reason this exists. Compiling "../dmain.z" from a subdirectory and
- * compiling "/abs/proj/deep/dmain.z" reach the same file; if they compared
- * unequal, discovery would treat the entry point as a second, unrelated file,
- * expand it twice, and every declaration in it would collide with itself. */
-static char *normalize_path(const char *path) {
-    size_t cap = strlen(path) + 2;
-    size_t *starts = malloc(cap * sizeof *starts);
-    size_t *lens = malloc(cap * sizeof *lens);
-    if (starts == NULL || lens == NULL)
-        die_oom();
-
-    size_t depth = 0;
-    const char *p = path;
-    while (*p != '\0') {
-        while (*p == '/')
-            p++;
-        if (*p == '\0')
-            break;
-        const char *seg = p;
-        while (*p != '\0' && *p != '/')
-            p++;
-        size_t seglen = (size_t)(p - seg);
-        if (seglen == 1 && seg[0] == '.')
-            continue;
-        if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
-            /* Ascend. On an absolute path there is always the root left to stop
-             * at, so this cannot empty the component list. */
-            if (depth > 0)
-                depth--;
-            continue;
-        }
-        starts[depth] = (size_t)(seg - path);
-        lens[depth] = seglen;
-        depth++;
-    }
-
-    /* "/" when empty, so an absolute path stays absolute. */
-    size_t total = 1;
-    for (size_t i = 0; i < depth; i++)
-        total += lens[i] + 1;
-    char *out = malloc(total);
-    if (out == NULL)
-        die_oom();
-    size_t at = 0;
-    out[at++] = '/';
-    for (size_t i = 0; i < depth; i++) {
-        memcpy(out + at, path + starts[i], lens[i]);
-        at += lens[i];
-        if (i + 1 < depth)
-            out[at++] = '/';
-    }
-    out[at] = '\0';
-    free(starts);
-    free(lens);
-    return out;
-}
+ * Lexical normalization only (see path_normalize in src/path.c, which is the
+ * single home for this logic after dedup): a ".." that crosses a symlink names
+ * a different directory than the text suggests, but resolving it would mean
+ * reading the filesystem for a path the user merely typed. The two spellings
+ * of one file still compare equal as strings, so discovery does not expand
+ * the entry point twice. */
 
 static char *abs_path(const char *src) {
-    char *raw;
-    if (src[0] == '/') {
-        raw = strdup_or_die(src);
-    } else {
-        char *cwd = getcwd(NULL, 0);
-        if (cwd == NULL)
-            return NULL;
-        raw = join_under(cwd, src);
-        free(cwd);
-    }
-    char *out = normalize_path(raw);
+    /* path_abs conflates "cwd unreadable" with OOM (NULL either way); the
+     * caller treats NULL as "no project", so OOM must still die here. */
+    if (src[0] == '/')
+        return strdup_or_die(src);
+    char *cwd = getcwd(NULL, 0);
+    if (cwd == NULL)
+        return NULL;
+    char *raw = path_join(cwd, src);
+    free(cwd);
+    if (raw == NULL)
+        die_oom();
+    char *out = path_normalize(raw);
     free(raw);
+    if (out == NULL)
+        die_oom();
     return out;
 }
 
@@ -400,22 +386,9 @@ static char *abs_path(const char *src) {
  * `dir` must be absolute and free of "." and ".." components -- both are true of
  * what find_project_root builds, which is why strip_trailing_dots runs first. */
 static char *dir_parent(const char *dir) {
-    size_t len = strlen(dir);
-    while (len > 1 && dir[len - 1] == '/')
-        len--;
-    if (len <= 1)
-        return strdup_or_die("/");
-    size_t cut = len;
-    while (cut > 0 && dir[cut - 1] != '/')
-        cut--;
-    size_t n = cut - 1;
-    if (n == 0)
-        return strdup_or_die("/");
-    char *out = malloc(n + 1);
+    char *out = path_parent(dir);
     if (out == NULL)
         die_oom();
-    memcpy(out, dir, n);
-    out[n] = 0;
     return out;
 }
 
@@ -455,64 +428,148 @@ static int cmp_str_ptr(const void *a, const void *b) {
     return strcmp(*x, *y);
 }
 
-static int collect_project_files(const char *dir, const char ***out) {
-    int cap = 16, n = 0;
-    const char **paths = malloc((size_t)cap * sizeof *paths);
-    if (paths == NULL)
-        die_oom();
+#define PROJECT_MAX_DEPTH 64
+
+typedef struct {
+    dev_t dev;
+    ino_t ino;
+} DirVisit;
+
+static int visit_contains(const DirVisit *v, size_t n, dev_t dev, ino_t ino) {
+    for (size_t i = 0; i < n; i++)
+        if (v[i].dev == dev && v[i].ino == ino)
+            return 1;
+    return 0;
+}
+
+static void visit_push(DirVisit **v, size_t *n, size_t *cap, dev_t dev, ino_t ino) {
+    assert(v != NULL && n != NULL && cap != NULL);
+    if (*n == *cap) {
+        size_t ncap = *cap == 0 ? 16 : *cap * 2;
+        if (ncap <= *cap || ncap > SIZE_MAX / sizeof **v)
+            die_oom();
+        DirVisit *bigger = malloc(ncap * sizeof *bigger);
+        if (bigger == NULL)
+            die_oom();
+        if (*n > 0)
+            memcpy(bigger, *v, *n * sizeof *bigger);
+        free(*v);
+        *v = bigger;
+        *cap = ncap;
+    }
+    (*v)[(*n)].dev = dev;
+    (*v)[(*n)].ino = ino;
+    (*n)++;
+}
+
+static void collect_push(const char ***paths, int *n, int *cap, const char *p) {
+    assert(paths != NULL && n != NULL && cap != NULL && p != NULL);
+    assert(*n <= *cap && *cap > 0);
+    if (*n == *cap) {
+        if (*cap > INT_MAX / 2)
+            die_oom();
+        int ncap = *cap * 2;
+        if ((size_t)ncap > SIZE_MAX / sizeof **paths)
+            die_oom();
+        const char **bigger = malloc((size_t)ncap * sizeof *bigger);
+        if (bigger == NULL)
+            die_oom();
+        memcpy(bigger, *paths, (size_t)*n * sizeof *bigger);
+        free(*paths);
+        *paths = bigger;
+        *cap = ncap;
+    }
+    (*paths)[(*n)++] = p;
+}
+
+/* Recursive worker: appends to the shared (*paths, *n, *cap). Returns 0 on
+ * success, -1 if this directory itself cannot be opened (parent ignores it
+ * and keeps what it has). Depth caps pathological nesting; the visited
+ * dev/ino set stops cycles via bind mounts. Symlinked directories are never
+ * descended into (lstat + skip), so a `ln -s . loop` cannot recurse forever. */
+static int collect_impl(const char *dir, const char ***paths, int *n, int *cap, int depth,
+                        DirVisit **vis, size_t *nvis, size_t *cvis) {
+    assert(dir != NULL && paths != NULL && n != NULL && cap != NULL);
+    assert(vis != NULL && nvis != NULL && cvis != NULL);
+    if (depth > PROJECT_MAX_DEPTH)
+        return 0;
+    struct stat dst;
+    if (lstat(dir, &dst) != 0)
+        return depth == 0 ? -1 : 0;
+    if (!S_ISDIR(dst.st_mode))
+        return depth == 0 ? -1 : 0;
+    if (visit_contains(*vis, *nvis, dst.st_dev, dst.st_ino))
+        return 0;
+    visit_push(vis, nvis, cvis, dst.st_dev, dst.st_ino);
 
     DIR *d = opendir(dir);
-    if (d == NULL) {
-        free(paths);
-        return -1;
-    }
+    if (d == NULL)
+        return depth == 0 ? -1 : 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.')
             continue;
         char *full = join_under(dir, ent->d_name);
-        if (full == NULL)
-            continue;
         struct stat st;
-        if (stat(full, &st) != 0) {
+        if (lstat(full, &st) != 0) {
+            free(full);
+            continue;
+        }
+        if (S_ISLNK(st.st_mode)) {
+            /* A symlink: never follow a directory (loop source). A symlink
+             * to a regular .z file is still a source file and is kept. */
+            struct stat tst;
+            if (stat(full, &tst) != 0) {
+                free(full);
+                continue;
+            }
+            if (S_ISDIR(tst.st_mode)) {
+                free(full);
+                continue;
+            }
+            if (S_ISREG(tst.st_mode)) {
+                size_t len = strlen(ent->d_name);
+                if (len > 2 && strcmp(ent->d_name + len - 2, ".z") == 0) {
+                    collect_push(paths, n, cap, full);
+                    continue;
+                }
+            }
             free(full);
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            const char **sub = NULL;
-            int nsub = collect_project_files(full, &sub);
-            for (int i = 0; i < nsub; i++) {
-                if (n == cap) {
-                    cap *= 2;
-                    const char **bigger = malloc((size_t)cap * sizeof *bigger);
-                    if (bigger == NULL)
-                        die_oom();
-                    memcpy(bigger, paths, (size_t)n * sizeof *paths);
-                    free(paths);
-                    paths = bigger;
-                }
-                paths[n++] = sub[i];
-            }
-            free(sub);
+            (void)collect_impl(full, paths, n, cap, depth + 1, vis, nvis, cvis);
+            free(full);
         } else if (S_ISREG(st.st_mode)) {
             size_t len = strlen(ent->d_name);
             if (len > 2 && strcmp(ent->d_name + len - 2, ".z") == 0) {
-                if (n == cap) {
-                    cap *= 2;
-                    const char **bigger = malloc((size_t)cap * sizeof *bigger);
-                    if (bigger == NULL)
-                        die_oom();
-                    memcpy(bigger, paths, (size_t)n * sizeof *paths);
-                    free(paths);
-                    paths = bigger;
-                }
-                paths[n++] = full;
+                collect_push(paths, n, cap, full);
                 continue;
             }
+            free(full);
+        } else {
+            free(full);
         }
-        free(full);
     }
     closedir(d);
+    return 0;
+}
+
+static int collect_project_files(const char *dir, const char ***out) {
+    assert(dir != NULL && out != NULL);
+    int cap = 16, n = 0;
+    const char **paths = malloc((size_t)cap * sizeof *paths);
+    if (paths == NULL)
+        die_oom();
+    DirVisit *vis = NULL;
+    size_t nvis = 0, cvis = 0;
+    if (collect_impl(dir, &paths, &n, &cap, 0, &vis, &nvis, &cvis) != 0) {
+        free(paths);
+        free(vis);
+        return -1;
+    }
+    free(vis);
+    assert(n <= cap);
     qsort(paths, (size_t)n, sizeof *paths, cmp_str_ptr);
     *out = paths;
     return n;
@@ -530,6 +587,14 @@ static int path_listed(const char **list, int n, const char *p) {
 static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
                        StringTable *strings);
 
+/* Expands `path` from an already-read buffer (borrowed, not freed). Exists so
+ * the entry file is read once: compile() already read it for diagnostics, and
+ * a pipe (/dev/stdin) cannot be read twice -- the second read would see EOF
+ * and compile an empty program. Imports and project files still use
+ * expand_file, which reads then delegates here. */
+static int expand_file_text(Arena *arena, const char *path, const char *text, long len, Token **out,
+                            int *nout, int *capout, StringTable *strings);
+
 /* Appends one token, growing the output array. */
 static void push_token(Arena *arena, Token **out, int *nout, int *capout, Token t) {
     if (*nout == *capout) {
@@ -543,13 +608,14 @@ static void push_token(Arena *arena, Token **out, int *nout, int *capout, Token 
     (*out)[(*nout)++] = t;
 }
 
-static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
-                       StringTable *strings) {
+static int expand_file_text(Arena *arena, const char *path, const char *text, long len, Token **out,
+                            int *nout, int *capout, StringTable *strings) {
     /* The path is copied into the arena because every token's Span points at
      * it, and those spans are read long after this frame is gone. The strings
      * resolve_import hands back are freed by the caller, so using one directly
      * would leave the spans dangling -- and since malloc reuses the block, they
      * would all end up naming whichever path was allocated last. */
+    assert(path != NULL && text != NULL && len >= 0);
     char *stable = arena_strdup(arena, path);
     path = stable;
     if (path_listed(loaded_path, n_loaded, path))
@@ -561,19 +627,12 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
     }
     list_push(&loading_path, &n_loading, &loading_cap, path); /* arena-owned */
 
-    long len = 0;
-    char *text = read_file(path, &len); /* reports the open failure itself */
-    if (text == NULL) {
-        n_loading--;
-        return 1;
-    }
     /* Keep the text in the arena: diagnostics render an excerpt from it long
      * after lexing, so freeing the read buffer here would leave them pointing
      * at freed memory. arena_free then cleans up every imported file at once. */
     char *kept = arena_alloc_array(arena, (size_t)len + 1, 1);
     memcpy(kept, text, (size_t)len);
     kept[len] = 0;
-    free(text);
     text = kept;
     diag_set_source(path, text);
 
@@ -595,7 +654,10 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
             continue;
         }
         if (t->kind == T_RBRACE) {
-            depth--;
+            /* Clamped: an unbalanced '}' at top level must not drive depth
+             * negative, where it would hide later top-level imports. */
+            if (depth > 0)
+                depth--;
             push_token(arena, out, nout, capout, *t);
             continue;
         }
@@ -632,6 +694,17 @@ static int expand_file(Arena *arena, const char *path, Token **out, int *nout, i
     return 0;
 }
 
+static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
+                       StringTable *strings) {
+    long len = 0;
+    char *text = read_file(path, &len); /* reports the open failure itself */
+    if (text == NULL)
+        return 1;
+    int rc = expand_file_text(arena, path, text, len, out, nout, capout, strings);
+    free(text);
+    return rc;
+}
+
 /* Lexes the embedded standard library and appends its tokens to `out`.
  *
  * Ahead of the program's own tokens, so its declarations are in scope
@@ -664,6 +737,29 @@ static int expand_stdlib(Arena *arena, Token **out, int *nout, int *capout, Stri
         }
     }
     return 0;
+}
+
+/* Secure temporary files.
+ *
+ * The old /tmp/z_<pid>.* names were predictable, so a local attacker could
+ * pre-create them as symlinks and have the compiler (or `cc`) write through
+ * to an arbitrary file. mkstemps reserves an unpredictable name with O_EXCL,
+ * so pre-creation is infeasible; fchmod 0600 keeps the contents private and
+ * fdopen writes through the descriptor we own rather than re-opening the
+ * path. Every temp is removed on all paths (success and failure). */
+static int make_temp(char *tmpl, int suffix_len) {
+    int fd = mkstemps(tmpl, suffix_len);
+    if (fd < 0) {
+        fprintf(stderr, "%s: cannot create temp file '%s': %s\n", s_prog, tmpl, strerror(errno));
+        return -1;
+    }
+    if (fchmod(fd, 0600) != 0) {
+        fprintf(stderr, "%s: cannot chmod temp file '%s': %s\n", s_prog, tmpl, strerror(errno));
+        close(fd);
+        remove(tmpl);
+        return -1;
+    }
+    return fd;
 }
 
 /* Compiles `src` and either writes assembly (asm_path != NULL) or assembles +
@@ -738,7 +834,11 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
             return 1;
         }
     }
-    if (expand_file(&arena, src, &toks, &ntoks, &tcap, &strings) != 0 || diag_error_count() > 0) {
+    /* The entry file from the buffer compile() already read. expand_file
+     * would read the path a second time, which sees EOF on a pipe
+     * (/dev/stdin) after the first read consumed it. */
+    if (expand_file_text(&arena, src, text, len, &toks, &ntoks, &tcap, &strings) != 0 ||
+        diag_error_count() > 0) {
         arena_free(&arena);
         free(text);
         return 1;
@@ -835,43 +935,84 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
     }
 
     char *asm_text = codegen_emit_opts(&arena, program, &strings, &copt);
-
-    if (asm_path != NULL) {
-        write_file(asm_path, asm_text);
-        free(asm_text);
-        arena_free(&arena);
-        free(text);
-        return 0;
-    }
-
-    char default_asm[256];
-    if (asm_path == NULL) {
-        snprintf(default_asm, sizeof default_asm, "/tmp/z_%ld.s", (long)getpid());
-    }
-    const char *apath = asm_path != NULL ? asm_path : default_asm;
-    if (!write_file(apath, asm_text)) {
-        free(asm_text);
+    if (asm_text == NULL) {
+        fprintf(stderr, "%s: out of memory\n", s_prog);
         arena_free(&arena);
         free(text);
         return 1;
     }
 
+    if (asm_path != NULL) {
+        int ok = write_file(asm_path, asm_text);
+        free(asm_text);
+        arena_free(&arena);
+        free(text);
+        return ok ? 0 : 1;
+    }
+
+    /* Unpredictable temps (see make_temp): no pid-derived names. */
+    char asm_tmpl[] = "/tmp/z_XXXXXX.s";
+    int asm_fd = make_temp(asm_tmpl, 2);
+    if (asm_fd < 0) {
+        free(asm_text);
+        arena_free(&arena);
+        free(text);
+        return 1;
+    }
+    FILE *af = fdopen(asm_fd, "wb");
+    if (af == NULL) {
+        fprintf(stderr, "%s: cannot write temp file '%s': %s\n", s_prog, asm_tmpl, strerror(errno));
+        close(asm_fd);
+        remove(asm_tmpl);
+        free(asm_text);
+        arena_free(&arena);
+        free(text);
+        return 1;
+    }
+    if (fputs(asm_text, af) == EOF || fflush(af) != 0 || fclose(af) != 0) {
+        fprintf(stderr, "%s: cannot write temp file '%s'\n", s_prog, asm_tmpl);
+        remove(asm_tmpl);
+        free(asm_text);
+        arena_free(&arena);
+        free(text);
+        return 1;
+    }
+    const char *apath = asm_tmpl;
+
     int status = 0;
     if (exe != NULL) {
         /* Write the embedded runtime and link it with the generated assembly. */
-        char rt_path[256];
-        snprintf(rt_path, sizeof rt_path, "/tmp/z_%ld_rt.c", (long)getpid());
-        FILE *rtf = fopen(rt_path, "wb");
-        if (rtf == NULL) {
-            fprintf(stderr, "%s: cannot write runtime source\n", s_prog);
+        char rt_tmpl[] = "/tmp/z_XXXXXX_rt.c";
+        int rt_fd = make_temp(rt_tmpl, 5);
+        if (rt_fd < 0) {
             remove(apath);
             free(asm_text);
             arena_free(&arena);
             free(text);
             return 1;
         }
-        fwrite(runtime_src_0, 1, strlen(runtime_src_0), rtf);
-        fclose(rtf);
+        FILE *rtf = fdopen(rt_fd, "wb");
+        if (rtf == NULL) {
+            fprintf(stderr, "%s: cannot write runtime source\n", s_prog);
+            close(rt_fd);
+            remove(rt_tmpl);
+            remove(apath);
+            free(asm_text);
+            arena_free(&arena);
+            free(text);
+            return 1;
+        }
+        size_t rt_len = strlen(runtime_src_0);
+        if (fwrite(runtime_src_0, 1, rt_len, rtf) != rt_len || fflush(rtf) != 0 ||
+            fclose(rtf) != 0) {
+            fprintf(stderr, "%s: cannot write runtime source\n", s_prog);
+            remove(rt_tmpl);
+            remove(apath);
+            free(asm_text);
+            arena_free(&arena);
+            free(text);
+            return 1;
+        }
         /* Anything the caller passed after the source file is handed straight
          * to the linker, so `z build main.z -o main -lm -L/opt/lib` works and an
          * extern symbol can be satisfied by a plain .c or .o path. Each one
@@ -884,20 +1025,29 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
         argv[n++] = (char *)"-o";
         argv[n++] = (char *)exe;
         argv[n++] = (char *)apath;
-        argv[n++] = (char *)rt_path;
+        argv[n++] = (char *)rt_tmpl;
         for (int i = 0; i < n_link_args; i++)
             argv[n++] = link_args[i];
         argv[n] = NULL;
         status = run_argv(argv);
-        remove(rt_path);
+        remove(rt_tmpl);
         if (status != 0)
             fprintf(stderr, "%s: assembling/linking failed\n", s_prog);
     } else {
-        char obj_path[256];
-        snprintf(obj_path, sizeof obj_path, "/tmp/z_%ld.o", (long)getpid());
-        char *argv[] = {(char *)"cc", (char *)"-c", (char *)"-o", obj_path, (char *)apath, NULL};
+        char obj_tmpl[] = "/tmp/z_XXXXXX.o";
+        int obj_fd = make_temp(obj_tmpl, 2);
+        if (obj_fd < 0) {
+            remove(apath);
+            free(asm_text);
+            arena_free(&arena);
+            free(text);
+            return 1;
+        }
+        /* Reserved with O_EXCL above; `cc -o` truncates the file we own. */
+        close(obj_fd);
+        char *argv[] = {(char *)"cc", (char *)"-c", (char *)"-o", obj_tmpl, (char *)apath, NULL};
         status = run_argv(argv);
-        remove(obj_path);
+        remove(obj_tmpl);
     }
 
     remove(apath);
@@ -911,7 +1061,7 @@ int main(int argc, char **argv) {
     /* First, so every diagnostic below -- including `--version` -- is named the
      * way the binary was reached. `gzz` is a symlink to this executable, so
      * this is what makes `gzz --version` say `gzz`. */
-    SetProgName(argc > 0 ? argv[0] : NULL);
+    set_prog_name(argc > 0 ? argv[0] : NULL);
 
     /* `--version` is answered before anything is parsed, and before the
      * argument count is checked, because it takes no file and is the one
@@ -1021,7 +1171,12 @@ int main(int argc, char **argv) {
         if (out == NULL) {
             const char *base = strrchr(src, '/');
             base = base ? base + 1 : src;
-            size_t need = strlen(base) + 8;
+            size_t lb = strlen(base);
+            if (lb > SIZE_MAX - 8) {
+                fprintf(stderr, "%s: out of memory\n", s_prog);
+                return 1;
+            }
+            size_t need = lb + 8;
             default_out = malloc(need);
             if (default_out == NULL) {
                 fprintf(stderr, "%s: out of memory\n", s_prog);
@@ -1042,14 +1197,20 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(cmd, "run") == 0) {
-        char exe[256];
-        snprintf(exe, sizeof exe, "/tmp/z_%ld.out", (long)getpid());
-        if (compile(src, exe, NULL, bounds_checks, opt_level, debug_info, use_stdlib, no_surface,
-                    surface_path, link_args, n_link_args) != 0)
+        char exe_tmpl[] = "/tmp/z_XXXXXX.out";
+        int exe_fd = make_temp(exe_tmpl, 4);
+        if (exe_fd < 0)
             return 1;
-        char *run_it[] = {exe, NULL};
+        /* Reserved with O_EXCL above; the link step truncates the file we own. */
+        close(exe_fd);
+        if (compile(src, exe_tmpl, NULL, bounds_checks, opt_level, debug_info, use_stdlib,
+                    no_surface, surface_path, link_args, n_link_args) != 0) {
+            remove(exe_tmpl);
+            return 1;
+        }
+        char *run_it[] = {exe_tmpl, NULL};
         int rc = run_argv(run_it);
-        remove(exe);
+        remove(exe_tmpl);
         return rc;
     }
 

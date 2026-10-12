@@ -1,0 +1,7 @@
+// `Vec.pop` on an empty vector aborts with a message and a non-zero exit,
+// rather than returning a default or reading past the buffer.
+int main() {
+    var v = new Vec<int>();
+    Console.WriteLog(v.pop());
+    return 0;
+}

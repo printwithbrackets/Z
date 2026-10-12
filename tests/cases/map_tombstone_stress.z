@@ -1,0 +1,35 @@
+// Map tombstone stress: many insert/delete/re-insert cycles.
+//
+// A removed slot becomes state 2 (tombstone), not free, so probes run past
+// it. `used` (live + removed) drives growth, and `Rehash` drops tombstones.
+// This churns 100 keys through three phases -- fill, delete evens, re-fill --
+// then verifies every key reads back and the size is exact. A probe that
+// stopped at a tombstone would report missing keys; a growth decision based
+// on `len` instead of `used` would degrade but still answer correctly, so the
+// size and sum below are the assertions that matter.
+int main() {
+    var m = new Map<int, int>();
+    for (var i = 0; i < 100; i++) { m.set(i, i * 10); }
+    Console.WriteLog(m.size());                 // 100
+    for (var d = 0; d < 100; d += 2) { m.remove(d); }
+    Console.WriteLog(m.size());                 // 50
+    // Odds still read; evens are gone.
+    Console.WriteLog(m.get(1, 0 - 1));          // 10
+    Console.WriteLog(m.has(0));                 // false
+    Console.WriteLog(m.has(1));                 // true
+    for (var r = 0; r < 100; r++) { m.set(r, r); }
+    Console.WriteLog(m.size());                 // 100
+    var sum = 0;
+    for (var k = 0; k < 100; k++) { sum = sum + m.get(k, 0 - 1); }
+    Console.WriteLog(sum);                      // 4950
+    Console.WriteLog(m.get(99, 0 - 1));         // 99
+    // String keys churn the same way through the string hash.
+    var s = new Map<string, int>();
+    for (var a = 0; a < 60; a++) { s.set("k" + int_to_string(a), a); }
+    for (var b = 0; b < 60; b += 3) { s.remove("k" + int_to_string(b)); }
+    Console.WriteLog(s.size());                 // 40
+    for (var c = 0; c < 60; c++) { s.set("k" + int_to_string(c), c * 2); }
+    Console.WriteLog(s.size());                 // 60
+    Console.WriteLog(s.get("k59", 0 - 1));      // 118
+    return 0;
+}

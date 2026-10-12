@@ -52,15 +52,15 @@ accident.
 
 ## 3. Variables and types
 
-Z has three built-in value types — `int` (64-bit signed), `bool`, and
-`string` — plus the composite types you'll meet later (structs, classes,
-arrays, pointers).
+Z has four built-in value types — `int` (64-bit signed), `bool`, `float`
+(IEEE-754 binary64), and `string` — plus the composite types you'll meet later
+(structs, classes, arrays, pointers).
 
 Use `var` to let the type be inferred, or name the type explicitly:
 
 ```csharp
 var a = 42;          // int
-var b = 3.5;         // (not a thing — there is no float type; see the note below)
+var b = 3.5;         // float
 ```
 
 Z has four types. Here are valid declarations:
@@ -279,7 +279,7 @@ Console.WriteLog(sqrt(17));              // 4    (integer square root, rounded d
 `sqrt` calls into the runtime, whose integer root is exact for every input
 rather than merely close.
 
-Because Z has no floating point type, `sin` and `cos` are integer-only. **A full
+`sin` and `cos` are integer-only for now. **A full
 turn is `1 << 30` units** and the result is Q30, so `1.0` is exactly `1 << 30`:
 
 ```csharp
@@ -530,9 +530,9 @@ Console.WriteLog(gcd(12, 18));    // 6
 Console.WriteLog(lcm(4, 6));      // 12
 ```
 
-`exp`, `log` and `tan` are absent. They are worth having only for a `float`, and
-there is nothing to call them on yet -- which is also why `sqrt`/`sin`/`cos` above
-are the fixed-point integer versions rather than the real ones.
+`exp`, `log` and `tan` are absent. `sqrt`/`sin`/`cos` above
+are the fixed-point integer versions rather than float ones; the float
+overloads are not there yet.
 
 ---
 

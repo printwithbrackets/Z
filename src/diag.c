@@ -11,12 +11,15 @@ static const char *g_text = NULL;
 static int g_errors = 0;
 
 /* Every source seen this compilation, so a span from an imported file still
- * renders its own excerpt. Bounded because a program only ever has as many
- * files as it imports. */
+ * renders its own excerpt. Bounded at 256 because a program only ever has as
+ * many files as it imports; past that the first 256 are kept and one warning
+ * is emitted, never a silent drop (a dropped source would render its spans
+ * without an excerpt). */
 #define MAX_SOURCES 256
 static const char *s_files[MAX_SOURCES];
 static const char *s_texts[MAX_SOURCES];
 static int n_sources = 0;
+static int warned_sources = 0;
 
 void diag_set_source(const char *file, const char *text) {
     g_file = file;
@@ -31,6 +34,10 @@ void diag_set_source(const char *file, const char *text) {
         s_files[n_sources] = file;
         s_texts[n_sources] = text;
         n_sources++;
+    } else if (!warned_sources) {
+        warned_sources = 1;
+        fprintf(stderr, "z: warning: too many source files (max %d), keeping first %d\n",
+                MAX_SOURCES, MAX_SOURCES);
     }
 }
 
@@ -120,14 +127,23 @@ static DiagCtx *g_ctx = NULL;
 
 /* The parser runs deep enough that a diagnostic raised hundreds of frames down
  * should still be attributed, but not so deep that the chain is unbounded if
- * something goes wrong. 32 nested lambdas is far past what the language allows. */
+ * something goes wrong. 32 nested lambdas is far past what the language allows.
+ * Past that the outermost frames are kept and one warning is emitted, never a
+ * silent drop. */
 #define MAX_CTX 32
 static DiagCtx ctx_pool[MAX_CTX];
 static int ctx_pool_used = 0;
+static int warned_ctx = 0;
 
 void diag_push_ctx(DiagCtxKind kind, const char *label, Span origin) {
-    if (ctx_pool_used >= MAX_CTX)
+    if (ctx_pool_used >= MAX_CTX) {
+        if (!warned_ctx) {
+            warned_ctx = 1;
+            fprintf(stderr, "z: warning: too many diagnostic contexts (max %d), keeping first %d\n",
+                    MAX_CTX, MAX_CTX);
+        }
         return;
+    }
     DiagCtx *c = &ctx_pool[ctx_pool_used++];
     c->kind = kind;
     c->label = label;
@@ -149,8 +165,9 @@ void diag_pop_ctx(void) {
 /* ---- notes ----
  *
  * Queued and drained by the next diagnostic, so a caller raises them before the
- * error they explain. Bounded because a note without a following error would
- * otherwise accumulate across a long compile. */
+ * error they explain. Bounded at 16 because a note without a following error would
+ * otherwise accumulate across a long compile; past that the first 16 are kept
+ * and one warning is emitted, never a silent drop. */
 #define MAX_NOTES 16
 typedef struct {
     int has_span;
@@ -160,12 +177,19 @@ typedef struct {
 
 static Note g_notes[MAX_NOTES];
 static int g_nnotes = 0;
+static int warned_notes = 0;
 
 void diag_clear_notes(void) { g_nnotes = 0; }
 
 static void queue_note(int has_span, Span span, const char *fmt, va_list ap) {
-    if (g_nnotes >= MAX_NOTES)
+    if (g_nnotes >= MAX_NOTES) {
+        if (!warned_notes) {
+            warned_notes = 1;
+            fprintf(stderr, "z: warning: too many queued notes (max %d), keeping first %d\n",
+                    MAX_NOTES, MAX_NOTES);
+        }
         return;
+    }
     Note *n = &g_notes[g_nnotes++];
     n->has_span = has_span;
     n->span = span;

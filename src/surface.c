@@ -1,6 +1,9 @@
 #include "surface.h"
 
+#include "path.h"
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <unistd.h>
@@ -191,52 +194,61 @@ int surface_load(Surface *s, const char *path) {
     return rc;
 }
 
-/* The directory part of `path`, into `out`. "." when there is none, so a bare
- * file name is looked for beside the current directory rather than in it. */
-static void dir_of(const char *path, char *out, size_t cap) {
-    const char *slash = strrchr(path, '/');
-    if (slash == NULL) {
-        snprintf(out, cap, ".");
-        return;
-    }
-    size_t n = (size_t)(slash - path);
-    if (n == 0)
-        n = 1; /* the root directory */
-    if (n >= cap)
-        n = cap - 1;
-    memcpy(out, path, n);
-    out[n] = '\0';
-}
-
+/* Path helpers (dir/parent/join) live in src/path.c; surface.c uses them
+ * directly so long paths are never truncated into fixed buffers. */
 int surface_discover(Surface *s, const char *src_path) {
-    char dir[1024];
-    dir_of(src_path, dir, sizeof dir);
+    if (s == NULL || src_path == NULL)
+        return 0;
+    char *dir = path_dir_of(src_path);
+    if (dir == NULL)
+        return 0;
     /* A bare file name is a file in the current directory, so the walk starts
      * there -- and "there" has to be the real path, not the two-character ".", or
      * the walk has nowhere to go and stops before it has looked at anything. This
      * is the `z run main.z` case, which is the common one. */
-    if (strcmp(dir, ".") == 0 && getcwd(dir, sizeof dir) == NULL)
-        return 0;
-    /* Walk up. Bounded by the path depth rather than trusted to terminate on a
+    if (strcmp(dir, ".") == 0) {
+        char *cwd = getcwd(NULL, 0);
+        if (cwd == NULL) {
+            free(dir);
+            return 0;
+        }
+        free(dir);
+        dir = cwd;
+    }
+    /* Walk up. Bounded by PATH_MAX_DEPTH rather than trusted to terminate on a
      * path that eventually becomes "/", which a caller could pass. */
-    for (int depth = 0; depth < 64; depth++) {
-        char cand[1200];
-        snprintf(cand, sizeof cand, "%s/%s", dir, SURFACE_FILE);
+    for (int depth = 0; depth < PATH_MAX_DEPTH; depth++) {
+        char *cand = path_join(dir, SURFACE_FILE);
+        if (cand == NULL) {
+            free(dir);
+            return 0;
+        }
         FILE *probe = fopen(cand, "r");
         if (probe != NULL) {
             fclose(probe);
             /* Empty is fine. It is a project with the shipped names, and loading
              * it costs one open of a file with no lines. Rejecting it would mean
              * a project could not be marked without inventing a setting. */
-            return surface_load(s, cand) == 0 ? 1 : -1;
+            int rc = surface_load(s, cand);
+            free(cand);
+            free(dir);
+            return rc == 0 ? 1 : -1;
         }
+        free(cand);
         if (strcmp(dir, "/") == 0)
             break;
-        char up[1024];
-        dir_of(dir, up, sizeof up);
-        if (strcmp(up, dir) == 0)
+        char *up = path_parent(dir);
+        if (up == NULL) {
+            free(dir);
+            return 0;
+        }
+        if (strcmp(up, dir) == 0) {
+            free(up);
             break;
-        memcpy(dir, up, strlen(up) + 1);
+        }
+        free(dir);
+        dir = up;
     }
+    free(dir);
     return 0;
 }
