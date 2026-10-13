@@ -6140,10 +6140,14 @@ static int stmt_terminates(Stmt *s) {
  * than the functions that mention it, so deciding at the declaration made the
  * answer depend on the order the parser happened to walk the file.
  *
- * Two shapes are expanded:
+ * Four shapes are expanded:
  *
  *   - a block's own scope, at the end of the block
  *   - a `return`, for the function body's scope, immediately before the return
+ *     (handed to the return as `ret_drops`, emitted after the value is copied)
+ *   - a `?`, for the scopes it leaves, as `try_drops` on the expression
+ *   - a `break`/`continue`, for the scopes the jump leaves up to its
+ *     `jump_floor`, spliced in ahead of the jump
  *
  * A `return` inside a block already sits after that block's own drops, because
  * the block's are appended at its end and the return is inside it -- so the

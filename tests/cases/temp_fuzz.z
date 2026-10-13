@@ -1,0 +1,44 @@
+// String temporaries across every handover: concatenation, slices, moves and
+// returns. Each value here is unnamed at some point -- a call result, a slice
+// of a concatenation, a moved value -- and each has to be released exactly once
+// when the statement that made it ends: a leak is the safe direction, but a
+// double free or a use-after-free is not, and AddressSanitizer is the check
+// (this golden only sees the output, which is what a wrong release turns into
+// when it does not crash).
+string twice(string s) { return s + s; }
+string loud(string s) { return s + "!"; }
+
+int main() {
+    // A concatenation used only as an argument: nothing names this value.
+    Console.WriteLog("ab" + "cd");
+
+    // Call results used as arguments, nested two deep.
+    Console.WriteLog(twice(twice("y")));
+
+    // A slice of a temporary: the slice copies, so the temporary is released
+    // at the end of the statement and the slice survives it.
+    Console.WriteLog(("hello world")[0..5]);
+    Console.WriteLog(("hello world")[6..]);
+
+    // A slice of a concatenation, which is two temporaries feeding one slice.
+    Console.WriteLog(("ab" + "cd")[1..3]);
+
+    // A move out of a variable, then a slice of the moved value.
+    var m = twice("ab");
+    var n = move m;
+    Console.WriteLog(n);
+    Console.WriteLog(n[1..3]);
+
+    // A return value sliced at the call site.
+    Console.WriteLog(loud("hey")[0..3]);
+
+    // A concatenation of two call results.
+    Console.WriteLog(twice("a") + twice("b"));
+
+    // A temporary kept past the statement: the slot owns it from here on.
+    var kept = loud("kept");
+    Console.WriteLog(kept);
+
+    Console.WriteLog("done");
+    return 0;
+}

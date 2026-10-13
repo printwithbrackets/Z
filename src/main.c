@@ -44,7 +44,7 @@
  *
  * Hand-maintained and bumped with the tag, because the build has no other
  * source of truth -- the Makefile knows the C toolchain and not the release. */
-#define Z_VERSION "0.2.0"
+#define Z_VERSION "0.2.1"
 
 /* The name this binary was reached by. `gzz` is a symlink to this same
  * executable, named the way the gcc family names a driver after what it drives
@@ -189,32 +189,42 @@ static int run_argv(char *const argv[]) {
     return 1;
 }
 
-static void usage(void) {
-    fprintf(stderr,
-            "usage: %s <run|build> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
-            "       [-w] [-Werror] [-Wno-<name>] [--error-format=<fmt>] [--color=<when>]\n"
+static void usage_to(FILE *f) {
+    fprintf(f,
+            "usage: %s <run|build|asm> <file.z> [-o output] [-O0..-O3] [--no-bounds] [-g]\n"
+            "       [-w] [-Werror] [-Werror=<name>] [-W<name>] [-Wno-<name>]\n"
+            "       [--error-format=<fmt>] [--color=<when>]\n"
             "       [--no-std] [--no-surface] [--surface=<path>] [linker args...]\n"
             "       %s --version\n"
-            "  --version print the compiler version and exit\n"
+            "       %s --help\n"
+            "  --version print the compiler version and exit (extra args are ignored)\n"
+            "  --help    print this message and exit\n"
             "  -O0 naive codegen (no register allocation, no folding)\n"
             "  -O1 default: folding, register allocation, strength reduction\n"
             "  -O2 adds loop-invariant code motion\n"
             "  -O3 adds loop unrolling\n"
             "  --no-bounds  drop the array and string index checks, and the pointer\n"
-            "               null checks (which are on by default); measured and trusted\n"
-            "               code only; there is no separate --no-null-check flag.\n"
+            "               null checks on `*`, `p.field` and `arr.length` (which are\n"
+            "               on by default); measured and trusted code only; there is\n"
+            "               no separate --no-null-check flag. `--bounds` re-enables.\n"
             "  -g        emit DWARF debug info (line table, functions, locals)\n"
             "  -w         silence all warnings\n"
             "  -Werror    treat warnings as errors\n"
+            "  -Werror=<name> treat one warning as an error\n"
+            "  -W<name>   enable one warning (unused-local, shadowed-local,\n"
+            "            unreachable, unused-import)\n"
             "  -Wno-<name> silence one warning (unused-local, shadowed-local,\n"
             "            unreachable, unused-import)\n"
             "  --error-format=human|gcc|json  how to render diagnostics\n"
             "  --color=auto|always|never       colour, auto = only on a terminal\n"
             "  --no-std   compile without the embedded standard library\n"
             "  --no-surface  ignore a project manifest; use the shipped names only\n"
-            "  --surface=<path>  take the dialect from this file instead of searching\n",
-            s_prog, s_prog);
+            "  --surface=<path>  take the dialect from this file instead of searching\n"
+            "  at most 256 extra linker arguments are accepted; more is an error\n",
+            s_prog, s_prog, s_prog);
 }
+
+static void usage(void) { usage_to(stderr); }
 
 /* ---- imports ----
  *
@@ -1073,6 +1083,10 @@ int main(int argc, char **argv) {
         printf("%s %s\n", s_prog, Z_VERSION);
         return 0;
     }
+    if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        usage_to(stdout);
+        return 0;
+    }
     if (argc < 3) {
         usage();
         return 2;
@@ -1112,7 +1126,11 @@ int main(int argc, char **argv) {
     char *link_args[MAX_LINK_ARGS];
     int n_link_args = 0;
     for (int i = 3; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: missing argument to '-o'\n", s_prog);
+                return 2;
+            }
             out = argv[++i];
         } else if (strcmp(argv[i], "--bounds") == 0) {
             /* The default. Still accepted, so a script that passes it explicitly
@@ -1130,6 +1148,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--no-surface") == 0) {
             no_surface = 1;
         } else if (strncmp(argv[i], "--surface=", 10) == 0) {
+            if (argv[i][10] == '\0') {
+                fprintf(stderr, "%s: --surface= needs a path\n", s_prog);
+                return 2;
+            }
             surface_path = argv[i] + 10;
         } else if (strcmp(argv[i], "-g") == 0) {
             /* Consumed here rather than passed to the link: the debug sections
@@ -1137,9 +1159,14 @@ int main(int argc, char **argv) {
              * forwarding -g would only ask the C toolchain for debug info about
              * code it did not compile. */
             debug_info = 1;
-        } else if (diag_set_warn_flag(argv[i])) {
-            /* A warning flag we know. Anything else beginning -W falls through
-             * to the linker untouched, as it always has. */
+        } else if (strcmp(argv[i], "-w") == 0 || strncmp(argv[i], "-W", 2) == 0) {
+            /* A warning flag we know is consumed; anything else beginning -W
+             * is an error rather than a linker passthrough, so a typo like
+             * -Werrorr cannot vanish into `cc`. */
+            if (!diag_set_warn_flag(argv[i])) {
+                fprintf(stderr, "%s: unknown warning flag '%s'\n", s_prog, argv[i]);
+                return 2;
+            }
         } else if (strncmp(argv[i], "--error-format=", 15) == 0) {
             if (!diag_set_format_flag(argv[i] + 15)) {
                 fprintf(stderr, "%s: unknown --error-format '%s' (human, gcc, json)\n", s_prog,
@@ -1154,8 +1181,15 @@ int main(int argc, char **argv) {
             }
         } else if (strncmp(argv[i], "-O", 2) == 0 && argv[i][2] >= '0' && argv[i][2] <= '9' &&
                    argv[i][3] == 0) {
-            /* -O0..-O3. Anything else starting -O is not ours, so it falls
-             * through to the linker untouched. */
+            /* -O0..-O3. -O4 and above are an error rather than a silent accept:
+             * there is no level 4, and storing one would leave codegen reading
+             * an optimization level it was never written for. Anything else
+             * starting -O is not ours, so it falls through to the linker
+             * untouched. */
+            if (argv[i][2] > '3') {
+                fprintf(stderr, "%s: unknown optimization '%s' (use -O0..-O3)\n", s_prog, argv[i]);
+                return 2;
+            }
             opt_level = argv[i][2] - '0';
         } else if (n_link_args == MAX_LINK_ARGS) {
             fprintf(stderr, "%s: at most %d linker arguments, and %d were given\n", s_prog,

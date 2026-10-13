@@ -1,0 +1,15 @@
+// Reading a field through a null class handle is a null dereference, diagnosed
+// like `*p`: `runtime error: null pointer dereference` and exit 134 with checks
+// on, a bare SIGSEGV with --no-bounds. The line printed before the fault must
+// still appear, which checks the abort comes after the program's own output.
+class C {
+    int v;
+    C(int a) { v = a; }
+}
+int main() {
+    Console.WriteLog(1);
+    C* c = null;
+    Console.WriteLog(c.v);
+    Console.WriteLog(2);
+    return 0;
+}

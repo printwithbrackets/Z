@@ -57,7 +57,11 @@ function! z#Diagnostics(file) abort
     " The code is the part that survives copy and paste into a search, so it
     " leads. `message` alone does not say whether a bug is the null-deref check
     " or the ownership rule, and those are two different files to go read.
-    let l:text = printf('[%s] %s', get(l:d, 'code', '?'), get(l:d, 'message', ''))
+    " A diagnostic with no code (plain diag_error) shows the message alone
+    " rather than a "[?]" bracket that searches for nothing.
+    let l:code = get(l:d, 'code', '')
+    let l:text = empty(l:code) ? get(l:d, 'message', '')
+          \ : printf('[%s] %s', l:code, get(l:d, 'message', ''))
     let l:free = []
     for l:note in get(l:d, 'notes', [])
       let l:nspan = get(l:note, 'span', {})

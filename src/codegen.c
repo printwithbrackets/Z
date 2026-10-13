@@ -1564,6 +1564,9 @@ static void gen_addr(CG *cg, Expr *e) {
         int esz = is_str ? 1 : type_size(e->lhs->type->base);
         int t = temp_alloc(cg);
         gen_expr(cg, e->lhs); /* base pointer */
+        /* A null array or string base would otherwise fault reading its length
+         * header at ptr[-8] (or [-16]) with no message. Same flag as `*`. */
+        emit_null_check(cg);
         store_temp(cg, t);
         gen_expr(cg, e->rhs); /* index */
         /* Arrays in Z are always heap allocations from z_newarray, so a
@@ -1598,8 +1601,12 @@ static void gen_addr(CG *cg, Expr *e) {
     case E_FIELD:
         /* Struct field address = base struct address + field offset. For a
          * struct-typed base, gen_expr yields its address; for a pointer, the
-         * pointer value is the address. */
+         * pointer value is the address -- and a null one is a null dereference,
+         * checked here under the same flag as `*` (off with --no-bounds). */
         gen_expr(cg, e->lhs);
+        if (e->lhs->type != NULL &&
+            (is_kind(e->lhs->type, TK_PTR) || is_kind(e->lhs->type, TK_ARRAY)))
+            emit_null_check(cg);
         if (e->field_off != 0)
             buf_printf(cg->out, "  add rax, %d\n", e->field_off);
         break;
@@ -2662,8 +2669,11 @@ static void gen_expr_body(CG *cg, Expr *e) {
     case E_STRLEN:
         /* The length is the first word of the header, which sits immediately
          * before the bytes the value points at. One load, no call, no scan --
-         * this is what `len(s)` was not before the string had a header. */
+         * this is what `len(s)` was not before the string had a header. A null
+         * string would fault at ptr[-16] with no message, so it is checked
+         * under the same flag as `*` (off with --no-bounds). */
         gen_expr(cg, e->lhs);
+        emit_null_check(cg);
         buf_printf(cg->out, "  mov rax, QWORD PTR [rax - 16]\n");
         break;
     case E_SLICE: {
@@ -2709,8 +2719,11 @@ static void gen_expr_body(CG *cg, Expr *e) {
         break;
     case E_FIELD:
         if (is_kind(e->lhs->type, TK_ARRAY)) {
-            /* array .length lives in the 8 bytes before the data */
+            /* Array .length lives in the 8 bytes before the data. A null array
+             * would fault at ptr[-8] with no message, so it is checked under
+             * the same flag as `*` (off with --no-bounds). */
             gen_expr(cg, e->lhs);
+            emit_null_check(cg);
             buf_printf(cg->out, "  mov rax, QWORD PTR [rax - 8]\n");
         } else {
             gen_addr(cg, e);

@@ -2,6 +2,7 @@
 *.o
 *.d
 /z
+/gzz
 /tests/run
 # Generated from runtime/z_rt.c by the Makefile
 /src/runtime_src.h

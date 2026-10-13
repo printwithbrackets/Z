@@ -1313,8 +1313,12 @@ memory copy under the hidden-pointer convention and a move is a field copy.
 **[now]**
 
 ```
-z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
-                    [-w] [-Werror] [-Wno-<name>] [linker args...]
+z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--no-bounds] [--bounds] [-g]
+                    [-w] [-Werror] [-Werror=<name>] [-W<name>] [-Wno-<name>]
+                    [--error-format=<fmt>] [--color=<when>]
+                    [--no-std] [--no-surface] [--surface=<path>] [linker args...]
+z --version
+z --help
 ```
 
 | | |
@@ -1323,7 +1327,8 @@ z <run|build|asm> <file.z> [-o output] [-O0..-O3] [--bounds] [-g]
 | `-O1` | the default: constant folding and propagation, function inlining, a liveness-based local register allocator, leaf and immediate operand selection, branch-on-flags conditions, in-place compound assignment, and constant division/modulo strength reduction. |
 | `-O2` | adds loop-invariant code motion. |
 | `-O3` | adds loop unrolling. |
-| `--bounds` | **[cut]** replaced by `--no-bounds`. Bounds checks are on by default in v2. |
+| `--bounds` | re-enables bounds and null checks after `--no-bounds`. Checks are on by default in v2. |
+| `--no-bounds` | drop the array/string index checks and the null checks on `*`, `p.field`, `arr.length`, `len(s)` and indexing; measured and trusted code only. |
 | `-g` | emit DWARF: a line table, and a symbol table naming every function, its parameters and its frame-resident locals. |
 
 The output path and every pass-through linker argument reach the C toolchain as

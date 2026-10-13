@@ -1,7 +1,7 @@
 # Z — Tutorial
 
-Z is a small, statically-typed, C#-flavored language that compiles to native
-x86-64 machine code. It has a real type system, value types (structs),
+Z is a small, statically-typed, C++-flavored-but-dumber language that compiles to
+native x86-64 machine code. It has a real type system, value types (structs),
 reference types (classes) with dynamic dispatch, interfaces, closures and nested
 functions, monomorphized generics, pattern matching, owned values destroyed by
 destructors rather than by a collector, and a modern optimizing backend — with

@@ -71,10 +71,13 @@ function! s:Check(bang, local) abort
   echomsg l:msg
   echohl None
 
-  if a:bang || a:local
+  " A bang suppresses the window (Vim convention: :Zcheck opens, :Zcheck!
+  " does not); otherwise the list opens, location list for :Zlmake.
+  " `empty()` and not `!`, because the bang arrives as the string "!" and a
+  " non-numeric string is falsy in a Vim condition, so `!a:bang` would open on
+  " :Zcheck! -- the same inversion this replaces.
+  if empty(a:bang)
     execute (a:local ? 'lopen' : 'copen')
-  elseif l:errors > 0 && !get(g:, 'z_check_on_write_quiet', 1)
-    copen
   endif
 endfunction
 

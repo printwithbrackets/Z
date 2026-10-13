@@ -455,10 +455,7 @@ int type_needs_drop(Type *t) {
          * array of a struct is not, unless the element is. */
         if (t->base == NULL)
             return 0;
-        if (type_needs_drop(t->base))
-            return 1;
-        return t->base->kind == TK_STRUCT && t->base->sdef != NULL && t->base->sdef->is_class &&
-               struct_find_dtor(t->base->sdef) != NULL;
+        return type_needs_drop(t->base);
     }
     if (t->kind != TK_STRUCT)
         return 0;

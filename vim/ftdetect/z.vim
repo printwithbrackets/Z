@@ -1,2 +1,5 @@
 " Filetype detection for Z
-au BufNewFile,BufRead *.z set filetype=z
+augroup z_filetype
+  autocmd!
+  autocmd BufNewFile,BufRead *.z set filetype=z
+augroup END
