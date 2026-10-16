@@ -1,0 +1,110 @@
+/* String helpers that need a loop: parsing, counting, classifying and
+ * splitting into lines.
+ *
+ * The single shot operations (`trim`, `upper`, `replace`, `split` and the
+ * rest) are builtins, because each is one runtime call. What is here is what
+ * walks a string more than once, which reads better as Z than as C and stays
+ * checked by the same front end as the program using it.
+ */
+
+/* reads an optionally signed decimal integer, with no surrounding whitespace
+ * allowed, because silently skipping what the caller did not ask to skip is
+ * how " 12" and "12 " both become 12 and neither is questioned. overflow is
+ * an error rather than a wrap, since a wrapped answer claims a precision the
+ * input did not have */
+Result<int, string> parse_int(string s) {
+    var n = len(s);
+    if (n == 0) { return Err("empty string"); }
+    var i = 0;
+    var neg = false;
+    var first = char_at(s, 0);
+    if (first == 43 || first == 45) {
+        neg = first == 45;
+        i = 1;
+    }
+    if (i >= n) { return Err("sign with no digits"); }
+    var acc = 0;
+    while (i < n) {
+        var b = char_at(s, i);
+        if (b < 48 || b > 57) { return Err("not a number"); }
+        var d = b - 48;
+        /* a negative value is accumulated negative, so the lowest value stays
+         * representable all the way down and nothing relies on wrapping */
+        if (neg) {
+            if (acc < -922337203685477580 || (acc == -922337203685477580 && d > 8)) {
+                return Err("out of range");
+            }
+            acc = acc * 10 - d;
+        } else {
+            if (acc > 922337203685477580 || (acc == 922337203685477580 && d > 7)) {
+                return Err("out of range");
+            }
+            acc = acc * 10 + d;
+        }
+        i = i + 1;
+    }
+    return Ok(acc);
+}
+
+/* the parsed value, or `fallback` when the string is not a number. the shape
+ * a config reader wants, where a missing value and a wrong one both mean the
+ * default */
+int parse_int_or(string s, int fallback) {
+    return match parse_int(s) { Ok(v) => v, Err(_) => fallback };
+}
+
+/* the number of non-overlapping occurrences of `needle`. an empty needle
+ * occurs nowhere, because counting empty matches would answer `len + 1` and
+ * that number is never what the caller is asking */
+int count_sub(string hay, string needle) {
+    var m = len(needle);
+    if (m == 0) { return 0; }
+    var n = len(hay);
+    var out = 0;
+    var i = 0;
+    while (i + m <= n) {
+        if (sub(hay, i, m) == needle) {
+            out = out + 1;
+            i = i + m;
+        } else {
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+/* true for one ASCII decimal digit. ASCII-only like `upper` and `lower`,
+ * because a byte above 127 is a UTF-8 continuation and classifying it alone
+ * would corrupt the character it belongs to */
+bool is_digit(int b) { return b >= 48 && b <= 57; }
+
+/* true for one ASCII letter, with the same byte rule as `is_digit` */
+bool is_alpha(int b) {
+    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+}
+
+/* true for the six bytes `trim` strips, which are the ones worth skipping in
+ * a hand written parser that wants to agree with it */
+bool is_space(int b) {
+    return b == 32 || b == 9 || b == 10 || b == 13 || b == 11 || b == 12;
+}
+
+/* splits on newlines and tolerates carriage returns, so text read from a file
+ * written on windows lines up the same way. `split` drops the trailing empty
+ * piece, which is why "a\n" is one line here and not two. an array rather
+ * than a `Vec`, because that is what `split` returns, so this feeds the
+ * builtin `join` and the `StringBuilder` appends below with nothing in
+ * between */
+string[] lines(string s) {
+    var parts = split(s, "\n");
+    var out = new string[parts.length];
+    for (var i = 0; i < parts.length; i++) {
+        var p = parts[i];
+        if (len(p) > 0 && char_at(p, len(p) - 1) == 13) {
+            p = sub(p, 0, len(p) - 1);
+        }
+        out[i] = p;
+    }
+    /* handed over rather than destroyed on the way out */
+    return move out;
+}

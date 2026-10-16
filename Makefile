@@ -25,7 +25,7 @@ DEP     := $(OBJ:.o=.d)
 # depend on directory order. Order matters only in that a name must be declared
 # before it is used; nothing here depends on that, because the pre-scan reads the
 # whole unit.
-STDLIB  := lib/collections.z lib/io.z lib/string.z
+STDLIB  := lib/collections.z lib/io.z lib/math.z lib/stack_queue.z lib/string.z lib/strutil.z
 STDLIB_SRC := $(firstword $(STDLIB))
 
 .PHONY: all test test-all test-asan clean

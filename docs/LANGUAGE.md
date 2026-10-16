@@ -202,7 +202,7 @@ module system rather than the parser.
 | `for (auto x : v)` / `for (auto& x : v)` | Range-for over a fixed array, a `string` (as bytes), and any class with an `at(i)` — which is `Vec<T>`. Desugars to the same index loop `foreach` produces, so `break`/`continue` and every optimizer pass behave identically. | done |
 | `push_back`, `pop_back`, `empty` | C++ names, on all three containers, as one-line aliases rather than second bodies. Both spellings are kept. | done |
 | `T&` references | **Not a pointer with a different name.** In slice 1 `&` in a range-for makes the loop variable a *pointer* to the element, so the body writes through `*x`. A real `T&` type is part of slice 3, because it is a borrow with a lifetime and that is the same work as the ownership rules. | partial |
-| `namespace`, `pub` | Module scope and visibility, unexported by default. Also the fix for v1's M13 problem, where two imported files could not both define `helper`. Needs the module system, not the parser, so it is not slice-1 work in practice. | not started |
+| `namespace` + dotted access | Module scope with Python-style dots: `namespace netlink { ... }` then `netlink.Lobby`, plus `import "f.z" as net` as the same mechanism over files. The fix for v1's M13 problem, where two imported files could not both define `helper`. Visibility is not gated: every member is reachable as `N.name`. | done |
 
 Two bugs the range-for surfaced on the way, both of which were live before it:
 `&obj.field` was parsed as a method pointer (so `&h.data[0]` reported a missing
@@ -433,15 +433,16 @@ Console.WriteLog(format("n = {}, sq = {}", n, n * n));    // n = 3, sq = 9
 ```
 
 **[new]** Keywords added: `auto`, `move`, `clone`, `namespace`, `pub`,
-`unsafe`, `thread`, `send`, `recv`, `Chan`, `Rc`, `Arc`, `Box`. `auto` and `move`
-are in the compiler now, the rest are not. **[now]** Kept:
+`unsafe`, `thread`, `send`, `recv`, `Chan`, `Rc`, `Arc`, `Box`. `auto`, `move`
+and `namespace` are in the compiler now, the rest are not. **[now]** Kept:
 `int bool string float void var const new struct enum class match this if else
 while for foreach in return break continue true false null extern export virtual
 override fn method import`.
 
 **[now]** Operators: `+ - * / %`, `== != < <= > >=`, `&& || !`, `& | ^ ~ << >>`,
 `= += -= *= /= %= &= |= ^= <<= >>=`, `++ --`, `( ) { } [ ] ; , .`. **[new]**
-Added: `->`, `:`, `~` (destructor name), `::` (namespace scope).
+Added: `->`, `:`, `~` (destructor name). Qualification reuses `.`
+(`netlink.Lobby`); there is no `::`.
 
 **[now]** `s[i]` is the byte at `i` as an `int` in `0..255`, and `s[a..b]` is
 the half-open byte range with either end optional and both clamped. Lengths are
@@ -608,23 +609,61 @@ grammar and does not need the lexer to know the operator set.
 **[now]**
 
 ```
-decl        := varDecl | constDecl | funcDecl | nestedFunc | statement
-varDecl     := ("var" | "auto") IDENT "=" expr ";"                 [new: auto]
-             | type IDENT ("=" expr)? ";"
+decl        := varDecl | constDecl | funcDecl | fnDecl | nestedFunc | statement
+varDecl     := ("var" | "auto") ["mut"] IDENT "=" expr ";"   [new: mut]
+             | type ["mut"] IDENT ("=" expr)? ";"
 constDecl   := "const" type IDENT "=" expr ";"
-nestedFunc  := type IDENT "(" params? ")" block
+nestedFunc  := (type IDENT | "fn" IDENT ["->" type]) "(" params? ")" block
 type        := ("int" | "bool" | "string" | "float") "*"* "&"? "[]"*
              | "Result" "<" type "," type ">"
              | "interface" IDENT "{" ifaceMember* "}"
              | ("fn" | "method" | "closure") "(" typeList? ")" "->" type
              | "Vec" "<" type ">" | "Box" "<" type ">" | ...        [new]
-funcDecl    := type IDENT "(" params? ")" block
+funcDecl    := type IDENT "(" params? ")" block              [legacy C-style]
              | type IDENT "(" params? ")" ";"
+fnDecl      := "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] (block | "=>" expr ";")
+             | "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] ";"
+             | ("extern" | "export") "fn" IDENT "(" params? ")" ["->" type] (block | ";")
 externDecl  := "unsafe" "extern" type IDENT "(" params? ")" ";"     [new: unsafe]
+             | "unsafe" "extern" "fn" IDENT "(" params? ")" ["->" type] ";"
 exportFunc  := "export" type IDENT "(" params? ")" block
+             | "export" "fn" IDENT "(" params? ")" ["->" type] block
 params      := param ("," param)*
-param       := type IDENT
+param       := ["mut"] type IDENT
 ```
+
+### The C+Rust+Python spelling (canonical)
+
+`fn` headers are Rust, `var mut` is Rust, top-level statements and
+`Console.WriteLog` stay Python-and-C#-flavored rather than changing for the
+sake of it. The C-style header still compiles and means the same thing:
+
+```
+fn fib(int n) -> int {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() -> int {
+    var mut total = 0;
+    for (var mut i = 0; i < 10; i++) { total = total + i; }
+    Console.WriteLog(total);   // 55
+    return 0;
+}
+```
+
+- `fn name(params) -> ret`. No arrow means `void`: `fn foo() { ... }`.
+  Expression bodies need the arrow: `fn add(int a, int b) -> int => a + b;`.
+  Generics: `fn max<T>(T a, T b) -> T { ... }`.
+- Methods: `fn Name(params) -> Ret` inside `struct`/`class`
+  (`virtual fn Speak() -> string`), `fn` interface members, and
+  `fn C(params)` as a constructor spelling. `~Type()` destructors are unchanged.
+- `var mut x = ...` / `int mut x = ...` (and `mut` on parameters) is accepted
+  everywhere `var` / a typed declaration is. It is recorded but not yet
+  enforced: every variable is still mutable, so existing code keeps compiling
+  while new code can be explicit. Immutable-by-default enforcement comes after
+  the codebase is migrated.
+- A field of function-pointer type (`fn(int) -> int f;`) still parses as a
+  field, not a method: only `fn` followed by a *name* starts a method.
 
 **[now]** `var` infers the type from the initializer. Variables must be
 initialized. Redeclaring in the *same* scope is an error; shadowing an outer
@@ -647,15 +686,28 @@ on the hidden result pointer, so such a function is capped at 15. A method is
 capped at 15 because the receiver is a parameter too, 14 when the method
 returns an aggregate.
 
-**[new]** `namespace N { ... }` and `N::name`. Scoping is real, so two imported
+**[now]** `namespace N { ... }` and `N.name`. Scoping is real, so two imported
 files can both define `helper` and the program can say which it means. This is
 v1's M13, which the old roadmap called out as a trap to do before any package
 manager: a package manager over a single global namespace distributes
 collisions instead of fixing them.
 
-**[new]** `pub` marks a declaration visible outside its namespace; unexported
-by default. An unexported name used from another namespace is a diagnostic, not
-a silent pass.
+The qualifier is a dot, not `::`: one way to say each thing, and the dotted
+builtin (`Console.WriteLog`) already reads that way. A single-identifier
+block nests relative to the enclosing block (`outer` + `inner` is
+`outer.inner`); a dotted header (`namespace a.b`) is absolute, which is how
+two files merge into one namespace by writing the same header. `import "f.z"
+as net` is the same mechanism over a file boundary: the file parses as if
+written inside `namespace net`, and a plain import nested in a block joins it.
+A value in scope shades a namespace of the same name; `this.` still reaches
+the field. Enum variants work unqualified (`Shut(2)`) or qualified
+(`netlink.Shut(2)`).
+
+**[deferred]** `pub` marks a declaration visible outside its namespace;
+unexported by default. Visibility is not gated yet: every member is reachable
+as `N.name`, and `pub` is not a keyword. Gating it is a follow-up, not a
+correction -- nothing written against the open rule stops compiling when the
+gate lands except code reaching into what was never meant to be public.
 
 ## Three tiers of variable
 

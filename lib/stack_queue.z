@@ -1,0 +1,132 @@
+/* Stack and Queue: the two orderings a Vec does not name.
+ *
+ * A `Vec` is already a stack if a program only ever pushes and pops, and it is
+ * already a queue if a program only ever pushes and drops from the front. What
+ * is missing in both cases is the name, and the check that the program only
+ * does that. These two classes are that name: thin wrappers over a `Vec` that
+ * expose one ordering each and nothing else.
+ *
+ * Both are classes for the same reason `Vec` is one. Assignment shares the
+ * container rather than copying it, so passing one to a function passes the
+ * thing itself and not a copy of its handle.
+ */
+
+/* A last in, first out container over a `Vec`.
+ *
+ * Every operation is the `Vec` operation of the same shape, so push and pop
+ * are amortized constant time and `peek` costs a bounds check and nothing
+ * else. */
+class Stack<T> {
+    Vec<T>* items;
+
+    Stack() { items = new Vec<T>(); }
+
+    /* releases the elements still held, keeping the same rule `Vec` keeps.
+     * the buffer itself is still live at exit, for the same reason it is
+     * there, since there is no way to release a heap array from Z yet */
+    ~Stack() { items.clear(); }
+
+    void push(T v) { items.push(v); }
+
+    /* the C++ name for `push`, which is an alias and not a second body */
+    void push_back(T v) { items.push(v); }
+
+    /* removes and returns the top element, dying on an empty stack rather
+     * than reading past it, because that is what `Vec.pop` does */
+    T pop() { return items.pop(); }
+
+    T pop_back() { return items.pop(); }
+
+    /* the top element without removing it */
+    T peek() { return items.last(); }
+
+    /* the C++ name for `peek`, which is an alias and not a second body */
+    T top() { return items.last(); }
+
+    int size() { return items.size(); }
+    bool isEmpty() { return items.isEmpty(); }
+
+    /* the C++ name for `isEmpty` */
+    bool empty() { return items.isEmpty(); }
+
+    void clear() { items.clear(); }
+    void release() { items.release(); }
+}
+
+/* A first in, first out container over a `Vec` plus a head index.
+ *
+ * Removing from the front of a `Vec` with `drop(1)` shifts every element down,
+ * which is linear per removal. The head index avoids that: `dequeue` moves
+ * the head forward and only compacts when the dead prefix grows past half the
+ * buffer, so n enqueues and dequeues cost linear time in total rather than
+ * quadratic. The compaction reuses `Vec.drop`, which is the tested version of
+ * the same shift rather than a second one. */
+class Queue<T> {
+    Vec<T>* buf;
+    int head;
+
+    Queue() {
+        buf = new Vec<T>();
+        head = 0;
+    }
+
+    /* releases the elements still held and forgets the head, because the
+     * prefix before it holds nothing live. see `~Stack` for why the buffer
+     * itself is still live at exit */
+    ~Queue() { buf.clear(); }
+
+    void enqueue(T v) {
+        buf.push(v);
+        this.Compact();
+    }
+
+    /* removes and returns the oldest element, dying on an empty queue rather
+     * than reading past it. the slot is released as it is handed over, which
+     * is what keeps the later compaction from freeing it twice */
+    T dequeue() {
+        if (head >= buf.size()) {
+            Console.WriteLog("Queue.dequeue on an empty queue");
+            die(1);
+        }
+        var out = buf.data[head];
+        drop_value(buf.data[head]);
+        head = head + 1;
+        return move out;
+    }
+
+    /* the oldest element without removing it */
+    T peek() {
+        if (head >= buf.size()) {
+            Console.WriteLog("Queue.peek on an empty queue");
+            die(1);
+        }
+        return buf.data[head];
+    }
+
+    int size() { return buf.size() - head; }
+    bool isEmpty() { return head >= buf.size(); }
+
+    /* the C++ name for `isEmpty` */
+    bool empty() { return head >= buf.size(); }
+
+    void clear() {
+        buf.clear();
+        head = 0;
+    }
+
+    void release() {
+        buf.release();
+        head = 0;
+    }
+
+    /* folds the dead prefix back into the buffer once it passes half of it,
+     * so the head cannot walk off the end of a long lived queue. waiting
+     * until then is what keeps the cost amortized, since every compaction
+     * pays for the dequeues since the last one */
+    void Compact() {
+        if (head > 32 && head * 2 >= buf.size()) {
+            buf.drop(head);
+            head = 0;
+        }
+    }
+}

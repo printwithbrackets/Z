@@ -271,6 +271,8 @@ static const Keyword KEYWORDS[] = {
     {"method", T_KW_METHOD},
     {"import", T_KW_IMPORT},
     {"move", T_KW_MOVE},
+    {"mut", T_KW_MUT},
+    {"namespace", T_KW_NAMESPACE},
     {"false", T_KW_FALSE},
     {"class", T_KW_CLASS},
     {"interface", T_KW_INTERFACE},

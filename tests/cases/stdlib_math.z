@@ -1,0 +1,39 @@
+// The integer math helpers in lib/math.z: factorials, primality, signs and
+// digit counts. Scalar only, since a helper over a vector of a concrete
+// element type cannot live in the shared namespace without breaking the units
+// that declare their own Vec.
+int main() {
+    /* ---- factorial ---- */
+    Console.WriteLog(factorial(0));           // 1
+    Console.WriteLog(factorial(1));           // 1
+    Console.WriteLog(factorial(5));           // 120
+    Console.WriteLog(factorial(12));          // 479001600
+
+    /* ---- is_prime ---- */
+    Console.WriteLog(is_prime(0));            // false
+    Console.WriteLog(is_prime(1));            // false
+    Console.WriteLog(is_prime(2));            // true
+    Console.WriteLog(is_prime(3));            // true
+    Console.WriteLog(is_prime(4));            // false
+    Console.WriteLog(is_prime(17));           // true
+    Console.WriteLog(is_prime(25));           // false
+    Console.WriteLog(is_prime(97));           // true
+    Console.WriteLog(is_prime(100));          // false
+    Console.WriteLog(is_prime(104729));       // true
+
+    /* ---- digits ---- */
+    Console.WriteLog(digits(0));              // 1
+    Console.WriteLog(digits(7));              // 1
+    Console.WriteLog(digits(42));             // 2
+    Console.WriteLog(digits(-42));            // 2 -- the sign is not a digit
+    Console.WriteLog(digits(1000000));        // 7
+
+    /* ---- composed with the builtins ---- */
+    var count = 0;
+    for (var i = 0; i < 50; i++) {
+        if (is_prime(i)) { count = count + 1; }
+    }
+    Console.WriteLog(count);                  // 15
+    Console.WriteLog(factorial(digits(100000))); // 720 -- 6 digits
+    return 0;
+}

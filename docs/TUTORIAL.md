@@ -338,7 +338,7 @@ would show.
 
 ### Surface names
 
-Z has no namespaces, and `Console.WriteLog` is not one. It is a **surface name**:
+`Console.WriteLog` is not a namespace. It is a **surface name**:
 a dotted spelling that the parser resolves to an ordinary global call before
 anything else looks at it.
 
@@ -528,11 +528,112 @@ string, pass it on, don't need it again".
 Console.WriteLog(pow(2, 10));     // 1024
 Console.WriteLog(gcd(12, 18));    // 6
 Console.WriteLog(lcm(4, 6));      // 12
+Console.WriteLog(factorial(5));   // 120
+Console.WriteLog(is_prime(17));   // true
+Console.WriteLog(digits(-42));    // 2, the sign is not a digit
 ```
 
 `exp`, `log` and `tan` are absent. `sqrt`/`sin`/`cos` above
 are the fixed-point integer versions rather than float ones; the float
 overloads are not there yet.
+
+There is no `fib` in the library, and that is deliberate rather than an
+oversight: it is three lines, and every other program already defines one, so
+shipping it would collide with the function it was meant to replace.
+
+### Parsing and splitting strings
+
+```csharp
+Console.WriteLog(match parse_int("42") { Ok(v) => v, Err(_) => -1 });  // 42
+Console.WriteLog(parse_int_or("nope", -1));                             // -1
+Console.WriteLog(count_sub("a,b,c", ","));                              // 2
+Console.WriteLog(is_digit(char_at("5", 0)));                            // true
+Console.WriteLog(join("|", lines("a\r\nb")));                           // a|b
+```
+
+`parse_int` takes an optionally signed run of digits and nothing else: no
+surrounding whitespace, and overflow is an error rather than a wrap. `lines`
+splits on newlines the way `split` does and tolerates carriage returns, so
+text read from a Windows file lines up the same way.
+
+The builder grows three matching methods: `appendLine` for a line plus its
+newline, and `appendAll` / `appendJoin` for dumping a `split` result straight
+into the buffer without going through a temporary:
+
+```csharp
+var b = new StringBuilder();
+b.appendLine("first");
+b.appendAll(split("x,y,z", ","));
+Console.WriteLog(b.toString());   // first\nxyz, on two lines
+```
+
+### The collections library
+
+`Vec<T>`, `Map<K,V>` and `Set<T>` are generic classes, so assignment shares
+them rather than copying. The everyday surface:
+
+```csharp
+var v = new Vec<int>();
+v.push(30); v.push(10); v.push(20);
+Console.WriteLog(v.first());            // 30
+Console.WriteLog(v.last());             // 20
+v.set(0, 99);                           // bounds-checked write
+v.swap(0, 2);
+v.reverseInPlace();
+v.truncate(2);
+var c = v.clone();                      // a copy with its own buffer
+
+var ages = new Map<string, int>();
+ages.set("ann", 34);
+var other = new Map<string, int>();
+other.set("bob", 29);
+ages.merge(other);                      // everything in other, overwriting
+var cp = ages.clone();
+
+var s = new Set<int>();
+var t = new Set<int>();
+t.add(2);
+s.add(1); s.add(2);
+s.unionWith(t);                         // {1, 2}
+Console.WriteLog(t.isSubsetOf(s));      // true
+s.intersectWith(t);                     // {2}
+s.subtract(t);                          // {}
+Console.WriteLog(s.isEmpty());          // true
+```
+
+`Stack<T>` and `Queue<T>` are the two orderings a `Vec` does not name: push
+and pop from one end, or enqueue at one end and dequeue from the other. The
+queue compacts itself as it drains, so a long lived one does not walk off the
+end of its buffer.
+
+Deliberately missing: searching or sorting a vector. A free function over
+`Vec<int>` breaks every unit that declares its own `Vec`, and a generic sort
+would order class elements by identity, which answers the wrong question the
+way a generic `indexOf` would. A vector of integers is sorted with a loop the
+caller can see.
+
+### Whole-file helpers
+
+```csharp
+Result<int, IoError*> demo() {
+    var w = file_write("/tmp/n.txt", "hello\nworld\n")?;  // 12, bytes written
+    Console.WriteLog(w);
+    var text = file_read("/tmp/n.txt")?;                   // the whole file
+    var f = openFile("/tmp/n.txt", "a")?;
+    f.writeLine("third")?;                                 // plus a newline
+    f.close()?;
+    var ls = lines(text);                                  // split into lines
+    Console.WriteLog(ls.length);                           // 2
+    return Ok(0);
+}
+
+Console.WriteLog(match demo() { Ok(n) => n, Err(_) => -1 });  // 0
+```
+
+`file_exists` probes readability, `file_append` is the appending form of
+`file_write`, and `readAllText` on an open file reads the rest of it exactly,
+normalizing carriage returns to newlines on the way. Reading a file as lines
+is `readAllText` plus `lines` rather than one call.
 
 ---
 
@@ -677,6 +778,33 @@ int fib(int n) {
 }
 Console.WriteLog(fib(15));   // 610
 ```
+
+### The `fn` spelling (canonical)
+
+The same function, C+Rust+Python style: `fn` first, return type after `->`.
+Both spellings compile and mean the same thing; new code should use `fn`.
+
+```csharp
+fn fib(int n) -> int {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+Console.WriteLog(fib(15));   // 610
+
+fn square(int n) -> int => n * n;
+fn main() -> int {
+    var mut total = 0;
+    for (var mut i = 0; i < 10; i++) { total = total + i; }
+    Console.WriteLog(total);   // 55
+    return 0;
+}
+```
+
+`fn foo() { ... }` with no arrow returns `void`. Generic:
+`fn max<T>(T a, T b) -> T { ... }`. Methods: `fn Sum() -> int` inside a
+struct, `virtual fn Speak() -> string` in a class, `fn` members in interfaces.
+`var mut x = ...` is explicit mutability (accepted everywhere, not yet
+enforced, so old `var x` keeps working).
 
 A single-expression function can use `=>` (expression-bodied):
 
@@ -1010,8 +1138,59 @@ foreach (var s in squares) { Console.WriteLog(s); }   // 0 1 4 9 16
 ### Modules
 
 `import "path.z";` pulls another file's top-level declarations into the current
-one. There is no namespace: an imported name is simply visible, exactly as if the
-text had been pasted in above the import.
+one. With no qualifier an imported name is simply visible, exactly as if the
+text had been pasted in above the import. With one it arrives namespaced:
+
+```csharp
+import "lib/math.z";
+import "net.z" as net;
+
+int main() {
+    Console.WriteLog(triple(4));     // 12, from lib/math.z
+    var l = new net.Lobby(3);        // the Lobby from net.z, qualified
+    Console.WriteLog(net.PORT);      // a const, same dots
+    return 0;
+}
+```
+
+`import "net.z" as net` parses `net.z` as if it had been written inside
+`namespace net`, so its classes, functions, consts and globals are reachable
+as `net.Lobby`, `net.connect`, `net.PORT` -- and a local `connect` of your own
+no longer collides with the library's. The same file imported plain and under
+two aliases compiles three times under three spellings; a cycle is still an
+error rather than a hang.
+
+### Namespaces
+
+A `namespace` block qualifies every declaration inside it:
+
+```csharp
+namespace netlink {
+    const int PORT = 8080;
+    class Lobby {
+        int users;
+        Lobby(int u) { this.users = u; }
+        virtual int Count() { return this.users; }
+    }
+    fn connect(string addr) -> int { return 7; }
+}
+
+fn main() -> int {
+    var l = new netlink.Lobby(3);
+    Console.WriteLog(l.Count());            // 3
+    Console.WriteLog(netlink.connect("x")); // 7
+    Console.WriteLog(netlink.PORT);         // 8080
+    return 0;
+}
+```
+
+Inside the block the qualifier is unnecessary (`Count` calls what `netlink`
+would prefix). A single-identifier block nests relative to the enclosing one
+(`outer` containing `inner` is `outer.inner`); a dotted header
+(`namespace a.b`) is absolute, which is how two files merge into one namespace
+by writing the same header. A value in scope shades a namespace of the same
+name. Enum variants work both ways: unqualified `Shut(2)` as always, or
+qualified `netlink.Shut(2)`.
 
 Paths resolve **relative to the importing file**, so a file can be moved with
 its neighbours and still work:
@@ -1779,8 +1958,9 @@ deliberately.
 - **A `const` must be declared before use**, unlike a function.
 - **`break`/`continue` outside a loop** is a compile error.
 - **Structs cannot be returned by value across the C boundary.** See section 17.
-- **`import` splices, it does not isolate.** An imported name is visible
-  everywhere, with no namespace to qualify it and nothing marked private.
+- **`import` splices, it does not isolate -- unless aliased.** A plain import
+  is visible everywhere, unqualified. `import "f.z" as net` parses the file
+  inside `namespace net`, so its names arrive as `net.*` instead.
 - **The standard library is Z source inside the compiler.** `lib/*.z` is spliced
   ahead of every program, so `StringBuilder` is checked and compiled by the same
   front end your code is. `--no-std` compiles without it.

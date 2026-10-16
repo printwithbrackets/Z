@@ -595,15 +595,20 @@ static int path_listed(const char **list, int n, const char *p) {
 /* Expands `path`'s tokens, recursing into its imports. Appends the result to
  * `*out` / `*nout`, reallocating as needed. */
 static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
-                       StringTable *strings);
+                       StringTable *strings, const char *parent_ns);
 
 /* Expands `path` from an already-read buffer (borrowed, not freed). Exists so
  * the entry file is read once: compile() already read it for diagnostics, and
  * a pipe (/dev/stdin) cannot be read twice -- the second read would see EOF
  * and compile an empty program. Imports and project files still use
- * expand_file, which reads then delegates here. */
+ * expand_file, which reads then delegates here.
+ *
+ * `parent_ns` is the namespace prefix the file's own tokens live under (""
+ * normally): a file reached through `import "net.z" as net` expands with
+ * parent `net`, so it parses exactly as if it had been written inside
+ * `namespace net`. Imports nested inside it resolve relative to the same. */
 static int expand_file_text(Arena *arena, const char *path, const char *text, long len, Token **out,
-                            int *nout, int *capout, StringTable *strings);
+                            int *nout, int *capout, StringTable *strings, const char *parent_ns);
 
 /* Appends one token, growing the output array. */
 static void push_token(Arena *arena, Token **out, int *nout, int *capout, Token t) {
@@ -619,17 +624,33 @@ static void push_token(Arena *arena, Token **out, int *nout, int *capout, Token 
 }
 
 static int expand_file_text(Arena *arena, const char *path, const char *text, long len, Token **out,
-                            int *nout, int *capout, StringTable *strings) {
+                            int *nout, int *capout, StringTable *strings, const char *parent_ns) {
     /* The path is copied into the arena because every token's Span points at
      * it, and those spans are read long after this frame is gone. The strings
      * resolve_import hands back are freed by the caller, so using one directly
      * would leave the spans dangling -- and since malloc reuses the block, they
      * would all end up naming whichever path was allocated last. */
     assert(path != NULL && text != NULL && len >= 0);
+    if (parent_ns == NULL)
+        parent_ns = "";
     char *stable = arena_strdup(arena, path);
     path = stable;
-    if (path_listed(loaded_path, n_loaded, path))
-        return 0; /* already in the unit; a second import is a no-op */
+    /* The dedup key carries the effective prefix, so one file imported plain
+     * and as two aliases expands three times under three spellings instead of
+     * colliding -- or instead of the second and third imports silently
+     * vanishing. A cycle stays a property of paths, checked on the loading
+     * stack below. */
+    char keybuf[1024];
+    {
+        int need = snprintf(keybuf, sizeof keybuf, "%s\x1f%s", path, parent_ns);
+        if (need < 0 || (size_t)need >= sizeof keybuf) {
+            fprintf(stderr, "%s: import path is too long\n", s_prog);
+            return 1;
+        }
+    }
+    char *key = arena_strdup(arena, keybuf);
+    if (path_listed(loaded_path, n_loaded, key))
+        return 0; /* already in the unit under this spelling; a second import is a no-op */
     if (path_listed(loading_path, n_loading, path)) {
         fprintf(stderr, "%s: import cycle: %s imports itself, directly or indirectly\n", s_prog,
                 path);
@@ -653,8 +674,30 @@ static int expand_file_text(Arena *arena, const char *path, const char *text, lo
         return 1;
     }
 
-    /* Walk the tokens, recursing at each top-level `import "..." ;` and
-     * otherwise copying them through. */
+    /* Namespace blocks enclosing the walk, seeded with the parent prefix so a
+     * plain import inside an aliased file inherits the alias. Entries record
+     * the brace level of their body; the seed sits at -1 and never pops.
+     * Tracked so an import nested in a block resolves under it -- which is
+     * what makes `namespace a { import "x.z"; }` pull x in as `a.*`. */
+    char ns_stack[32][256];
+    int ns_level[32];
+    int nns = 0;
+    if (parent_ns[0] != '\0') {
+        size_t pl = strlen(parent_ns);
+        if (pl >= sizeof ns_stack[0]) {
+            fprintf(stderr, "%s: namespace prefix is too long\n", s_prog);
+            n_loading--;
+            return 1;
+        }
+        memcpy(ns_stack[0], parent_ns, pl + 1);
+        ns_level[0] = -1;
+        nns = 1;
+    }
+
+    /* Walk the tokens, recursing at each `import` and otherwise copying them
+     * through. An import inside a function body (depth > 0 with no namespace
+     * above it) passes through untouched, exactly as before, and the parser
+     * reports it where it stands. */
     int depth = 0;
     for (int i = 0; i < ntoks; i++) {
         Token *t = &toks[i];
@@ -668,6 +711,8 @@ static int expand_file_text(Arena *arena, const char *path, const char *text, lo
              * negative, where it would hide later top-level imports. */
             if (depth > 0)
                 depth--;
+            while (nns > 0 && ns_level[nns - 1] > depth)
+                nns--;
             push_token(arena, out, nout, capout, *t);
             continue;
         }
@@ -676,41 +721,192 @@ static int expand_file_text(Arena *arena, const char *path, const char *text, lo
          * is appended after the whole unit is assembled. */
         if (t->kind == T_EOF)
             continue;
-        if (depth == 0 && t->kind == T_KW_IMPORT) {
-            if (i + 2 >= ntoks || toks[i + 1].kind != T_STRING || toks[i + 2].kind != T_SEMI) {
+        if (t->kind == T_KW_NAMESPACE) {
+            /* Track the block for the imports nested inside it. Single names
+             * nest relative to the stack top, dotted names are absolute --
+             * the same rule the parser applies, so the two cannot disagree
+             * about where an import below lands. */
+            int j = i + 1;
+            if (j < ntoks && toks[j].kind == T_IDENT) {
+                char name[256];
+                size_t n = 0;
+                int dotted = 0;
+                int jj = j;
+                while (jj < ntoks && toks[jj].kind == T_IDENT) {
+                    const char *wt = toks[jj].text;
+                    size_t tl = wt != NULL ? strlen(wt) : 0;
+                    if (n > 0)
+                        dotted = 1;
+                    if (tl == 0 || n + tl + 1 >= sizeof name)
+                        break;
+                    if (n > 0)
+                        name[n++] = '.';
+                    memcpy(name + n, wt, tl + 1);
+                    n += tl;
+                    if (jj + 2 < ntoks && toks[jj + 1].kind == T_DOT &&
+                        toks[jj + 2].kind == T_IDENT) {
+                        jj += 2;
+                        continue;
+                    }
+                    break;
+                }
+                jj++;
+                if (n > 0 && jj < ntoks && toks[jj].kind == T_LBRACE && nns < 32) {
+                    char full[256];
+                    size_t nl = strlen(name);
+                    int fits = 1;
+                    if (dotted || nns == 0) {
+                        if (nl >= sizeof full)
+                            fits = 0;
+                        else
+                            memcpy(full, name, nl + 1);
+                    } else {
+                        size_t pl = strlen(ns_stack[nns - 1]);
+                        if (pl + 1 + nl >= sizeof full) {
+                            fits = 0;
+                        } else {
+                            memcpy(full, ns_stack[nns - 1], pl);
+                            full[pl] = '.';
+                            memcpy(full + pl + 1, name, nl + 1);
+                        }
+                    }
+                    if (fits) {
+                        size_t fl = strlen(full);
+                        if (fl < sizeof ns_stack[0]) {
+                            memcpy(ns_stack[nns], full, fl + 1);
+                            ns_level[nns] = depth + 1;
+                            nns++;
+                        }
+                    }
+                }
+            }
+            push_token(arena, out, nout, capout, *t);
+            continue;
+        }
+        if (t->kind == T_KW_IMPORT && (depth == 0 || nns > 0)) {
+            /* `import "file.z";` or `import "file.z" as alias;`. The alias is
+             * contextual: `as` stays a usable identifier everywhere else. */
+            const char *alias = NULL;
+            int consumed;
+            if (i + 2 >= ntoks || toks[i + 1].kind != T_STRING) {
                 fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\";`\n",
                         t->span.file ? t->span.file : path, t->span.line, t->span.col);
                 n_loading--;
                 return 1;
             }
-            char *rel = strings->items[toks[i + 1].str_id];
-            char *target = resolve_import(path, rel);
-            if (expand_file(arena, target, out, nout, capout, strings) != 0) {
-                free(target);
+            if (i + 4 < ntoks && toks[i + 2].kind == T_IDENT && toks[i + 2].text != NULL &&
+                strcmp(toks[i + 2].text, "as") == 0 && toks[i + 3].kind == T_IDENT &&
+                toks[i + 4].kind == T_SEMI) {
+                alias = toks[i + 3].text;
+                consumed = 4;
+            } else if (i + 2 < ntoks && toks[i + 2].kind == T_SEMI) {
+                consumed = 2;
+            } else {
+                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\";`\n",
+                        t->span.file ? t->span.file : path, t->span.line, t->span.col);
                 n_loading--;
                 return 1;
             }
+            const char *top = nns > 0 ? ns_stack[nns - 1] : "";
+            char *rel = strings->items[toks[i + 1].str_id];
+            char *target = resolve_import(path, rel);
+            if (alias == NULL) {
+                /* No alias: the file joins the enclosing namespace as written,
+                 * so its tokens splice straight into the stream -- inside the
+                 * open block when nested, at the top level otherwise. Wrapping
+                 * them in a second `namespace top` would nest the prefix under
+                 * itself (`a` inside `a` becoming `a.a`). Nested imports inside
+                 * still resolve under the prefix via the parent argument. */
+                int rc = expand_file(arena, target, out, nout, capout, strings, top);
+                free(target);
+                if (rc != 0) {
+                    n_loading--;
+                    return 1;
+                }
+                i += consumed;
+                continue;
+            }
+            char effective[256];
+            {
+                int need = top[0] != '\0'
+                               ? snprintf(effective, sizeof effective, "%s.%s", top, alias)
+                               : snprintf(effective, sizeof effective, "%s", alias);
+                if (need < 0 || (size_t)need >= sizeof effective) {
+                    fprintf(stderr, "%s:%d:%d: error: import alias is too long\n",
+                            t->span.file ? t->span.file : path, t->span.line, t->span.col);
+                    free(target);
+                    n_loading--;
+                    return 1;
+                }
+            }
+            Token *tmp = NULL;
+            int ntmp = 0, ctmp = 0;
+            int rc = expand_file(arena, target, &tmp, &ntmp, &ctmp, strings, effective);
             free(target);
-            /* Step over the string and the semicolon; the loop's own i++ then
-             * lands on whatever follows the statement. */
-            i += 2;
+            if (rc != 0) {
+                n_loading--;
+                return 1;
+            }
+            /* As if the file had been written inside `namespace effective`. */
+            Token hdr;
+            memset(&hdr, 0, sizeof hdr);
+            hdr.kind = T_KW_NAMESPACE;
+            hdr.span = t->span;
+            push_token(arena, out, nout, capout, hdr);
+            const char *s = effective;
+            int first = 1;
+            while (*s != '\0') {
+                const char *dot = strchr(s, '.');
+                size_t sl = dot != NULL ? (size_t)(dot - s) : strlen(s);
+                if (!first) {
+                    Token dt;
+                    memset(&dt, 0, sizeof dt);
+                    dt.kind = T_DOT;
+                    dt.span = t->span;
+                    push_token(arena, out, nout, capout, dt);
+                }
+                Token idt;
+                memset(&idt, 0, sizeof idt);
+                idt.kind = T_IDENT;
+                idt.span = t->span;
+                char *seg = arena_alloc_array(arena, sl + 1, 1);
+                memcpy(seg, s, sl);
+                seg[sl] = '\0';
+                idt.text = seg;
+                push_token(arena, out, nout, capout, idt);
+                first = 0;
+                s = dot != NULL ? dot + 1 : s + sl;
+            }
+            Token lb;
+            memset(&lb, 0, sizeof lb);
+            lb.kind = T_LBRACE;
+            lb.span = t->span;
+            push_token(arena, out, nout, capout, lb);
+            for (int k = 0; k < ntmp; k++)
+                push_token(arena, out, nout, capout, tmp[k]);
+            Token rb;
+            memset(&rb, 0, sizeof rb);
+            rb.kind = T_RBRACE;
+            rb.span = t->span;
+            push_token(arena, out, nout, capout, rb);
+            i += consumed;
             continue;
         }
         push_token(arena, out, nout, capout, *t);
     }
 
     n_loading--;
-    list_push(&loaded_path, &n_loaded, &loaded_cap, path); /* arena-owned */
+    list_push(&loaded_path, &n_loaded, &loaded_cap, key); /* arena-owned */
     return 0;
 }
 
 static int expand_file(Arena *arena, const char *path, Token **out, int *nout, int *capout,
-                       StringTable *strings) {
+                       StringTable *strings, const char *parent_ns) {
     long len = 0;
     char *text = read_file(path, &len); /* reports the open failure itself */
     if (text == NULL)
         return 1;
-    int rc = expand_file_text(arena, path, text, len, out, nout, capout, strings);
+    int rc = expand_file_text(arena, path, text, len, out, nout, capout, strings, parent_ns);
     free(text);
     return rc;
 }
@@ -823,7 +1019,7 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
                 free((char *)files[i]);
                 continue;
             }
-            if (expand_file(&arena, files[i], &toks, &ntoks, &tcap, &strings) != 0) {
+            if (expand_file(&arena, files[i], &toks, &ntoks, &tcap, &strings, "") != 0) {
                 for (int j = i; j < nfiles; j++)
                     free((char *)files[j]);
                 free(files);
@@ -847,7 +1043,7 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
     /* The entry file from the buffer compile() already read. expand_file
      * would read the path a second time, which sees EOF on a pipe
      * (/dev/stdin) after the first read consumed it. */
-    if (expand_file_text(&arena, src, text, len, &toks, &ntoks, &tcap, &strings) != 0 ||
+    if (expand_file_text(&arena, src, text, len, &toks, &ntoks, &tcap, &strings, "") != 0 ||
         diag_error_count() > 0) {
         arena_free(&arena);
         free(text);

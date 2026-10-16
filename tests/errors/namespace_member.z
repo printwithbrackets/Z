@@ -1,0 +1,9 @@
+namespace netlink {
+fn connect() -> int { return 1; }
+}
+
+fn main() -> int {
+    Console.WriteLog(netlink.connect());
+    Console.WriteLog(netlink.missing());
+    return 0;
+}

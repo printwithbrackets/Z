@@ -43,6 +43,17 @@ class File {
         return Ok(n);
     }
 
+    /* writes `s` plus a newline, which is the shape most line oriented output
+     * takes. two calls rather than a temporary, so no short lived string is
+     * allocated on the way */
+    Result<int, IoError*> writeLine(string s) {
+        var a = write_bytes(this.fd, s);
+        if (a < 0) { return Err(new IoError(io_errno(), "write failed")); }
+        var b = write_bytes(this.fd, "\n");
+        if (b < 0) { return Err(new IoError(io_errno(), "write failed")); }
+        return Ok(a + b);
+    }
+
     /* One byte in 0..255, or the end (`code == 0`) or why the read failed. */
     Result<int, IoError*> readByte() {
         var b = read_byte(this.fd);
@@ -66,6 +77,47 @@ class File {
         return Ok(move line);
     }
 
+    /* the whole rest of the file, byte for byte apart from line ending
+     * normalization. reading it as lines is this plus `lines`: the text
+     * split on newlines, which is two calls rather than a helper returning a
+     * vector because that helper would name `Vec<string>` and break every
+     * unit declaring its own `Vec`. read a byte at a time rather than a line
+     * at a time, because the end of file flag is sticky: once any read has
+     * hit the end it stays set, so asking it after a successful line tells
+     * nothing about that line. here it is only asked right after a failed
+     * read, where it names this read and nothing else. a carriage return
+     * counts as a newline like the builtin reader counts it, so windows text
+     * comes back with plain newlines, and a read error is an `Err` rather
+     * than a guess */
+    Result<string, IoError*> readAllText() {
+        var out = new StringBuilder();
+        var pending = false;
+        while (true) {
+            var b = read_byte(this.fd);
+            if (b < 0) {
+                if (io_eof() != 0) { break; }
+                return Err(new IoError(io_errno(), "read failed"));
+            }
+            if (b == 13) {
+                pending = true;
+                continue;
+            }
+            if (pending) {
+                pending = false;
+                out.append("\n");
+                if (b == 10) { continue; }
+            }
+            if (b == 10) {
+                out.append("\n");
+            } else {
+                out.appendByte(b);
+            }
+        }
+        if (pending) { out.append("\n"); }
+        var text = out.take();
+        return Ok(move text);
+    }
+
     /* Closes, and remembers it did so the destructor does not again. Closing
      * twice is `Ok(0)` rather than an error: the file is closed either way,
      * which is what the caller asked about. */
@@ -85,4 +137,41 @@ Result<File*, IoError*> openFile(string path, string mode) {
     var fd = open(path, mode);
     if (fd < 0) { return Err(new IoError(io_errno(), "open failed: " + path)); }
     return Ok(new File(fd));
+}
+
+/* true when `path` can be opened for reading. a probe rather than a stat,
+ * because readability is the question a program is actually asking */
+bool file_exists(string path) {
+    var fd = open(path, "r");
+    if (fd < 0) { return false; }
+    close(fd);
+    return true;
+}
+
+/* the whole file at `path` as one string. the `?` chain is what this operator
+ * is for, since each step can fail with the same error type and the first
+ * failure is the answer */
+Result<string, IoError*> file_read(string path) {
+    var f = openFile(path, "r")?;
+    var text = f.readAllText()?;
+    f.close()?;
+    return Ok(move text);
+}
+
+/* writes `data` to `path`, truncating what was there. answers the byte count
+ * so a short write is visible rather than silent */
+Result<int, IoError*> file_write(string path, string data) {
+    var f = openFile(path, "w")?;
+    var n = f.write(data)?;
+    f.close()?;
+    return Ok(n);
+}
+
+/* appends `data` to `path`, creating it when it is missing. the same shape as
+ * `file_write` apart from the mode, because that is the only difference */
+Result<int, IoError*> file_append(string path, string data) {
+    var f = openFile(path, "a")?;
+    var n = f.write(data)?;
+    f.close()?;
+    return Ok(n);
 }

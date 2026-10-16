@@ -1,0 +1,11 @@
+// Imported aliased as `net` by ../alias_main.z: everything declared here is
+// reachable as `net.*` and nothing else.
+class Lobby {
+    int users;
+    Lobby(int u) { this.users = u; }
+    virtual int Count() { return this.users; }
+}
+
+fn openLobby(int n) -> int { return n * 2; }
+
+const int PORT = 8080;

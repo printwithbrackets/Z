@@ -265,6 +265,10 @@ UnionDef *type_define_union(TypeCtx *ctx, const char *name);
 Type *type_find_union(TypeCtx *ctx, const char *name);
 /* Finds a union variant by (globally unique) variant name. */
 VariantDef *type_find_variant(TypeCtx *ctx, const char *name, UnionDef **owner);
+/* The variant `variant` of a union declared inside namespace `ns` (owner names
+ * starting with `ns.`). NULL when no union there has that variant. */
+VariantDef *type_find_variant_in_ns(TypeCtx *ctx, const char *variant, const char *ns,
+                                    UnionDef **owner);
 UnionDef *type_find_variant_owner(TypeCtx *ctx, const char *name);
 
 /* A fresh type-parameter placeholder (identity-compared; substituted at

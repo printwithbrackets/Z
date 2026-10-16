@@ -3553,6 +3553,17 @@ static void gen_cond_branch(CG *cg, Expr *cond, int false_label) {
         buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", false_label);
         return;
     }
+    /* A string comparison cannot take the branch-on-flags path below either:
+     * that one emits an integer `cmp` of the two pointers, where the value
+     * path calls z_strcmp, so two equal strings in different allocations read
+     * as different. Evaluating the condition normally leaves a 0 or 1 in rax,
+     * which is what the shared tail branches on. */
+    if (cond != NULL && cond->kind == E_BINARY && is_compare_op(cond->op) &&
+        (is_kind(cond->lhs->type, TK_STRING) || is_kind(cond->rhs->type, TK_STRING))) {
+        gen_expr(cg, cond);
+        buf_printf(cg->out, "  cmp rax, 0\n  je .L%d\n", false_label);
+        return;
+    }
     if (cond != NULL && cond->kind == E_BINARY && is_compare_op(cond->op) &&
         is_pure_expr(cond->lhs) && is_pure_expr(cond->rhs)) {
         long long cr;

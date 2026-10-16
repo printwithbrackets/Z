@@ -1,0 +1,59 @@
+/* Integer math helpers: the small scalar combinatorics every program
+ * rewrites.
+ *
+ * `pow`, `gcd` and `lcm` are builtins rather than members here, because they
+ * lower to single runtime calls and need no Z at all. What is here is what
+ * needs a loop but no container: factorials, primes, and digit counting.
+ *
+ * Two things are deliberately not here. There is no `fib`: it is three lines
+ * and every other program already defines one, so shipping it would collide
+ * with the function it was meant to replace. And there is no sort, search or
+ * reduction over `Vec<int>`: a free function naming `Vec<int>` breaks every
+ * unit that declares its own `Vec`, of which the suite has two, because the
+ * whole program shares one namespace. A generic `sort<T>` would compile but
+ * order class elements by identity, which answers the wrong question the
+ * way `Vec.indexOf` would, so it is not here either.
+ */
+
+/* n factorial, iteratively, because the recursive form spends a frame per
+ * factor for nothing. dies on a negative input rather than answering 1, since
+ * 1 would claim the call meant something it did not */
+int factorial(int n) {
+    if (n < 0) {
+        Console.WriteLog("factorial of a negative number: " + n);
+        die(1);
+    }
+    var out = 1;
+    for (var i = 2; i <= n; i++) { out = out * i; }
+    return out;
+}
+
+/* true for a prime, by trial division up to the integer square root. 0 and 1
+ * are not prime, 2 is the only even prime, and only odd divisors are tried
+ * past that, which halves the work for no extra code */
+bool is_prime(int n) {
+    if (n < 2) { return false; }
+    if (n == 2) { return true; }
+    if (n % 2 == 0) { return false; }
+    var r = sqrt(n);
+    var d = 3;
+    while (d <= r) {
+        if (n % d == 0) { return false; }
+        d = d + 2;
+    }
+    return true;
+}
+
+/* the number of decimal digits in `n`, where 0 has one digit and the sign is
+ * not a digit. the width a column needs before it is padded, which is what
+ * `pad_left` asks for */
+int digits(int n) {
+    if (n == 0) { return 1; }
+    var out = 0;
+    var v = abs(n);
+    while (v > 0) {
+        out = out + 1;
+        v = v / 10;
+    }
+    return out;
+}

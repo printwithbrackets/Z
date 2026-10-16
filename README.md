@@ -956,6 +956,19 @@ Recorded because each was invisible at the default optimization level, and
   that cannot lose a value, and a concrete value going to an interface boxes. So
   `float f = 3` is `3`, and `int x = "hello"` is a `type_mismatch`.
   `var_init` and `var_init_type` are the tests.
+- **A string comparison in a condition compared pointers.** `gen_cond_branch`
+  fast-paths a comparison of two pure operands into a raw integer `cmp` and a
+  conditional jump, without asking what type it was comparing. The value path
+  calls `z_strcmp`, so the same spelling compared content everywhere else and
+  only the branch read addresses. Two equal strings in different allocations --
+  a copy, a concatenation, two elements read out of a vector -- read as
+  different, while two names for the same interned literal read as equal, which
+  is why it looked intermittent rather than broken. A literal on either side
+  saved the comparison, because a literal is not pure and fell through to the
+  value path, so `m == "apple"` was true and `m == k` was false for the same
+  `m`. The branch now evaluates a string comparison normally and tests the
+  resulting bool, the way the float guard above it already does. `strcmp_cond`
+  is the test, and it fails on the old compiler in five of its fourteen lines.
 
 ## Performance
 

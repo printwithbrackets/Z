@@ -162,6 +162,7 @@ typedef struct {
  * through body) so it can be re-parsed from the token stream. */
 typedef struct {
     char *name;
+    char *ns_prefix; /* lexical namespace at the declaration, restored to re-parse it */
     int ntparams;
     char **tparams;
     int tok_start, tok_end;
@@ -177,7 +178,9 @@ typedef struct {
 } Generic;
 
 typedef struct {
-    char *name; /* as written, so diagnostics can use it */
+    char *name;      /* qualified template name (`n.Vec`), used for instances */
+    char *src_name;  /* name as written (`Vec`), what the template body spells */
+    char *ns_prefix; /* lexical namespace at the declaration, restored to re-parse it */
     int is_class;
     int ntparams;
     char **tparams;
@@ -344,6 +347,19 @@ typedef struct {
     /* Set while parsing an `lvar`, so declare_var can tell a tier change from a
      * genuine duplicate. See the check there. */
     int declaring_lvar;
+
+    /* ---- namespaces: `namespace netlink { ... }` + `netlink.Lobby` ----
+     *
+     * `ns_prefix` is the lexical prefix for definitions ("netlink" inside that
+     * block, "" everywhere else), so a declaration registers under
+     * "netlink.Lobby" and an unqualified use beside it falls back to the same.
+     * `ns_paths` is every namespace path ever declared -- blocks and `import`
+     * aliases alike, since an alias arrives as synthesized `namespace` tokens --
+     * which is what makes `netlink` in `netlink.Lobby` resolve as a qualifier
+     * rather than reading as a variable no one declared. */
+    char *ns_prefix;
+    char **ns_paths;
+    int nns, ns_cap;
 } Parser;
 
 /* The internal name for `name`, or `name` itself. See the surface rules in
@@ -556,6 +572,21 @@ static Expr *make_cvt(Parser *p, Type *to, Expr *e, Span span);
 static void mark_synth(Parser *p, const char *name);
 static void skip_braced_block(Parser *p);
 static ConstDef *const_find(Parser *p, const char *name);
+static const char *ns_here(Parser *p);
+static char *ns_join(Parser *p, const char *prefix, const char *name);
+static void ns_declare(Parser *p, const char *path);
+static int ns_known(Parser *p, const char *path);
+static void *ns_lookup(Parser *p, const char *name, void *(*look)(Parser *, const char *));
+static void *look_sig(Parser *p, const char *n);
+static void *look_generic(Parser *p, const char *n);
+static void *look_gtype(Parser *p, const char *n);
+static void *look_const(Parser *p, const char *n);
+static void *look_global(Parser *p, const char *n);
+static void *look_struct(Parser *p, const char *n);
+static void *look_iface(Parser *p, const char *n);
+static void *look_union(Parser *p, const char *n);
+static const char *ns_short_name(const char *internal);
+static Type *ns_lookup_plain_type(Parser *p, const char *internal);
 static Expr *const_expr(Parser *p, ConstDef *c, Span span);
 static int const_fold_static(Parser *p, Expr *e, long long *out);
 
@@ -646,6 +677,8 @@ static Type *base_type_or_name(Parser *p, Token *t) {
         /* An interface name resolves here too, so a parameter, a return type and
          * a local can all be written `I` with nothing else to go on. */
         Type *ifc = type_find_iface(p->ty, t->text);
+        if (ifc == NULL)
+            ifc = ns_lookup(p, t->text, look_iface);
         if (ifc != NULL)
             return ifc;
         /* An in-scope generic type-parameter binding (T) shadows any struct of
@@ -665,10 +698,14 @@ static Type *base_type_or_name(Parser *p, Token *t) {
          * standard library's `StringBuilder` under that name. */
         Type *st = type_find_struct(p->ty, t->text);
         if (st == NULL)
+            st = ns_lookup(p, t->text, look_struct);
+        if (st == NULL)
             st = type_find_struct(p->ty, surf(p, t->text));
         if (st != NULL)
             return st;
         Type *un = type_find_union(p->ty, t->text);
+        if (un == NULL)
+            un = ns_lookup(p, t->text, look_union);
         if (un == NULL)
             un = type_find_union(p->ty, surf(p, t->text));
         return un;
@@ -826,7 +863,158 @@ static Type *parse_gtype(Parser *p, GenericType *g) {
     return sd != NULL ? type_find_struct(p->ty, sd->name) : NULL;
 }
 
+/* Resolves the head identifier at `i` to an absolute namespace path: itself
+ * when declared, else innermost-prefix-relative (`dd` inside `b` is `b.dd`).
+ * Returns 1 with `out` set. */
+static int ns_resolve_head(Parser *p, int i, char *out, size_t cap) {
+    const char *t = p->toks[i].text;
+    if (ns_known(p, t)) {
+        size_t n = strlen(t);
+        if (n + 1 > cap)
+            return 0;
+        memcpy(out, t, n + 1);
+        return 1;
+    }
+    const char *pfx = ns_here(p);
+    if (pfx[0] == '\0')
+        return 0;
+    size_t tn = strlen(t);
+    const char *end = pfx + strlen(pfx);
+    for (;;) {
+        size_t pl = (size_t)(end - pfx);
+        if (pl + 1 + tn + 1 > cap)
+            return 0;
+        memcpy(out, pfx, pl);
+        out[pl] = '.';
+        memcpy(out + pl + 1, t, tn + 1);
+        if (ns_known(p, out))
+            return 1;
+        if (pl == 0)
+            return 0;
+        const char *dot = NULL;
+        for (size_t k = 0; k < pl; k++)
+            if (pfx[k] == '.')
+                dot = pfx + k;
+        if (dot == NULL)
+            return 0;
+        end = dot;
+    }
+}
+
+/* Scans `A(.B)*` at token index `i`: consumes segments while the accumulated
+ * path is a declared namespace, leaving the final member name unconsumed iff
+ * more segments follow a non-namespace. On success writes the full dotted
+ * path and the index just past its last identifier, and returns 1. Returns 0
+ * leaving everything untouched when `i` is not a namespace-led dotted name.
+ * Purely syntactic apart from the registry check, so skipping and resolving
+ * share it. The head resolves relative to the enclosing prefix, so `dd.val`
+ * inside `b` scans as `b.dd.val`. */
+static int ns_scan_path(Parser *p, int i, char *out_path, size_t path_cap, int *out_end) {
+    if (i >= p->ntoks || p->toks[i].kind != T_IDENT)
+        return 0;
+    if (i + 2 >= p->ntoks || p->toks[i + 1].kind != T_DOT || p->toks[i + 2].kind != T_IDENT)
+        return 0;
+    if (!ns_resolve_head(p, i, out_path, path_cap))
+        return 0;
+    size_t n = strlen(out_path);
+    int j = i;
+    for (;;) {
+        /* out_path is a known namespace and `.ident` follows: consume it. */
+        size_t tl = strlen(p->toks[j + 2].text);
+        if (n + 1 + tl >= path_cap)
+            return 0;
+        out_path[n++] = '.';
+        memcpy(out_path + n, p->toks[j + 2].text, tl + 1);
+        n += tl;
+        j += 2;
+        /* Another `.ident` after a still-namespaced path continues the run. */
+        if (j + 2 < p->ntoks && p->toks[j + 1].kind == T_DOT && p->toks[j + 2].kind == T_IDENT &&
+            ns_known(p, out_path))
+            continue;
+        break;
+    }
+    *out_end = j;
+    return 1;
+}
+
+/* Nonzero when the cursor opens a namespace-qualified type: `N.T` naming a
+ * plain type, or `N.G<...>` naming a generic template. Registry-only (no
+ * instantiation), so gates like the typed-declaration check can ask it
+ * without consuming. */
+static int at_ns_typed(Parser *p) {
+    char path[256];
+    int end = 0;
+    if (!ns_scan_path(p, p->pos, path, sizeof path, &end))
+        return 0;
+    if (end + 1 < p->ntoks && p->toks[end + 1].kind == T_LT)
+        return find_gtype(p, path) != NULL;
+    return ns_lookup_plain_type(p, path) != NULL;
+}
+
+/* The plain (non-generic-argument) type named by an internal dotted path, or
+ * NULL. Type parameters are not namespaced; everything else resolves exactly
+ * as written. */
+static Type *ns_lookup_plain_type(Parser *p, const char *internal) {
+    Type *st = type_find_struct(p->ty, internal);
+    if (st != NULL)
+        return st;
+    Type *id = type_find_iface(p->ty, internal);
+    if (id != NULL)
+        return id;
+    return type_find_union(p->ty, internal);
+}
+
 static Type *parse_type(Parser *p) {
+    /* A namespace-qualified name: `netlink.Lobby`, `netlink.Vec<int>`. */
+    {
+        char path[256];
+        int end = 0;
+        if (ns_scan_path(p, p->pos, path, sizeof path, &end)) {
+            /* A generic template applied to arguments: the `<` follows the
+             * member name, exactly as in the unqualified shape below. */
+            if (end + 1 < p->ntoks && p->toks[end + 1].kind == T_LT) {
+                GenericType *g = find_gtype(p, path);
+                if (g == NULL)
+                    return NULL;
+                while (p->pos < end)
+                    advance(p);
+                Type *gt = parse_gtype(p, g);
+                if (gt == NULL)
+                    return NULL;
+                for (;;) {
+                    if (at(p, T_STAR)) {
+                        advance(p);
+                        gt = type_ptr(p->ty, gt);
+                    } else if (at(p, T_LBRACKET) && peek(p, 1)->kind == T_RBRACKET) {
+                        advance(p);
+                        advance(p);
+                        gt = type_array(p->ty, gt, -1);
+                    } else {
+                        break;
+                    }
+                }
+                return gt;
+            }
+            Type *t = ns_lookup_plain_type(p, path);
+            if (t == NULL)
+                return NULL;
+            while (p->pos <= end)
+                advance(p);
+            for (;;) {
+                if (at(p, T_STAR)) {
+                    advance(p);
+                    t = type_ptr(p->ty, t);
+                } else if (at(p, T_LBRACKET) && peek(p, 1)->kind == T_RBRACKET) {
+                    advance(p);
+                    advance(p);
+                    t = type_array(p->ty, t, -1);
+                } else {
+                    break;
+                }
+            }
+            return t;
+        }
+    }
     if (at(p, T_KW_FN) || at(p, T_KW_METHOD) || at(p, T_KW_CLOSURE))
         return parse_fn_type(p);
     if (at_result_type(p, p->pos))
@@ -837,6 +1025,8 @@ static Type *parse_type(Parser *p) {
      * `Map<string,int>*` is a pointer to an instance and not a parse error. */
     if (at(p, T_IDENT) && peek(p, 1)->kind == T_LT) {
         GenericType *g = find_gtype(p, cur(p)->text);
+        if (g == NULL)
+            g = ns_lookup(p, cur(p)->text, look_gtype);
         if (g != NULL) {
             Type *gt = parse_gtype(p, g);
             if (gt == NULL)
@@ -943,6 +1133,70 @@ static Type *parse_type_at(Parser *p, int i) {
             }
         }
         return r;
+    }
+    {
+        char path[256];
+        int end = 0;
+        if (ns_scan_path(p, i, path, sizeof path, &end)) {
+            if (end + 1 < p->ntoks && p->toks[end + 1].kind == T_LT) {
+                GenericType *g = find_gtype(p, path);
+                if (g == NULL)
+                    return NULL;
+                Parser sub = *p;
+                /* cursor onto the member name; parse_gtype steps past it */
+                sub.pos = end;
+                Type *gt = parse_gtype(&sub, g);
+                if (gt == NULL)
+                    return NULL;
+                for (;;) {
+                    if (sub.pos < p->ntoks && p->toks[sub.pos].kind == T_STAR) {
+                        sub.pos++;
+                        gt = type_ptr(p->ty, gt);
+                    } else if (sub.pos + 1 < p->ntoks && p->toks[sub.pos].kind == T_LBRACKET &&
+                               p->toks[sub.pos + 1].kind == T_RBRACKET) {
+                        sub.pos += 2;
+                        gt = type_array(p->ty, gt, -1);
+                    } else {
+                        break;
+                    }
+                }
+                return gt;
+            }
+            Type *nt = ns_lookup_plain_type(p, path);
+            if (nt == NULL)
+                return NULL;
+            return nt;
+        }
+    }
+    /* A generic template applied to arguments in a signature being
+     * pre-scanned: `Vec<int>`. The real parse_type handles this above; the
+     * index-based pre-scan path never did, so a function returning or taking
+     * an instance recorded a wrong signature. Same instantiation machinery,
+     * same result. */
+    if (i + 1 < p->ntoks && p->toks[i].kind == T_IDENT && p->toks[i + 1].kind == T_LT) {
+        GenericType *g = find_gtype(p, p->toks[i].text);
+        if (g == NULL)
+            g = ns_lookup(p, p->toks[i].text, look_gtype);
+        if (g != NULL) {
+            Parser sub = *p;
+            sub.pos = i;
+            Type *gt = parse_gtype(&sub, g);
+            if (gt == NULL)
+                return NULL;
+            for (;;) {
+                if (sub.pos < p->ntoks && p->toks[sub.pos].kind == T_STAR) {
+                    sub.pos++;
+                    gt = type_ptr(p->ty, gt);
+                } else if (sub.pos + 1 < p->ntoks && p->toks[sub.pos].kind == T_LBRACKET &&
+                           p->toks[sub.pos + 1].kind == T_RBRACKET) {
+                    sub.pos += 2;
+                    gt = type_array(p->ty, gt, -1);
+                } else {
+                    break;
+                }
+            }
+            return gt;
+        }
     }
     Type *t = base_type_or_name(p, &p->toks[i]);
     if (t == NULL)
@@ -1081,6 +1335,8 @@ static Var *resolve_var(Parser *p, const char *name, int mark) {
      * anyone's frame, so naming one from inside a function is reading what it
      * says rather than reading a slot that happens to hold a number. */
     GlobalDef *g = find_global(p, name);
+    if (g == NULL)
+        g = ns_lookup(p, name, look_global);
     if (g != NULL) {
         Var *v = global_var_ref(p, g);
         if (v != NULL && mark)
@@ -1505,6 +1761,161 @@ int type_kind_code(Type *t) {
 /* Given a token index that begins a type, returns the index just past it. */
 static int skip_type_tokens(Parser *p, int i);
 
+static Generic *find_generic(Parser *p, const char *name);
+
+/* The lexical namespace prefix for definitions: "" outside any block. */
+static const char *ns_here(Parser *p) { return p->ns_prefix != NULL ? p->ns_prefix : ""; }
+
+/* "prefix" + "." + "name", or just "name" at the top level. */
+static char *ns_join(Parser *p, const char *prefix, const char *name) {
+    if (prefix == NULL || prefix[0] == '\0')
+        return arena_strdup(p->arena, name);
+    size_t n = strlen(prefix) + 1 + strlen(name);
+    char *out = arena_alloc(p->arena, n + 1);
+    snprintf(out, n + 1, "%s.%s", prefix, name);
+    return out;
+}
+
+/* Register a namespace path, once however many blocks or aliases declare it:
+ * one `namespace netlink` in two files is one namespace, which is what lets a
+ * namespace span files. */
+static void ns_declare_one(Parser *p, const char *path) {
+    for (int i = 0; i < p->nns; i++)
+        if (strcmp(p->ns_paths[i], path) == 0)
+            return;
+    if (p->nns == p->ns_cap) {
+        int ncap = p->ns_cap == 0 ? 8 : p->ns_cap * 2;
+        char **nb = arena_alloc_array(p->arena, (size_t)ncap, sizeof(char *));
+        if (p->nns > 0)
+            memcpy(nb, p->ns_paths, (size_t)p->nns * sizeof(char *));
+        p->ns_paths = nb;
+        p->ns_cap = ncap;
+    }
+    p->ns_paths[p->nns++] = arena_strdup(p->arena, path);
+}
+
+/* Register a namespace path, once however many blocks or aliases declare it.
+ * Every intermediate prefix registers too, so `namespace absolute.path`
+ * makes both `absolute` and `absolute.path` known and a use site can scan
+ * past either. An intermediate holds no members itself; resolving through one
+ * simply reports the missing member. */
+static void ns_declare(Parser *p, const char *path) {
+    char prefix[256];
+    size_t n = 0;
+    for (const char *s = path;; s++) {
+        if (*s == '.' || *s == '\0') {
+            if (n > 0 && n < sizeof prefix) {
+                prefix[n] = '\0';
+                ns_declare_one(p, prefix);
+            }
+            if (*s == '\0')
+                break;
+            if (n + 1 < sizeof prefix)
+                prefix[n++] = '.';
+            else
+                break;
+        } else {
+            if (n + 1 < sizeof prefix)
+                prefix[n++] = *s;
+            else
+                break;
+        }
+    }
+}
+
+static int ns_known(Parser *p, const char *path) {
+    for (int i = 0; i < p->nns; i++)
+        if (strcmp(p->ns_paths[i], path) == 0)
+            return 1;
+    return 0;
+}
+
+/* Unqualified `name` fell through; retry as prefix.name, walking outward.
+ * `look` is one of the plain table lookups below. */
+/* Unqualified `name` fell through; retry as prefix.name, walking outward.
+ * `look` is one of the plain table lookups below. */
+static void *ns_lookup(Parser *p, const char *name, void *(*look)(Parser *, const char *)) {
+    void *r = look(p, name);
+    if (r != NULL)
+        return r;
+    const char *pfx = ns_here(p);
+    if (pfx[0] == '\0')
+        return NULL;
+    char cand[512];
+    size_t plen = strlen(pfx);
+    size_t nlen = strlen(name);
+    const char *end = pfx + plen;
+    for (;;) {
+        size_t pl = (size_t)(end - pfx);
+        if (pl + 1 + nlen >= sizeof cand)
+            return NULL;
+        memcpy(cand, pfx, pl);
+        cand[pl] = '.';
+        memcpy(cand + pl + 1, name, nlen + 1);
+        r = look(p, cand);
+        if (r != NULL)
+            return r;
+        if (pl == 0)
+            return NULL;
+        const char *dot = NULL;
+        for (size_t k = 0; k < pl; k++)
+            if (pfx[k] == '.')
+                dot = pfx + k;
+        if (dot == NULL)
+            return NULL;
+        end = dot;
+    }
+}
+
+/* The internal name `name` denotes: itself when it resolves directly, the
+ * prefixed candidate when only a namespace fallback hits, NULL when neither
+ * does. Lets call sites and value positions share one fallback walk. */
+static char *ns_resolve(Parser *p, const char *name, void *(*look)(Parser *, const char *)) {
+    if (look(p, name) != NULL)
+        return (char *)name;
+    const char *pfx = ns_here(p);
+    if (pfx[0] == '\0')
+        return NULL;
+    char cand[512];
+    size_t nlen = strlen(name);
+    const char *end = pfx + strlen(pfx);
+    for (;;) {
+        size_t pl = (size_t)(end - pfx);
+        if (pl + 1 + nlen >= sizeof cand)
+            return NULL;
+        memcpy(cand, pfx, pl);
+        cand[pl] = '.';
+        memcpy(cand + pl + 1, name, nlen + 1);
+        if (look(p, cand) != NULL)
+            return arena_strdup(p->arena, cand);
+        if (pl == 0)
+            return NULL;
+        const char *dot = NULL;
+        for (size_t k = 0; k < pl; k++)
+            if (pfx[k] == '.')
+                dot = pfx + k;
+        if (dot == NULL)
+            return NULL;
+        end = dot;
+    }
+}
+
+static void *look_sig(Parser *p, const char *n) { return find_sig(p, n); }
+
+static void *look_generic(Parser *p, const char *n) { return find_generic(p, n); }
+
+static void *look_gtype(Parser *p, const char *n) { return find_gtype(p, n); }
+
+static void *look_const(Parser *p, const char *n) { return const_find(p, n); }
+
+static void *look_global(Parser *p, const char *n) { return find_global(p, n); }
+
+static void *look_struct(Parser *p, const char *n) { return type_find_struct(p->ty, n); }
+
+static void *look_iface(Parser *p, const char *n) { return type_find_iface(p->ty, n); }
+
+static void *look_union(Parser *p, const char *n) { return type_find_union(p->ty, n); }
+
 /* If `i` points at `fn`, returns the index just past the whole function type
  * `fn(params) -> ret`, including any `*`/`[]` on the return type. Falls back to
  * just past the keyword if the type is malformed, so a syntax error is reported
@@ -1542,6 +1953,66 @@ static int skip_type_tokens(Parser *p, int i) {
         return skip_fn_type(p, i);
     if (!is_type_token(p->toks[i].kind) && p->toks[i].kind != T_IDENT)
         return i;
+    /* A namespace-qualified name: `netlink.Lobby`. Segments are consumed only
+     * while the accumulated path is a declared namespace, so `a.b` over values
+     * keeps its old meaning everywhere this lookahead runs. */
+    if (p->toks[i].kind == T_IDENT) {
+        char path[256];
+        if (ns_resolve_head(p, i, path, sizeof path)) {
+            size_t n = strlen(path);
+            int j = i;
+            while (ns_known(p, path) && j + 2 < p->ntoks && p->toks[j + 1].kind == T_DOT &&
+                   p->toks[j + 2].kind == T_IDENT) {
+                size_t tl = strlen(p->toks[j + 2].text);
+                if (n + 1 + tl >= sizeof path)
+                    break;
+                path[n++] = '.';
+                memcpy(path + n, p->toks[j + 2].text, tl + 1);
+                n += tl;
+                j += 2;
+            }
+            if (j != i) {
+                /* A generic template named by its qualified path: `N.Vec<int>`. */
+                if (j + 1 < p->ntoks && p->toks[j + 1].kind == T_LT &&
+                    find_gtype(p, path) != NULL) {
+                    int depth = 0;
+                    int k = j + 1;
+                    for (; k < p->ntoks; k++) {
+                        TokenKind kk = p->toks[k].kind;
+                        if (kk == T_LT) {
+                            depth++;
+                        } else if (kk == T_GT) {
+                            if (--depth == 0) {
+                                k++;
+                                break;
+                            }
+                        } else if (kk == T_SHR) {
+                            depth -= 2;
+                            k++;
+                            if (depth <= 0)
+                                break;
+                        } else if (kk == T_EOF) {
+                            break;
+                        }
+                    }
+                    i = k;
+                } else {
+                    i = j + 1; /* past the member name, like the single-name path */
+                }
+                for (;;) {
+                    if (i < p->ntoks && p->toks[i].kind == T_STAR) {
+                        i++;
+                    } else if (i + 1 < p->ntoks && p->toks[i].kind == T_LBRACKET &&
+                               p->toks[i + 1].kind == T_RBRACKET) {
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
+                return i;
+            }
+        }
+    }
     /* A generic type applied to its arguments: `Vec<T>`, `Map<K,V>`. Every
      * caller here is deciding where a type ends, so the argument list has to be
      * part of it -- otherwise `Vec<T> reversed()` looked like a bare `Vec`
@@ -1554,7 +2025,8 @@ static int skip_type_tokens(Parser *p, int i) {
      * `>>` is one token to the lexer, so a nested `Map<string,Vec<int>>` closes
      * two lists with one of them and the depth has to count it as two. */
     if (p->toks[i].kind == T_IDENT && i + 1 < p->ntoks && p->toks[i + 1].kind == T_LT &&
-        find_gtype(p, p->toks[i].text) != NULL) {
+        (find_gtype(p, p->toks[i].text) != NULL ||
+         ns_lookup(p, p->toks[i].text, look_gtype) != NULL)) {
         int depth = 0;
         for (; i < p->ntoks; i++) {
             TokenKind k = p->toks[i].kind;
@@ -1638,7 +2110,24 @@ static int skip_generic_params(Parser *p, int i) {
 static int at_func_decl(Parser *p) {
     int j = p->pos;
     if (j < p->ntoks && (p->toks[j].kind == T_KW_EXTERN || p->toks[j].kind == T_KW_EXPORT))
-        j++; /* `extern int f(...);` / `export int f(...) { }` */
+        j++; /* `extern int f(...);` / `export int f(...) { }` / `extern fn f(...)` */
+    /* Rust-style `fn name<T..>(params)`. Only when `fn` is followed by a
+     * name: a C-style function returning a function-pointer type also leads
+     * with `fn`, as in `fn(int) -> int makeAdder(int n)`, and that shape falls
+     * through to the type-skipping path below. */
+    if (j < p->ntoks && p->toks[j].kind == T_KW_FN) {
+        int k = j + 1;
+        if (k < p->ntoks && p->toks[k].kind == T_IDENT) {
+            k++;
+            if (k < p->ntoks && p->toks[k].kind == T_LT) {
+                if (k + 1 >= p->ntoks || p->toks[k + 1].kind != T_IDENT)
+                    return 0;
+                k = skip_generic_params(p, k);
+            }
+            if (k < p->ntoks && p->toks[k].kind == T_LPAREN)
+                return 1;
+        }
+    }
     j = skip_type_tokens(p, j);
     if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
         return 0;
@@ -1771,14 +2260,138 @@ static int find_body_end(Parser *p, int i) {
  * past its closing brace. The registered template already knows where the body
  * ends, so this is a lookup rather than a brace count. */
 static int skip_generic_type_decl(Parser *p) {
+    /* Namespace-aware: `class Vec<T>` inside `namespace n` is registered as
+     * `n.Vec`, so the bare name misses. Falling back here matters more than
+     * anywhere: returning `p->pos` unconsumed parks the top-level loop on the
+     * same declaration forever. */
     GenericType *g = find_gtype(p, peek(p, 1)->text);
+    if (g == NULL)
+        g = ns_lookup(p, peek(p, 1)->text, look_gtype);
     if (g == NULL)
         return p->pos;
     return g->tok_end < p->ntoks ? g->tok_end : p->pos;
 }
 
+/* Lexical namespace sweep shared by every pre-scan. Each pre-scan walks the
+ * token stream forward exactly once; feeding positions through NsSweep tracks
+ * `namespace` blocks (brace-matched, like the expander) so the sweep always
+ * knows the path enclosing the current token and whether that token sits
+ * directly in a member body (a top-level declaration when the stack is empty
+ * and the depth is zero).
+ *
+ * Single-identifier blocks nest relative to the enclosing block; a dotted
+ * header is absolute. Registration is idempotent, so every sweep declaring
+ * the same paths is harmless -- and `import "f.z" as N` arrives as
+ * synthesized `namespace N {` tokens, which is why aliases need no code of
+ * their own anywhere in the parser. */
+typedef struct {
+    int depth;
+    int nst;
+    char paths[16][256];
+    int levels[16];
+} NsSweep;
+
+static void ns_sweep_init(NsSweep *s) {
+    s->depth = 0;
+    s->nst = 0;
+}
+
+static void ns_sweep_step(NsSweep *s, Parser *p, int i) {
+    TokenKind k = p->toks[i].kind;
+    if (k == T_LBRACE) {
+        s->depth++;
+        return;
+    }
+    if (k == T_RBRACE) {
+        if (s->depth > 0)
+            s->depth--;
+        while (s->nst > 0 && s->levels[s->nst - 1] > s->depth)
+            s->nst--;
+        return;
+    }
+    if (k != T_KW_NAMESPACE)
+        return;
+    int j = i + 1;
+    if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
+        return;
+    char name[256];
+    size_t n = 0;
+    int dotted = 0;
+    int jj = j;
+    while (jj < p->ntoks && p->toks[jj].kind == T_IDENT) {
+        const char *t = p->toks[jj].text;
+        if (n > 0)
+            dotted = 1;
+        size_t tl = strlen(t);
+        if (n + tl + 1 >= sizeof name)
+            return;
+        if (n > 0)
+            name[n++] = '.';
+        memcpy(name + n, t, tl);
+        n += tl;
+        if (jj + 2 < p->ntoks && p->toks[jj + 1].kind == T_DOT && p->toks[jj + 2].kind == T_IDENT) {
+            jj += 2;
+            continue;
+        }
+        break;
+    }
+    if (n == 0)
+        return;
+    name[n] = '\0';
+    jj++;
+    if (jj >= p->ntoks || p->toks[jj].kind != T_LBRACE)
+        return;
+    char full[256];
+    if (dotted || s->nst == 0) {
+        if (n >= sizeof full)
+            return;
+        memcpy(full, name, n + 1);
+    } else {
+        int need = snprintf(full, sizeof full, "%s.%s", s->paths[s->nst - 1], name);
+        if (need < 0 || (size_t)need >= sizeof full)
+            return;
+    }
+    ns_declare(p, full);
+    if (s->nst < 16) {
+        size_t fl = strlen(full);
+        memcpy(s->paths[s->nst], full, fl + 1);
+        s->levels[s->nst] = s->depth + 1;
+        s->nst++;
+    }
+}
+
+/* Prefix enclosing position i: "" when global. Call after stepping past i. */
+static const char *ns_sweep_here(NsSweep *s) { return s->nst > 0 ? s->paths[s->nst - 1] : ""; }
+
+/* Nonzero when a declaration starting at the just-stepped position is a
+ * member: global at depth zero, or directly in the innermost open block. */
+static int ns_sweep_member(NsSweep *s) {
+    if (s->nst == 0)
+        return s->depth == 0;
+    return s->depth == s->levels[s->nst - 1];
+}
+
+/* The one lexical pre-pass everything namespace-related depends on. Runs
+ * before every other pre-scan so use sites may precede definitions. With the
+ * sweep doing the tracking, this pass is only registration. */
+static void prescan_namespaces(Parser *p) {
+    NsSweep s;
+    ns_sweep_init(&s);
+    for (int i = 0; i < p->ntoks; i++)
+        ns_sweep_step(&s, p, i);
+}
+
 static void prescan_struct_names(Parser *p) {
+    NsSweep ns;
+    ns_sweep_init(&ns);
+    int si = 0;
     for (int i = 0; i + 1 < p->ntoks; i++) {
+        while (si < i)
+            ns_sweep_step(&ns, p, si++);
+        ns_sweep_step(&ns, p, i);
+        si = i + 1;
+        const char *pfx = ns_sweep_here(&ns);
+        p->ns_prefix = (char *)pfx;
         if ((p->toks[i].kind == T_KW_STRUCT || p->toks[i].kind == T_KW_CLASS) &&
             p->toks[i + 1].kind == T_IDENT) {
             /* `class Vec<T>` is a template, not a type: registering `Vec` as a
@@ -1788,9 +2401,11 @@ static void prescan_struct_names(Parser *p) {
              * it never needs to resolve on its own. */
             int after_params = skip_type_param_list(p, i + 2);
             if (after_params != i + 2) {
-                if (find_gtype(p, p->toks[i + 1].text) == NULL) {
-                    GenericType *g =
-                        add_gtype(p, p->toks[i + 1].text, p->toks[i].kind == T_KW_CLASS);
+                char *gtname = ns_join(p, pfx, p->toks[i + 1].text);
+                if (find_gtype(p, gtname) == NULL) {
+                    GenericType *g = add_gtype(p, gtname, p->toks[i].kind == T_KW_CLASS);
+                    g->src_name = arena_strdup(p->arena, p->toks[i + 1].text);
+                    g->ns_prefix = arena_strdup(p->arena, pfx);
                     g->tok_start = i;
                     int lb = after_params;
                     while (lb < p->ntoks && p->toks[lb].kind != T_LBRACE) {
@@ -1819,16 +2434,17 @@ static void prescan_struct_names(Parser *p) {
                 i = after_params - 1;
                 continue;
             }
-            StructDef *sd = type_define_struct(p->ty, p->toks[i + 1].text);
+            StructDef *sd = type_define_struct(p->ty, ns_join(p, pfx, p->toks[i + 1].text));
             if (sd != NULL && p->toks[i].kind == T_KW_CLASS)
                 sd->is_class = 1;
             i += 1;
         }
         if (p->toks[i].kind == T_KW_ENUM && p->toks[i + 1].kind == T_IDENT) {
-            type_define_union(p->ty, p->toks[i + 1].text);
+            type_define_union(p->ty, ns_join(p, pfx, p->toks[i + 1].text));
             i += 1;
         }
     }
+    p->ns_prefix = NULL;
 }
 
 /* Registers the *signature* of a method without its body, for the pre-scan.
@@ -1854,6 +2470,93 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
          * the real parse, which is the one with a span to point at. */
         is_virtual = 1;
         j++;
+    }
+    /* Rust-style `fn Name(params) [-> Ret]`. */
+    if (j < p->ntoks && p->toks[j].kind == T_KW_FN) {
+        if (j + 1 >= p->ntoks || p->toks[j + 1].kind != T_IDENT)
+            return i;
+        char *fname = p->toks[j + 1].text;
+        int k = j + 2;
+        if (k < p->ntoks && p->toks[k].kind == T_IDENT && ctor_name != NULL &&
+            strcmp(p->toks[k].text, ctor_name) == 0) {
+            /* `fn C(...)` constructor spelling: no signature to register. */
+        }
+        if (k >= p->ntoks || p->toks[k].kind != T_LPAREN)
+            return i;
+        /* Count params for the shallow signature. */
+        int depth = 1;
+        int nparams = 0;
+        int expect_type = 1;
+        int q = k + 1;
+        for (; q < p->ntoks && depth > 0; q++) {
+            TokenKind kk = p->toks[q].kind;
+            if (kk == T_LPAREN)
+                depth++;
+            else if (kk == T_RPAREN)
+                depth--;
+            else if (kk == T_COMMA && depth == 1)
+                expect_type = 1;
+            else if (depth == 1 && expect_type &&
+                     (is_type_token(kk) || kk == T_IDENT || kk == T_KW_MUT)) {
+                if (kk == T_KW_MUT)
+                    continue;
+                expect_type = 0;
+                nparams++;
+            }
+        }
+        if (depth != 0)
+            return i;
+        int after = q;
+        Type *rt = type_void(p->ty);
+        if (after < p->ntoks && p->toks[after].kind == T_ARROW) {
+            Parser sub2 = *p;
+            sub2.pos = after + 1;
+            Type *prt = parse_type(&sub2);
+            if (prt != NULL) {
+                rt = prt;
+                after = sub2.pos;
+            }
+        }
+        if (strcmp(fname, ctor_name ? ctor_name : "") == 0)
+            return after;
+        if (find_method(p, sd, fname) != NULL)
+            return after;
+        /* Parse param types for real via sub-parser. */
+        Parser sub = *p;
+        sub.pos = k + 1;
+        Type **ptypes =
+            arena_alloc_array(p->arena, (size_t)(nparams > 0 ? nparams : 1), sizeof(Type *));
+        int np = 0;
+        while (sub.pos < p->ntoks && p->toks[sub.pos].kind != T_RPAREN &&
+               p->toks[sub.pos].kind != T_EOF) {
+            if (p->toks[sub.pos].kind == T_KW_MUT) {
+                sub.pos++;
+                continue;
+            }
+            if (np >= nparams) {
+                sub.pos++;
+                continue;
+            }
+            Type *pt = parse_type(&sub);
+            if (pt == NULL)
+                return i;
+            ptypes[np++] = pt;
+            while (sub.pos < p->ntoks && p->toks[sub.pos].kind != T_COMMA &&
+                   p->toks[sub.pos].kind != T_RPAREN && p->toks[sub.pos].kind != T_EOF)
+                sub.pos++;
+            if (sub.pos < p->ntoks && p->toks[sub.pos].kind == T_COMMA)
+                sub.pos++;
+        }
+        StructMethod *m = arena_alloc(p->arena, sizeof *m);
+        m->name = arena_strdup(p->arena, fname);
+        m->ret = rt;
+        m->ptypes = ptypes;
+        m->nparams = np;
+        m->body = NULL;
+        m->is_virtual = is_virtual;
+        m->vtable_index = -1;
+        struct_add_method(p->ty, sd, m);
+        return after;
     }
     int tstart = j;
     if (j >= p->ntoks)
@@ -2147,14 +2850,23 @@ static int prescan_struct_members(Parser *p, StructDef *sd, int j, const char *c
 }
 
 static void prescan_struct_fields(Parser *p) {
+    NsSweep ns;
+    ns_sweep_init(&ns);
+    int si = 0;
     for (int i = 0; i < p->ntoks; i++) {
+        while (si < i)
+            ns_sweep_step(&ns, p, si++);
+        ns_sweep_step(&ns, p, i);
+        si = i + 1;
+        p->ns_prefix = (char *)ns_sweep_here(&ns);
         int is_class = p->toks[i].kind == T_KW_CLASS;
         if (!is_class && p->toks[i].kind != T_KW_STRUCT)
             continue;
         int j = i + 1;
         if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
             continue;
-        char *name = p->toks[j].text;
+        char *name = ns_join(p, ns_sweep_here(&ns), p->toks[j].text);
+        char *written = p->toks[j].text;
         j++;
         /* A generic declaration has no layout of its own: each instance gets its
          * fields laid out when it is built, and registering the template as a
@@ -2182,7 +2894,7 @@ static void prescan_struct_fields(Parser *p) {
         }
         if (j >= p->ntoks || p->toks[j].kind != T_LBRACE)
             continue;
-        prescan_struct_members(p, sd, j + 1, name);
+        prescan_struct_members(p, sd, j + 1, written);
         if (sd->align < 1)
             sd->align = 1;
         sd->size = (sd->size + sd->align - 1) / sd->align * sd->align;
@@ -2198,12 +2910,17 @@ static void prescan_struct_fields(Parser *p) {
      * name to an itab index, and that has to work whatever order the declarations
      * are in. An interface is only signatures, so there is no body to skip. */
     for (int i = 0; i < p->ntoks; i++) {
+        while (si < i)
+            ns_sweep_step(&ns, p, si++);
+        ns_sweep_step(&ns, p, i);
+        si = i + 1;
+        p->ns_prefix = (char *)ns_sweep_here(&ns);
         if (p->toks[i].kind != T_KW_INTERFACE)
             continue;
         int j = i + 1;
         if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
             continue;
-        char *name = p->toks[j].text;
+        char *name = ns_join(p, ns_sweep_here(&ns), p->toks[j].text);
         j++;
         IfaceDef *id = type_define_iface(p->ty, name);
         if (id == NULL || id->prescanned)
@@ -2212,6 +2929,76 @@ static void prescan_struct_fields(Parser *p) {
             continue;
         j++;
         while (j < p->ntoks && p->toks[j].kind != T_RBRACE && p->toks[j].kind != T_EOF) {
+            /* Rust-style `fn Name(params) [-> Ret];` */
+            if (p->toks[j].kind == T_KW_FN) {
+                if (j + 1 >= p->ntoks || p->toks[j + 1].kind != T_IDENT)
+                    break;
+                char *mname = p->toks[j + 1].text;
+                int k = j + 2;
+                if (k >= p->ntoks || p->toks[k].kind != T_LPAREN)
+                    break;
+                int depth = 1;
+                for (k++; k < p->ntoks && depth > 0; k++) {
+                    if (p->toks[k].kind == T_LPAREN)
+                        depth++;
+                    else if (p->toks[k].kind == T_RPAREN)
+                        depth--;
+                }
+                if (depth != 0)
+                    break;
+                int after = k;
+                Type *rt = type_void(p->ty);
+                if (after < p->ntoks && p->toks[after].kind == T_ARROW) {
+                    Parser sr = *p;
+                    sr.pos = after + 1;
+                    Type *prt = parse_type(&sr);
+                    if (prt == NULL)
+                        break;
+                    rt = prt;
+                    after = sr.pos;
+                }
+                /* param types */
+                Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+                int np = 0;
+                {
+                    Parser s2 = *p;
+                    s2.pos = j + 3; /* after `fn Name (` */
+                    while (s2.pos < k - 1 && np < Z_MAX_ARGS) {
+                        if (p->toks[s2.pos].kind == T_KW_MUT) {
+                            s2.pos++;
+                            continue;
+                        }
+                        if (!is_type_token(p->toks[s2.pos].kind) &&
+                            p->toks[s2.pos].kind != T_IDENT) {
+                            s2.pos++;
+                            continue;
+                        }
+                        int e = skip_type_tokens(p, s2.pos);
+                        if (e >= p->ntoks || p->toks[e].kind != T_IDENT) {
+                            s2.pos++;
+                            continue;
+                        }
+                        Parser s3 = *p;
+                        s3.pos = s2.pos;
+                        Type *pt = parse_type(&s3);
+                        if (pt != NULL)
+                            ptypes[np++] = pt;
+                        s2.pos = e + 1;
+                        while (s2.pos < k - 1 && p->toks[s2.pos].kind != T_COMMA)
+                            s2.pos++;
+                        if (s2.pos < k - 1 && p->toks[s2.pos].kind == T_COMMA)
+                            s2.pos++;
+                    }
+                }
+                if (iface_find_method(id, mname) == NULL)
+                    iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, rt));
+                j = after;
+                if (j < p->ntoks && p->toks[j].kind == T_SEMI)
+                    j++;
+                else
+                    break;
+                continue;
+            }
             int tstart = j;
             if (!is_type_token(p->toks[j].kind) && p->toks[j].kind != T_IDENT)
                 break;
@@ -2267,12 +3054,17 @@ static void prescan_struct_fields(Parser *p) {
      * enum declared later needs its variant list to check exhaustiveness and to
      * bind payloads. */
     for (int i = 0; i < p->ntoks; i++) {
+        while (si < i)
+            ns_sweep_step(&ns, p, si++);
+        ns_sweep_step(&ns, p, i);
+        si = i + 1;
+        p->ns_prefix = (char *)ns_sweep_here(&ns);
         if (p->toks[i].kind != T_KW_ENUM)
             continue;
         int j = i + 1;
         if (j >= p->ntoks || p->toks[j].kind != T_IDENT)
             continue;
-        char *name = p->toks[j].text;
+        char *name = ns_join(p, ns_sweep_here(&ns), p->toks[j].text);
         j++;
         UnionDef *ud = type_define_union(p->ty, name);
         if (ud == NULL)
@@ -2316,28 +3108,162 @@ static void prescan_struct_fields(Parser *p) {
         ud->prescanned = 1;
         i = j - 1;
     }
+    p->ns_prefix = NULL;
+}
+
+/* Prescan one Rust-style `fn name(params) [-> ret]` starting with `fn` at index
+ * `fi` (or `extern`/`export` at `fi` followed by `fn`). On success records the
+ * signature, sets `*out_next` past the body/declaration, and returns 1.
+ * Returns 0 if this is not an fn-form (caller falls through). Generic
+ * `fn f<T>` is skipped (returns 1 with body skipped but no signature), since
+ * parse_func records generics. */
+static int prescan_fn_sig(Parser *p, int fi, int is_extern_export, int kw_extern,
+                          const char *ns_pfx, int *out_next) {
+    int i = fi;
+    if (is_extern_export) {
+        /* fi points at extern/export; fn must follow */
+        if (i + 2 >= p->ntoks || p->toks[i + 1].kind != T_KW_FN || p->toks[i + 2].kind != T_IDENT)
+            return 0;
+        i += 1; /* now at fn */
+    } else {
+        if (i >= p->ntoks || p->toks[i].kind != T_KW_FN)
+            return 0;
+    }
+    /* i at 'fn', i+1 at name */
+    if (i + 1 >= p->ntoks || p->toks[i + 1].kind != T_IDENT)
+        return 0;
+    const char *fname = ns_join(p, ns_pfx, p->toks[i + 1].text);
+    int j = i + 2;
+    if (j < p->ntoks && p->toks[j].kind == T_LT)
+        return 0; /* generic: leave to parse_func; do not consume here */
+    if (j >= p->ntoks || p->toks[j].kind != T_LPAREN)
+        return 0;
+    j++;
+    Type *ptypes[16];
+    int np = 0;
+    int is_ext = 0;
+    if (j < p->ntoks && p->toks[j].kind == T_KW_THIS) {
+        is_ext = 1;
+        j++;
+    }
+    while (j < p->ntoks && p->toks[j].kind != T_RPAREN) {
+        if (p->toks[j].kind == T_KW_MUT) {
+            j++;
+            continue;
+        }
+        if (is_type_token(p->toks[j].kind) || p->toks[j].kind == T_IDENT) {
+            int k = skip_type_tokens(p, j);
+            if (k < p->ntoks && p->toks[k].kind == T_IDENT) {
+                if (np < 16)
+                    ptypes[np++] = parse_type_at(p, j);
+                j = k + 1;
+                while (j < p->ntoks && p->toks[j].kind != T_COMMA && p->toks[j].kind != T_RPAREN)
+                    j++;
+                if (j < p->ntoks && p->toks[j].kind == T_COMMA)
+                    j++;
+                continue;
+            }
+        }
+        j++;
+    }
+    if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
+        j++;
+    Type *ret = type_void(p->ty);
+    if (j < p->ntoks && p->toks[j].kind == T_ARROW) {
+        ret = parse_type_at(p, j + 1);
+        Parser sub = *p;
+        sub.pos = j + 1;
+        if (parse_type(&sub) != NULL)
+            j = sub.pos;
+        else
+            j++;
+    }
+    if (j < p->ntoks && p->toks[j].kind == T_LBRACE) {
+        if (is_extern_export) {
+            if (kw_extern)
+                return 0; /* extern cannot have body; leave to real parser for error */
+            add_sig_ex(p, fname, ret, ptypes, np, 0, 0);
+            Sig *ex = find_sig(p, fname);
+            if (ex != NULL)
+                ex->is_export = 1;
+        } else {
+            add_sig(p, fname, ret, ptypes, np, is_ext);
+        }
+        int d = 0;
+        while (j < p->ntoks) {
+            if (p->toks[j].kind == T_LBRACE)
+                d++;
+            else if (p->toks[j].kind == T_RBRACE) {
+                d--;
+                if (d == 0) {
+                    j++;
+                    break;
+                }
+            }
+            j++;
+        }
+        *out_next = j;
+        return 1;
+    }
+    if (j < p->ntoks && p->toks[j].kind == T_FATARROW) {
+        if (is_extern_export && kw_extern)
+            return 0;
+        if (is_extern_export) {
+            add_sig_ex(p, fname, ret, ptypes, np, 0, 0);
+            Sig *ex = find_sig(p, fname);
+            if (ex != NULL)
+                ex->is_export = 1;
+        } else {
+            add_sig(p, fname, ret, ptypes, np, is_ext);
+        }
+        j++;
+        while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
+            j++;
+        if (j < p->ntoks)
+            j++;
+        *out_next = j;
+        return 1;
+    }
+    if (j < p->ntoks && p->toks[j].kind == T_SEMI) {
+        if (is_extern_export) {
+            add_sig_ex(p, fname, ret, ptypes, np, 0, kw_extern ? 1 : 0);
+        } else {
+            add_sig(p, fname, ret, ptypes, np, is_ext);
+        }
+        *out_next = j + 1;
+        return 1;
+    }
+    return 0;
 }
 
 static void prescan_signatures(Parser *p) {
-    int depth = 0;
+    NsSweep ns;
+    ns_sweep_init(&ns);
+    int si = 0;
     int i = 0;
     while (i < p->ntoks) {
+        /* Jumps below land past balanced regions, so catching the sweep up
+         * keeps brace/namespace tracking exact for legal programs. */
+        while (si < i)
+            ns_sweep_step(&ns, p, si++);
+        ns_sweep_step(&ns, p, i);
+        si = i + 1;
         Token *t = &p->toks[i];
-        if (t->kind == T_LBRACE) {
-            depth++;
-            i++;
-            continue;
-        }
-        if (t->kind == T_RBRACE) {
-            depth--;
-            i++;
-            continue;
-        }
+        const char *pfx = ns_sweep_here(&ns);
+        int member = ns_sweep_member(&ns);
+        p->ns_prefix = (char *)pfx;
         /* `extern int f(...);` declares a C symbol and `export int f(...) {...}`
          * publishes a Z one. Both need their signature recorded here so calls
          * type-check, and both make codegen use the name as written. */
-        if (depth == 0 && (t->kind == T_KW_EXTERN || t->kind == T_KW_EXPORT)) {
+        if (member && (t->kind == T_KW_EXTERN || t->kind == T_KW_EXPORT)) {
             int kw_extern = t->kind == T_KW_EXTERN;
+            {
+                int nx = 0;
+                if (prescan_fn_sig(p, i, 1, kw_extern, pfx, &nx)) {
+                    i = nx;
+                    continue;
+                }
+            }
             int j = skip_type_tokens(p, i + 1);
             if (j + 1 < p->ntoks && p->toks[j].kind == T_IDENT && p->toks[j + 1].kind == T_LPAREN) {
                 j += 2;
@@ -2364,7 +3290,8 @@ static void prescan_signatures(Parser *p) {
                     j++;
                 if (j < p->ntoks && p->toks[j].kind == T_SEMI && kw_extern) {
                     Type *ret = parse_type_at(p, i + 1);
-                    add_sig_ex(p, p->toks[skip_type_tokens(p, i + 1)].text, ret, ptypes, np, 0, 1);
+                    add_sig_ex(p, ns_join(p, pfx, p->toks[skip_type_tokens(p, i + 1)].text), ret,
+                               ptypes, np, 0, 1);
                     i = j + 1;
                     continue;
                 }
@@ -2372,8 +3299,9 @@ static void prescan_signatures(Parser *p) {
                     /* Record the signature, then skip the body by brace
                      * matching, exactly as the plain function path does. */
                     Type *ret = parse_type_at(p, i + 1);
-                    add_sig_ex(p, p->toks[skip_type_tokens(p, i + 1)].text, ret, ptypes, np, 0, 0);
-                    Sig *ex = find_sig(p, p->toks[skip_type_tokens(p, i + 1)].text);
+                    const char *exname = ns_join(p, pfx, p->toks[skip_type_tokens(p, i + 1)].text);
+                    add_sig_ex(p, exname, ret, ptypes, np, 0, 0);
+                    Sig *ex = find_sig(p, exname);
                     if (ex != NULL)
                         ex->is_export = 1;
                     int d = 0;
@@ -2403,7 +3331,7 @@ static void prescan_signatures(Parser *p) {
          * appear where an expression can, and the `=>` is unambiguous. The skip
          * runs to the statement's semicolon, tracking brace depth so a
          * block-bodied lambda's own semicolons are not mistaken for the end. */
-        if (depth == 0 && t->kind == T_FATARROW) {
+        if (member && t->kind == T_FATARROW) {
             int braces = 0;
             while (i < p->ntoks) {
                 TokenKind k = p->toks[i].kind;
@@ -2423,7 +3351,16 @@ static void prescan_signatures(Parser *p) {
             }
             continue;
         }
-        if (depth == 0 && (is_type_token(t->kind) || t->kind == T_IDENT)) {
+        if (member && t->kind == T_KW_FN) {
+            int nx = 0;
+            if (prescan_fn_sig(p, i, 0, 0, pfx, &nx)) {
+                i = nx;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (member && (is_type_token(t->kind) || t->kind == T_IDENT)) {
             int j = skip_type_tokens(p, i);
             if (j + 1 < p->ntoks && p->toks[j].kind == T_IDENT && p->toks[j + 1].kind == T_LPAREN) {
                 /* Parse a candidate parameter list. */
@@ -2457,7 +3394,8 @@ static void prescan_signatures(Parser *p) {
                     j++;
                 if (j < p->ntoks && p->toks[j].kind == T_LBRACE) {
                     Type *ret = parse_type_at(p, i);
-                    add_sig(p, p->toks[skip_type_tokens(p, i)].text, ret, ptypes, np, is_ext);
+                    add_sig(p, ns_join(p, pfx, p->toks[skip_type_tokens(p, i)].text), ret, ptypes,
+                            np, is_ext);
                     /* Skip the function body via brace matching. */
                     int d = 0;
                     while (j < p->ntoks) {
@@ -2478,7 +3416,8 @@ static void prescan_signatures(Parser *p) {
                 if (j < p->ntoks && p->toks[j].kind == T_FATARROW) {
                     /* Expression-bodied function: record signature, skip to ';'. */
                     Type *ret = parse_type_at(p, i);
-                    add_sig(p, p->toks[skip_type_tokens(p, i)].text, ret, ptypes, np, is_ext);
+                    add_sig(p, ns_join(p, pfx, p->toks[skip_type_tokens(p, i)].text), ret, ptypes,
+                            np, is_ext);
                     j++;
                     while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
                         j++;
@@ -2493,6 +3432,7 @@ static void prescan_signatures(Parser *p) {
         }
         i++;
     }
+    p->ns_prefix = NULL;
 }
 
 /* ---- expression parsing (precedence climbing) ---- */
@@ -3187,11 +4127,13 @@ static char *instantiate(Parser *p, Generic *g, Type **concrete, Span span) {
     StructDef *saved_msd = p->cur_msd;
     Expr *saved_this = p->cur_this;
     SavedBinds saved_binds_v = save_binds(p);
+    char *saved_ns = p->ns_prefix;
 
     for (int i = 0; i < g->ntparams; i++)
         bind_type(p, g->tparams[i], concrete[i]);
 
     p->pos = g->tok_start;
+    p->ns_prefix = g->ns_prefix;
     p->in_instantiate = 1;
     /* A diagnostic raised while re-parsing the template points at a span in the
      * template, which is a different place from the call that caused it. Saying
@@ -3243,6 +4185,7 @@ static char *instantiate(Parser *p, Generic *g, Type **concrete, Span span) {
     g->ninstances = old_n + 1;
 
     /* Restore parser state. */
+    p->ns_prefix = saved_ns;
     p->pos = saved_pos;
     p->scope = saved_scope;
     p->next_offset = saved_off;
@@ -3328,6 +4271,8 @@ static StructDef *instantiate_type(Parser *p, GenericType *g, Type **concrete, S
     const char *saved_inst_name = p->inst_name;
     StructDef *saved_inst_sdef = p->inst_sdef;
     const char *saved_inst_srcname = p->inst_srcname;
+    char *saved_ns = p->ns_prefix;
+    p->ns_prefix = g->ns_prefix;
     /* The declaration is parsed at the top level, not inside whatever use site
      * triggered it, so a stray `break` or a return type left over from the
      * expression being parsed cannot be attributed to the container. */
@@ -3351,7 +4296,7 @@ static StructDef *instantiate_type(Parser *p, GenericType *g, Type **concrete, S
     p->pos = g->tok_start;
     p->inst_name = arena_strdup(p->arena, mangled);
     p->inst_sdef = place;
-    p->inst_srcname = g->name;
+    p->inst_srcname = g->src_name != NULL ? g->src_name : g->name;
     /* A fresh root scope, because the declaration is being parsed in the middle
      * of an expression somewhere. Chaining to the use site's scope would make a
      * parameter of the template shadow-check against a local that happens to have
@@ -3383,6 +4328,7 @@ static StructDef *instantiate_type(Parser *p, GenericType *g, Type **concrete, S
     }
 
     /* Restore parser state. */
+    p->ns_prefix = saved_ns;
     p->pos = saved_pos;
     p->scope = saved_scope;
     p->next_offset = saved_off;
@@ -3440,6 +4386,16 @@ static StructDef *resolve_gtype(Parser *p, GenericType *g, Type **args, int narg
  * name is still `print`, but a program writes `Console.WriteLog`, so without this
  * a bare `Console.WriteLog(...)` would find the same builtin and quietly keep working. */
 static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
+    /* An unqualified call beside its namespace resolves there first: `connect`
+     * inside `namespace netlink` is `netlink.connect`. A nested function of
+     * the same name still wins, since it is the more local declaration. */
+    if (!via_surface && resolve_fn_sym(p, name) == name) {
+        char *r = ns_resolve(p, name, look_sig);
+        if (r == NULL)
+            r = ns_resolve(p, name, look_generic);
+        if (r != NULL)
+            name = r;
+    }
 
     /* A plain-identifier surface name: `say(...)` for the `print` this compiler
      * knows, or `magnitude(...)` for `abs`.
@@ -3776,7 +4732,7 @@ static Expr *parse_call(Parser *p, char *name, Span span, int via_surface) {
         e->type = NULL;
         return e;
     }
-    e->name = arena_strdup(p->arena, sym);
+    e->name = arena_strdup(p->arena, (s->is_extern || s->is_export) ? ns_short_name(sym) : sym);
     if (s->nparams != n) {
         diag_note("'%s' is declared %s", name, sig_text(p, name, s));
         diag_error_code(span, "wrong_arity", "'%s' expects %d argument%s but got %d", name,
@@ -4399,6 +5355,22 @@ static Type *parse_type_base(Parser *p) {
         }
         return ft;
     }
+    {
+        char path[256];
+        int end = 0;
+        if (ns_scan_path(p, p->pos, path, sizeof path, &end)) {
+            Type *nt = ns_lookup_plain_type(p, path);
+            if (nt == NULL)
+                return NULL;
+            while (p->pos <= end)
+                advance(p);
+            while (at(p, T_STAR)) {
+                advance(p);
+                nt = type_ptr(p->ty, nt);
+            }
+            return nt;
+        }
+    }
     Type *t = base_type_or_name(p, cur(p));
     if (t == NULL)
         return NULL;
@@ -4506,6 +5478,8 @@ static Expr *parse_new(Parser *p) {
      * *which* type is being built. */
     if (cur(p)->kind == T_IDENT && peek(p, 1)->kind == T_LT) {
         GenericType *g = find_gtype(p, cur(p)->text);
+        if (g == NULL)
+            g = ns_lookup(p, cur(p)->text, look_gtype);
         if (g != NULL) {
             Type *t = parse_gtype(p, g);
             if (t == NULL)
@@ -4519,12 +5493,52 @@ static Expr *parse_new(Parser *p) {
         }
     }
 
-    /* Struct literal: `new Name(args)`. */
+    /* Struct literal: `new Name(args)`, or `new ns.Name(args)`. */
+    {
+        char path[256];
+        int end = 0;
+        if (ns_scan_path(p, p->pos, path, sizeof path, &end) && end + 1 < p->ntoks &&
+            p->toks[end + 1].kind == T_LPAREN) {
+            while (p->pos <= end)
+                advance(p);
+            advance(p); /* '(' */
+            Type *st = type_find_struct(p->ty, path);
+            if (st == NULL) {
+                suggest_in_scope(p, SK_TYPE, "type", path);
+                diag_error_code(start, "unknown_type", "unknown type '%s'", path);
+                int guard = 0;
+                while (!at(p, T_RPAREN) && !at(p, T_EOF) && guard++ < 256)
+                    advance(p);
+                match(p, T_RPAREN);
+                return new_expr(p, E_INT, start);
+            }
+            return parse_new_args(p, start, st, path);
+        }
+        if (ns_scan_path(p, p->pos, path, sizeof path, &end) && end + 1 < p->ntoks &&
+            p->toks[end + 1].kind == T_LT) {
+            GenericType *gns = find_gtype(p, path);
+            if (gns != NULL) {
+                while (p->pos < end)
+                    advance(p);
+                Type *t = parse_gtype(p, gns);
+                if (t == NULL)
+                    return new_expr(p, E_INT, start);
+                if (!at(p, T_LPAREN)) {
+                    diag_error(cur(p)->span, "expected '(' after '%s' to construct one", path);
+                    return new_expr(p, E_INT, start);
+                }
+                advance(p);
+                return parse_new_args(p, start, t, path);
+            }
+        }
+    }
     if (cur(p)->kind == T_IDENT && peek(p, 1)->kind == T_LPAREN) {
         char *sname = cur(p)->text;
         advance(p);
         advance(p); /* '(' */
         Type *st = type_find_struct(p->ty, sname);
+        if (st == NULL)
+            st = ns_lookup(p, sname, look_struct);
         /* The dialect is the second attempt, not the first: a project that has
          * declared its own `TextBuffer` keeps it. `parse_new_args` is handed the
          * written name so the diagnostic quotes what the program wrote. */
@@ -4676,6 +5690,267 @@ static Expr *parse_interp(Parser *p, Token *t) {
     return acc;
 }
 
+/* Builds `Variant(args)` once the variant and its owner are known -- either
+ * by the global search for a bare name or by the namespace search for a
+ * qualified one. `disp` is the spelling diagnostics quote. Handles the
+ * `Ok`/`Err` expectation the same way for both. */
+static Expr *parse_variant_call(Parser *p, VariantDef *vd, UnionDef *owner, const char *disp,
+                                Span span) {
+    /* `Ok` and `Err` are the variants of every Result, so the name alone
+     * does not say which one is meant: type_find_variant returns whichever
+     * Result was interned first, and `Ok(true)` in a function returning
+     * `Result<bool,string>` would build a `Result<int,string>`. The
+     * expectation disambiguates, so the variant is re-pointed at the
+     * expected Result's own before anything is checked against it. */
+    Type *want = NULL;
+    if (type_is_result(type_find_union(p->ty, owner->name))) {
+        want = p->expect_result;
+        if (want == NULL || !type_is_result(want)) {
+            diag_error(span,
+                       "'%s' needs to know the other type: declare the variable's "
+                       "type, or use it where a 'Result<T, E>' is expected",
+                       disp);
+            advance(p);
+            while (at(p, T_IDENT) || at(p, T_LPAREN) || at(p, T_RPAREN))
+                advance(p);
+            match(p, T_RPAREN);
+            Expr *bad = new_expr(p, E_INT, span);
+            bad->type = NULL;
+            return parse_postfix(p, bad);
+        }
+        int idx = strcmp(vd->name, "Ok") == 0 ? 0 : 1;
+        if (want->udef->nvariants > idx) {
+            vd = &want->udef->variants[idx];
+            owner = want->udef;
+        }
+    }
+    advance(p); /* '(' */
+    int cap = 4, n = 0;
+    Expr **args = arena_alloc_array(p->arena, (size_t)cap, sizeof(Expr *));
+    if (!at(p, T_RPAREN)) {
+        for (;;) {
+            if (n == cap) {
+                int ncap = cap * 2;
+                Expr **na = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Expr *));
+                memcpy(na, args, (size_t)n * sizeof(Expr *));
+                args = na;
+                cap = ncap;
+            }
+            args[n++] = parse_expr(p);
+            if (!match(p, T_COMMA))
+                break;
+        }
+    }
+    if (!match(p, T_RPAREN)) {
+        diag_error(cur(p)->span, "expected ')' after variant fields");
+    }
+    if (n != vd->nfields) {
+        diag_error(span, "'%s' expects %d field%s but got %d", disp, vd->nfields,
+                   vd->nfields == 1 ? "" : "s", n);
+    } else {
+        for (int i = 0; i < n; i++) {
+            if (!is_unk(args[i]->type) && !type_equals(args[i]->type, vd->fields[i].type)) {
+                diag_error(args[i]->span, "field '%s' expects '%s' but got '%s'",
+                           vd->fields[i].name, type_name(p->ty, vd->fields[i].type),
+                           type_name(p->ty, args[i]->type));
+            }
+        }
+    }
+    Expr *e = new_expr(p, E_UNIONLIT, span);
+    e->variant = vd;
+    e->args = args;
+    e->nargs = n;
+    e->type = want != NULL ? want : type_find_union(p->ty, owner->name);
+    return parse_postfix(p, e);
+}
+
+/* The C spelling of an internal name: the last segment. `extern` and
+ * `export` bind the C symbol as written, so a call resolved through a
+ * namespace still emits `c_add`, never `n.c_add`. */
+static const char *ns_short_name(const char *internal) {
+    const char *dot = strrchr(internal, '.');
+    return dot != NULL ? dot + 1 : internal;
+}
+
+/* Splits an internal dotted path into qualifier + member: `netlink` + `B`
+ * for `netlink.B`. Writes the qualifier (possibly "") and returns the member. */
+static const char *ns_split_member(const char *path, char *qual, size_t cap) {
+    const char *dot = strrchr(path, '.');
+    if (dot == NULL) {
+        if (cap > 0)
+            qual[0] = '\0';
+        return path;
+    }
+    size_t ql = (size_t)(dot - path);
+    if (ql >= cap)
+        ql = cap - 1;
+    memcpy(qual, path, ql);
+    qual[ql] = '\0';
+    return dot + 1;
+}
+
+/* A namespace-qualified name: `netlink.Lobby`, `netlink.connect(...)`.
+ *
+ * Only when the head is a declared namespace and NOT a value in scope -- a
+ * local shades a namespace, exactly like the surface-name rule -- so every
+ * `a.b` over values keeps its old meaning untouched. Returns NULL to fall
+ * through to the ordinary paths (including their diagnostics) when the path
+ * names nothing known. */
+static Expr *parse_ns_qualified(Parser *p, char *first, Span span) {
+    if (peek(p, 1)->kind != T_DOT || peek(p, 2)->kind != T_IDENT)
+        return NULL;
+    if (lookup_var(p, first) != NULL)
+        return NULL;
+    char path[256];
+    int end = 0;
+    if (!ns_scan_path(p, p->pos, path, sizeof path, &end))
+        return NULL;
+    char internal[256];
+    size_t ipl = strlen(path);
+    if (ipl >= sizeof internal)
+        return NULL;
+    memcpy(internal, path, ipl + 1);
+    int after = end + 1;
+    int is_call = after < p->ntoks && p->toks[after].kind == T_LPAREN;
+    if (is_call) {
+        Sig *s = find_sig(p, internal);
+        Generic *g = s != NULL ? NULL : find_generic(p, internal);
+        if (s == NULL && g == NULL) {
+            /* A qualified variant constructs its union: `netlink.B(5)`. */
+            {
+                char qual[256];
+                const char *vmem = ns_split_member(internal, qual, sizeof qual);
+                UnionDef *vowner = NULL;
+                VariantDef *vvd = type_find_variant_in_ns(p->ty, vmem, qual, &vowner);
+                if (vvd != NULL) {
+                    while (p->pos < end)
+                        advance(p);
+                    advance(p);
+                    return parse_variant_call(p, vvd, vowner, internal, span);
+                }
+            }
+            if (ns_lookup_plain_type(p, internal) != NULL) {
+                diag_error(span, "'%s' is a type, not a function; construct one with 'new %s(...)'",
+                           internal, internal);
+                return NULL;
+            }
+            if (const_find(p, internal) != NULL || find_global(p, internal) != NULL) {
+                diag_error(span, "'%s' is not a function and cannot be called", internal);
+                return NULL;
+            }
+            /* Otherwise resolve the call against the qualified spelling, so the
+             * diagnostic names what was written. */
+            while (p->pos < end)
+                advance(p);
+            advance(p);
+            return parse_call(p, arena_strdup(p->arena, internal), span, 0);
+        }
+        while (p->pos < end)
+            advance(p);
+        advance(p); /* '.'-separated member, leaving '(' current */
+        return parse_call(p, arena_strdup(p->arena, internal), span, 0);
+    }
+    /* Under `&`, a qualified function names its address, mirroring `&f`. */
+    if (p->take_method_addr) {
+        Sig *s = find_sig(p, internal);
+        if (s != NULL) {
+            while (p->pos <= end)
+                advance(p);
+            Expr *fe = new_expr(p, E_FNPTR, span);
+            fe->name = arena_strdup(
+                p->arena, (s->is_extern || s->is_export) ? ns_short_name(internal) : internal);
+            fe->is_extern = s->is_extern || s->is_export;
+            Type **pts = NULL;
+            if (s->nparams > 0) {
+                pts = arena_alloc_array(p->arena, (size_t)s->nparams, sizeof(Type *));
+                for (int i = 0; i < s->nparams; i++)
+                    pts[i] = s->ptypes[i];
+            }
+            fe->type = type_fnptr(p->ty, pts, s->nparams, s->ret);
+            return fe;
+        }
+    }
+    {
+        ConstDef *c = const_find(p, internal);
+        if (c != NULL) {
+            while (p->pos <= end)
+                advance(p);
+            return parse_postfix(p, const_expr(p, c, span));
+        }
+    }
+    {
+        GlobalDef *gd = find_global(p, internal);
+        if (gd != NULL) {
+            Var *v = global_var_ref(p, gd);
+            while (p->pos <= end)
+                advance(p);
+            Expr *e = new_expr(p, E_VAR, span);
+            e->name = arena_strdup(p->arena, internal);
+            e->gidx = gd->gidx;
+            e->slot = -1;
+            e->type = v != NULL ? v->type : gd->type;
+            return parse_postfix(p, e);
+        }
+    }
+    {
+        char qual[256];
+        const char *vmem = ns_split_member(internal, qual, sizeof qual);
+        UnionDef *vowner = NULL;
+        VariantDef *vvd = type_find_variant_in_ns(p->ty, vmem, qual, &vowner);
+        if (vvd != NULL && vvd->nfields == 0) {
+            while (p->pos <= end)
+                advance(p);
+            Expr *eu = new_expr(p, E_UNIONLIT, span);
+            eu->variant = vvd;
+            eu->type = type_find_union(p->ty, vowner->name);
+            return parse_postfix(p, eu);
+        }
+    }
+    if (ns_lookup_plain_type(p, internal) != NULL) {
+        diag_error(span, "'%s' names a type, which is not a value", internal);
+        return NULL;
+    }
+    /* A namespace known but no member by that name: resolve the call or the
+     * read against the qualified spelling, so the diagnostic names what was
+     * written rather than blaming the head alone. */
+    if (is_call) {
+        while (p->pos < end)
+            advance(p);
+        advance(p);
+        return parse_call(p, arena_strdup(p->arena, internal), span, 0);
+    }
+    {
+        /* Name the qualifier without its last segment: `netlink` in
+         * `netlink.total`, `a.b` in `a.b.c`. */
+        char qual[256];
+        size_t ql = 0;
+        for (int k = p->pos; k < end; k++) {
+            if (p->toks[k].kind != T_IDENT)
+                break;
+            if (ql > 0 && ql + 1 < sizeof qual)
+                qual[ql++] = '.';
+            size_t tl = strlen(p->toks[k].text);
+            if (ql + tl >= sizeof qual)
+                break;
+            memcpy(qual + ql, p->toks[k].text, tl + 1);
+            ql += tl;
+            if (k + 1 < end && p->toks[k + 1].kind == T_DOT)
+                k++;
+            else if (k + 1 < end)
+                break;
+        }
+        qual[ql] = '\0';
+        diag_error_code(span, "undefined_variable", "'%s' has no member '%s'", qual,
+                        p->toks[end].text);
+    }
+    while (p->pos <= end)
+        advance(p);
+    Expr *bad = new_expr(p, E_VAR, span);
+    bad->name = arena_strdup(p->arena, internal);
+    bad->type = NULL;
+    return bad;
+}
+
 static Expr *parse_qualified(Parser *p, char *base, Span span) {
     /* The base is still the current token, so the dot is one past it. */
     if (peek(p, 1)->kind != T_DOT)
@@ -4751,6 +6026,8 @@ static Var *resolve_tier(Parser *p, const char *name, int prefix, int mark) {
     if (prefix == 'g') {
         GlobalDef *g = find_global(p, name);
         if (g == NULL)
+            g = ns_lookup(p, name, look_global);
+        if (g == NULL)
             return NULL;
         Var *v = global_var_ref(p, g);
         if (mark)
@@ -4812,7 +6089,7 @@ static Expr *parse_tier_ref(Parser *p, int prefix) {
     Expr *e = new_expr(p, E_VAR, nspan);
     e->name = name;
     if (v->is_global) {
-        GlobalDef *g = find_global(p, name);
+        GlobalDef *g = find_global(p, v->name);
         e->gidx = g != NULL ? g->gidx : -1;
         e->slot = -1;
     } else {
@@ -4897,6 +6174,9 @@ static Expr *parse_primary(Parser *p) {
          * where a name becomes a value, because that is the only place that can
          * tell an ordinary identifier from the first half of a qualified one. */
         {
+            Expr *nq = parse_ns_qualified(p, name, span);
+            if (nq != NULL)
+                return nq;
             Expr *q = parse_qualified(p, name, span);
             if (q != NULL)
                 return q;
@@ -4975,75 +6255,8 @@ static Expr *parse_primary(Parser *p) {
             /* A bare variant name is a union constructor: `Circle(5)`. */
             UnionDef *owner = NULL;
             VariantDef *vd = type_find_variant(p->ty, name, &owner);
-            /* `Ok` and `Err` are the variants of every Result, so the name alone
-             * does not say which one is meant: type_find_variant returns whichever
-             * Result was interned first, and `Ok(true)` in a function returning
-             * `Result<bool,string>` would build a `Result<int,string>`. The
-             * expectation disambiguates, so the variant is re-pointed at the
-             * expected Result's own before anything is checked against it. */
-            Type *want = NULL;
-            if (vd != NULL && type_is_result(type_find_union(p->ty, owner->name))) {
-                want = p->expect_result;
-                if (want == NULL || !type_is_result(want)) {
-                    diag_error(span,
-                               "'%s' needs to know the other type: declare the variable's "
-                               "type, or use it where a 'Result<T, E>' is expected",
-                               name);
-                    advance(p);
-                    while (at(p, T_IDENT) || at(p, T_LPAREN) || at(p, T_RPAREN))
-                        advance(p);
-                    match(p, T_RPAREN);
-                    Expr *bad = new_expr(p, E_INT, span);
-                    bad->type = NULL;
-                    return parse_postfix(p, bad);
-                }
-                int idx = strcmp(vd->name, "Ok") == 0 ? 0 : 1;
-                if (want->udef->nvariants > idx) {
-                    vd = &want->udef->variants[idx];
-                    owner = want->udef;
-                }
-            }
-            if (vd != NULL) {
-                advance(p); /* '(' */
-                int cap = 4, n = 0;
-                Expr **args = arena_alloc_array(p->arena, (size_t)cap, sizeof(Expr *));
-                if (!at(p, T_RPAREN)) {
-                    for (;;) {
-                        if (n == cap) {
-                            int ncap = cap * 2;
-                            Expr **na = arena_alloc_array(p->arena, (size_t)ncap, sizeof(Expr *));
-                            memcpy(na, args, (size_t)n * sizeof(Expr *));
-                            args = na;
-                            cap = ncap;
-                        }
-                        args[n++] = parse_expr(p);
-                        if (!match(p, T_COMMA))
-                            break;
-                    }
-                }
-                if (!match(p, T_RPAREN)) {
-                    diag_error(cur(p)->span, "expected ')' after variant fields");
-                }
-                if (n != vd->nfields) {
-                    diag_error(span, "'%s' expects %d field%s but got %d", name, vd->nfields,
-                               vd->nfields == 1 ? "" : "s", n);
-                } else {
-                    for (int i = 0; i < n; i++) {
-                        if (!is_unk(args[i]->type) &&
-                            !type_equals(args[i]->type, vd->fields[i].type)) {
-                            diag_error(args[i]->span, "field '%s' expects '%s' but got '%s'",
-                                       vd->fields[i].name, type_name(p->ty, vd->fields[i].type),
-                                       type_name(p->ty, args[i]->type));
-                        }
-                    }
-                }
-                Expr *e = new_expr(p, E_UNIONLIT, span);
-                e->variant = vd;
-                e->args = args;
-                e->nargs = n;
-                e->type = want != NULL ? want : type_find_union(p->ty, owner->name);
-                return parse_postfix(p, e);
-            }
+            if (vd != NULL)
+                return parse_variant_call(p, vd, owner, name, span);
             return parse_postfix(p, parse_call(p, name, span, 0));
         }
         Var *v = lookup_var(p, name);
@@ -5089,6 +6302,8 @@ static Expr *parse_primary(Parser *p) {
             }
             {
                 ConstDef *c = const_find(p, name);
+                if (c == NULL)
+                    c = ns_lookup(p, name, look_const);
                 if (c != NULL)
                     return parse_postfix(p, const_expr(p, c, span));
             }
@@ -5105,7 +6320,11 @@ static Expr *parse_primary(Parser *p) {
          * travels instead and codegen reads storage by symbol. The offset stays
          * -1, which every local-only path already treats as "not a local". */
         if (v->is_global) {
-            GlobalDef *g = find_global(p, name);
+            /* v->name is the definition's own spelling -- qualified when the
+             * declaration lives in a namespace -- which is what the table is
+             * keyed by. Looking the written name up instead read globals[-1]
+             * for every unqualified use beside its namespace. */
+            GlobalDef *g = find_global(p, v->name);
             e->gidx = g != NULL ? g->gidx : -1;
             e->slot = -1;
         } else {
@@ -5264,12 +6483,24 @@ static Expr *parse_unary(Parser *p) {
         /* `&f` where f names a function is that function's address, typed by
          * its signature. This has to be caught before the operand is parsed as
          * an expression, because a bare function name is not a variable. */
-        if (at(p, T_IDENT) && peek(p, 1)->kind != T_LPAREN) {
+        if (at(p, T_IDENT) && peek(p, 1)->kind != T_LPAREN && peek(p, 1)->kind != T_DOT) {
             char *fn_src = cur(p)->text;
             Sig *fs = find_sig(p, resolve_fn_sym(p, fn_src));
+            if (fs == NULL) {
+                char *cand = ns_resolve(p, fn_src, look_sig);
+                if (cand != NULL && cand != fn_src)
+                    fs = find_sig(p, resolve_fn_sym(p, cand));
+                if (fs != NULL)
+                    fn_src = cand;
+            }
             if (fs != NULL) {
                 Span fspan = cur(p)->span;
-                char *fname = arena_strdup(p->arena, resolve_fn_sym(p, fn_src));
+                char *fname = arena_strdup(
+                    p->arena, (fs->is_extern || fs->is_export) ? ns_short_name(fn_src) : fn_src);
+                /* resolve_fn_sym maps nested functions to their mangled symbol;
+                 * extern/export keep the C spelling either way. */
+                if (!fs->is_extern && !fs->is_export)
+                    fname = arena_strdup(p->arena, resolve_fn_sym(p, fn_src));
                 advance(p);
                 Expr *fe = new_expr(p, E_FNPTR, fspan);
                 fe->name = fname;
@@ -5289,8 +6520,9 @@ static Expr *parse_unary(Parser *p) {
         Expr *operand = parse_unary(p);
         p->take_method_addr = saved_take;
         /* `&obj.M` is already the pointer; taking its address again would be
-         * nonsense, and it is not an lvalue. */
-        if (operand->kind == E_MPTR)
+         * nonsense, and it is not an lvalue. A qualified `&N.foo` arrives the
+         * same way, as an `E_FNPTR` from the namespace path below. */
+        if (operand->kind == E_MPTR || operand->kind == E_FNPTR)
             return operand;
         Expr *e = new_expr(p, E_ADDR, t->span);
         e->lhs = operand;
@@ -5794,7 +7026,7 @@ static Stmt *parse_const_decl(Parser *p) {
         match(p, T_SEMI);
         return new_stmt(p, S_EXPR, start);
     }
-    char *name = cur(p)->text;
+    char *name = ns_join(p, ns_here(p), cur(p)->text);
     Span name_span = cur(p)->span;
     advance(p);
     if (!match(p, T_ASSIGN)) {
@@ -6023,6 +7255,11 @@ static Stmt *parse_var_decl_kind(Parser *p, int prefix) {
     } else {
         declared = parse_type(p);
     }
+    /* `mut` is Rust-style explicit mutability: `var mut x = ...`,
+     * `int mut x = ...`. Accepted and recorded; enforcement (immutable by
+     * default) follows once the codebase is migrated. */
+    if (at(p, T_KW_MUT))
+        advance(p);
 
     if (at(p, T_IDENT)) {
         char *name = cur(p)->text;
@@ -6083,7 +7320,7 @@ static Stmt *parse_var_decl_kind(Parser *p, int prefix) {
          * applies. The initializer is kept on the GlobalDef instead and emitted
          * into the project's init function. */
         if (prefix == 'g') {
-            declare_global(p, name, t, init, start);
+            declare_global(p, ns_join(p, ns_here(p), name), t, init, start);
             expect_semi(p);
             return new_stmt(p, S_BLOCK, start);
         }
@@ -7194,55 +8431,102 @@ static Stmt *parse_func(Parser *p, int nested) {
         is_export = 1;
         advance(p);
     }
-    {
-        int j = skip_type_tokens(p, p->pos);
-        if (j < p->ntoks && p->toks[j].kind == T_IDENT) {
-            int k = j + 1;
-            if (k < p->ntoks && p->toks[k].kind == T_LT && k + 1 < p->ntoks &&
-                p->toks[k + 1].kind == T_IDENT) {
-                int e = skip_generic_params(p, k);
-                int cap = 4;
-                tparams = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
-                int m = k + 1;
-                while (m < e) {
-                    if (p->toks[m].kind == T_IDENT) {
-                        if (ntparams == cap) {
-                            cap *= 2;
-                            char **g = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
-                            memcpy(g, tparams, (size_t)ntparams * sizeof(char *));
-                            tparams = g;
+    /* Rust-style `fn name(params) [-> ret]`. When present, the header is
+     * parsed here and the C-style header below is skipped via fn_style. */
+    /* `fn` opens a Rust-style header only when a name follows it; a C-style
+     * function returning a function-pointer type (`fn(int) -> int f(...)`)
+     * leads with the same keyword and takes the type-first path below. */
+    int fn_style = at(p, T_KW_FN) && peek(p, 1)->kind == T_IDENT;
+    Type *ret = NULL;
+    char *name = NULL;
+    char *src_name = NULL;
+    if (!fn_style) {
+        {
+            int j = skip_type_tokens(p, p->pos);
+            if (j < p->ntoks && p->toks[j].kind == T_IDENT) {
+                int k = j + 1;
+                if (k < p->ntoks && p->toks[k].kind == T_LT && k + 1 < p->ntoks &&
+                    p->toks[k + 1].kind == T_IDENT) {
+                    int e = skip_generic_params(p, k);
+                    int cap = 4;
+                    tparams = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
+                    int m = k + 1;
+                    while (m < e) {
+                        if (p->toks[m].kind == T_IDENT) {
+                            if (ntparams == cap) {
+                                cap *= 2;
+                                char **g = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
+                                memcpy(g, tparams, (size_t)ntparams * sizeof(char *));
+                                tparams = g;
+                            }
+                            tparams[ntparams] = p->toks[m].text;
+                            if (!is_bound(p, p->toks[m].text))
+                                bind_type(p, p->toks[m].text,
+                                          type_new_param(p->ty, p->toks[m].text));
+                            ntparams++;
                         }
-                        tparams[ntparams] = p->toks[m].text;
-                        if (!is_bound(p, p->toks[m].text))
-                            bind_type(p, p->toks[m].text, type_new_param(p->ty, p->toks[m].text));
-                        ntparams++;
+                        m++;
                     }
-                    m++;
                 }
             }
         }
-    }
 
-    Type *ret = parse_type(p);
-    if (ret == NULL) {
-        if (cur(p)->kind == T_IDENT)
-            suggest_in_scope(p, SK_TYPE, "type", cur(p)->text);
-        diag_error(cur(p)->span, "unknown type '%s'",
-                   cur(p)->kind == T_IDENT ? cur(p)->text : token_kind_name(cur(p)->kind));
-    }
-    char *name = cur(p)->text;
-    advance(p); /* name */
+        ret = parse_type(p);
+        if (ret == NULL) {
+            if (cur(p)->kind == T_IDENT)
+                suggest_in_scope(p, SK_TYPE, "type", cur(p)->text);
+            diag_error(cur(p)->span, "unknown type '%s'",
+                       cur(p)->kind == T_IDENT ? cur(p)->text : token_kind_name(cur(p)->kind));
+        }
+        name = cur(p)->text;
+        advance(p); /* name */
 
-    /* Consume the generic parameter list if present (already bound above). */
-    if (ntparams > 0 && at(p, T_LT))
-        p->pos = skip_generic_params(p, p->pos);
-    match(p, T_LPAREN);
+        /* Consume the generic parameter list if present (already bound above). */
+        if (ntparams > 0 && at(p, T_LT))
+            p->pos = skip_generic_params(p, p->pos);
+        match(p, T_LPAREN);
+        src_name = name;
+    } else {
+        advance(p); /* 'fn' */
+        if (!at(p, T_IDENT)) {
+            diag_error(cur(p)->span, "expected function name after 'fn'");
+            name = arena_strdup(p->arena, "<bad>");
+        } else {
+            name = cur(p)->text;
+            advance(p);
+        }
+        src_name = name;
+        if (at(p, T_LT) && p->pos + 1 < p->ntoks && p->toks[p->pos + 1].kind == T_IDENT) {
+            int e = skip_generic_params(p, p->pos);
+            int cap = 4;
+            tparams = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
+            int m = p->pos + 1;
+            while (m < e) {
+                if (p->toks[m].kind == T_IDENT) {
+                    if (ntparams == cap) {
+                        cap *= 2;
+                        char **g = arena_alloc_array(p->arena, (size_t)cap, sizeof(char *));
+                        memcpy(g, tparams, (size_t)ntparams * sizeof(char *));
+                        tparams = g;
+                    }
+                    tparams[ntparams] = p->toks[m].text;
+                    if (!is_bound(p, p->toks[m].text))
+                        bind_type(p, p->toks[m].text, type_new_param(p->ty, p->toks[m].text));
+                    ntparams++;
+                }
+                m++;
+            }
+        }
+        if (ntparams > 0 && at(p, T_LT))
+            p->pos = skip_generic_params(p, p->pos);
+        match(p, T_LPAREN);
+        ret = type_void(p->ty);
+    }
 
     /* A function written inside another one is emitted under a symbol built from
      * the enclosing function's id, so two `helper` declarations in two different
      * bodies do not collide. Everything the reader sees -- diagnostics, the
      * mapping from the written name -- keeps using the name as written. */
-    char *src_name = name;
     if (nested) {
         /* Sized dynamically: a fixed buffer here truncated long function names
          * so two distinct nested functions shared one symbol. */
@@ -7265,8 +8549,22 @@ static Stmt *parse_func(Parser *p, int nested) {
     if (nested && (is_extern || is_export))
         diag_error(start, "a function declared inside another function cannot be '%s'",
                    is_extern ? "extern" : "export");
+    /* `export` publishes the name as written for C to call, but a name declared
+     * in a namespace is registered qualified (`n.f`), which C cannot spell.
+     * Define it at the top level instead; the declaration still parses so one
+     * mistake does not cascade. */
+    if (!nested && is_export && p->ns_prefix != NULL && p->ns_prefix[0] != '\0')
+        diag_error(start,
+                   "'export' in namespace '%s' would publish '%s', which C cannot name; move it "
+                   "to the top level",
+                   p->ns_prefix, src_name);
     if (nested && ntparams > 0)
         diag_error(start, "'%s' cannot be a generic function here", src_name);
+    /* A function declared in a namespace registers under "ns.name", so
+     * `fn connect` in `namespace netlink` is the function `netlink.connect`.
+     * Diagnostics keep the written name via src_name. */
+    if (!nested && p->ns_prefix != NULL && p->ns_prefix[0] != '\0')
+        name = ns_join(p, p->ns_prefix, src_name);
 
     Scope *saved_scope = p->scope;
     int saved_slot = p->next_offset;
@@ -7286,6 +8584,8 @@ static Stmt *parse_func(Parser *p, int nested) {
     }
     if (!at(p, T_RPAREN)) {
         for (;;) {
+            if (at(p, T_KW_MUT))
+                advance(p); /* `mut` in params: accepted, params are mutable */
             Type *pt = parse_type(p);
             if (pt == NULL) {
                 diag_error(cur(p)->span, "expected parameter type but found %s",
@@ -7323,6 +8623,22 @@ static Stmt *parse_func(Parser *p, int nested) {
         }
     }
     match(p, T_RPAREN);
+    int fn_has_arrow = 0;
+    if (fn_style && at(p, T_ARROW)) {
+        advance(p);
+        Type *rt = parse_type(p);
+        if (rt == NULL) {
+            diag_error(cur(p)->span, "expected return type after '->'");
+            rt = type_void(p->ty);
+        }
+        ret = rt;
+        p->cur_ret = ret;
+        fn_has_arrow = 1;
+    }
+    if (fn_style && !fn_has_arrow && at(p, T_FATARROW)) {
+        diag_error(cur(p)->span,
+                   "fn-style '=>' needs a return type: write 'fn %s(...) -> T => ...'", src_name);
+    }
 
     /* A struct-returning function uses the SysV hidden-pointer convention: a
      * hidden first parameter holds the address of the caller's result buffer. */
@@ -7455,6 +8771,7 @@ static Stmt *parse_func(Parser *p, int nested) {
         Generic g;
         memset(&g, 0, sizeof g);
         g.name = name;
+        g.ns_prefix = arena_strdup(p->arena, ns_here(p));
         g.ntparams = ntparams;
         g.tparams = tparams;
         g.tok_start = fn_tok_start;
@@ -7483,8 +8800,14 @@ static Stmt *parse_func(Parser *p, int nested) {
     }
     if (match(p, T_FATARROW)) {
         /* Expression-bodied function: `int f(int a) => expr;` desugars to
-         * `{ return expr; }`. */
+         * `{ return expr; }`. For `fn f(...) => expr;` with no `->`, the
+         * return type is inferred from the expression. */
         Expr *e = parse_expr(p);
+        if (fn_style && is_kind(ret, TK_VOID) && !is_kind(e->type, TK_VOID) && !is_unk(e->type)) {
+            ret = e->type;
+            fn->ret_type = ret;
+            p->cur_ret = ret;
+        }
         if (!is_unk(e->type) && !is_unk(ret) && !type_equals(e->type, ret)) {
             diag_error(start, "cannot return '%s' from function returning '%s'",
                        type_name(p->ty, e->type), type_name(p->ty, ret));
@@ -7561,7 +8884,7 @@ static Stmt *parse_func(Parser *p, int nested) {
     p->cur_owner = saved_owner;
     diag_pop_ctx();
 
-    if (strcmp(name, "main") == 0)
+    if (strcmp(src_name, "main") == 0 && (p->ns_prefix == NULL || p->ns_prefix[0] == '\0'))
         fn->is_entry = 1;
 
     /* A nested function is not emitted where it was written: it is queued with
@@ -7589,7 +8912,7 @@ static Stmt *parse_interface_decl(Parser *p) {
         diag_error(cur(p)->span, "expected interface name after 'interface'");
         return new_stmt(p, S_EXPR, start);
     }
-    char *name = cur(p)->text;
+    char *name = ns_join(p, ns_here(p), cur(p)->text);
     advance(p);
     IfaceDef *id = type_define_iface(p->ty, name);
     /* A pre-scan already built the method list, so that a signature naming this
@@ -7606,6 +8929,58 @@ static Stmt *parse_interface_decl(Parser *p) {
         return new_stmt(p, S_EXPR, start);
     }
     while (!at(p, T_RBRACE) && !at(p, T_EOF)) {
+        if (at(p, T_KW_FN)) {
+            advance(p);
+            if (!at(p, T_IDENT)) {
+                diag_error(cur(p)->span, "expected a method name after 'fn'");
+                break;
+            }
+            char *mname = cur(p)->text;
+            advance(p);
+            if (!match(p, T_LPAREN)) {
+                diag_error(cur(p)->span, "expected '(' after method name");
+                break;
+            }
+            Type **ptypes = arena_alloc_array(p->arena, Z_MAX_ARGS, sizeof(Type *));
+            int np = 0;
+            if (!at(p, T_RPAREN)) {
+                for (;;) {
+                    if (np >= Z_MAX_ARGS) {
+                        diag_error(cur(p)->span, "'%s' takes too many parameters", mname);
+                        break;
+                    }
+                    if (at(p, T_KW_MUT))
+                        advance(p);
+                    Type *pt = parse_type(p);
+                    if (pt == NULL || !at(p, T_IDENT)) {
+                        diag_error(cur(p)->span, "expected a parameter type and name");
+                        break;
+                    }
+                    advance(p);
+                    ptypes[np++] = pt;
+                    if (!match(p, T_COMMA))
+                        break;
+                }
+            }
+            match(p, T_RPAREN);
+            Type *ret = type_void(p->ty);
+            if (at(p, T_ARROW)) {
+                advance(p);
+                ret = parse_type(p);
+                if (ret == NULL) {
+                    diag_error(cur(p)->span, "expected return type after '->'");
+                    break;
+                }
+            }
+            if (iface_find_method(id, mname) != NULL) {
+                diag_error(start, "interface '%s' already requires '%s'", name, mname);
+            } else {
+                iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, ret));
+            }
+            if (!match(p, T_SEMI))
+                break;
+            continue;
+        }
         Type *ret = parse_type(p);
         if (ret == NULL) {
             diag_error(cur(p)->span, "expected a return type in interface body");
@@ -7725,6 +9100,8 @@ static Stmt *parse_range_for(Parser *p, Span start) {
     Type *written = NULL;
     if (at(p, T_KW_VAR)) {
         advance(p);
+        if (at(p, T_KW_MUT))
+            advance(p); /* `var mut x`: accepted like every other `mut` */
         /* `auto&` is a reference binding, and it is the spelling C++ uses, so
          * it has to mean something the same way `var` plus a separate `&`
          * does. */
@@ -7736,6 +9113,8 @@ static Stmt *parse_range_for(Parser *p, Span start) {
         by_ref = 1;
     } else if (is_type_token(cur(p)->kind) || at_typed_decl(p)) {
         written = parse_type(p);
+        if (at(p, T_KW_MUT))
+            advance(p);
         by_ref = match(p, T_AMP);
     }
     if (!at(p, T_IDENT)) {
@@ -8019,6 +9398,8 @@ static Stmt *parse_foreach(Parser *p, Span start) {
         if (et == NULL)
             infer = 1;
     }
+    if (at(p, T_KW_MUT))
+        advance(p); /* `foreach (var mut x in xs)`, like every other `mut` */
     if (!at(p, T_IDENT)) {
         diag_error(cur(p)->span, "expected loop variable name");
         return new_stmt(p, S_BLOCK, start);
@@ -8244,6 +9625,8 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
     int nexplicit = 0;
     if (!at(p, T_RPAREN)) {
         for (;;) {
+            if (at(p, T_KW_MUT))
+                advance(p);
             Type *pt = parse_type(p);
             if (pt == NULL || !at(p, T_IDENT)) {
                 diag_error(cur(p)->span, "expected parameter type and name");
@@ -8277,6 +9660,19 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
         }
     }
     match(p, T_RPAREN);
+    /* Rust-style `fn m(...) -> R` inside a struct: the return type follows. */
+    if (at(p, T_ARROW)) {
+        advance(p);
+        Type *rt = parse_type(p);
+        if (rt == NULL) {
+            diag_error(cur(p)->span, "expected return type after '->'");
+        } else {
+            ret = rt;
+            p->cur_ret = ret;
+            if (is_kind(ret, TK_STRUCT) && ret->sdef == sd && sd->is_class)
+                ret = type_ptr(p->ty, ret);
+        }
+    }
 
     {
         int agg = is_kind(ret, TK_STRUCT) || is_kind(ret, TK_UNION);
@@ -8393,7 +9789,7 @@ static Stmt *parse_enum_decl(Parser *p) {
         diag_error(cur(p)->span, "expected enum name after 'enum'");
         return new_stmt(p, S_EXPR, start);
     }
-    char *name = cur(p)->text;
+    char *name = ns_join(p, ns_here(p), cur(p)->text);
     advance(p);
     UnionDef *ud = type_define_union(p->ty, name);
     if (ud == NULL) {
@@ -8666,6 +10062,9 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         name = (char *)p->inst_name;
         sd = p->inst_sdef;
     } else {
+        /* Inside a namespace the type registers under "ns.Name". `written`
+         * stays short for constructor/destructor naming and diagnostics. */
+        name = ns_join(p, ns_here(p), written);
         sd = type_define_struct(p->ty, name);
         if (sd == NULL) {
             diag_error(start, "%s '%s' is already defined", is_class ? "class" : "struct", name);
@@ -8810,6 +10209,37 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
                             "interface");
             mvirtual = 1;
             advance(p);
+        }
+        /* Rust-style method: `fn Name(params) [-> Ret]` (optionally `virtual fn`).
+         * Only when `fn` is followed by a name: `fn(int)->int f;` is a field
+         * of function-pointer type and falls through to the C-style path. */
+        if (at(p, T_KW_FN) && p->pos + 1 < p->ntoks && p->toks[p->pos + 1].kind == T_IDENT) {
+            advance(p); /* 'fn' */
+            if (!at(p, T_IDENT)) {
+                diag_error(cur(p)->span, "expected method name after 'fn'");
+                break;
+            }
+            char *mname = cur(p)->text;
+            Span mspan = cur(p)->span;
+            advance(p);
+            if (!at(p, T_LPAREN)) {
+                diag_error(cur(p)->span, "expected '(' after method '%s'", mname);
+                break;
+            }
+            if (is_class && strcmp(mname, name) == 0) {
+                if (find_method(p, sd, name) != NULL) {
+                    diag_error_code(cur(p)->span, "duplicate_constructor",
+                                    "%s '%s' already has a constructor; Z has no constructor "
+                                    "overloading, so give the second one a different name",
+                                    is_class ? "class" : "struct", name);
+                }
+                parse_method(p, sd, name, type_void(p->ty), name, mspan, 0);
+                continue;
+            }
+            /* Placeholder ret; the real one follows `->` and is picked up
+             * inside parse_method. */
+            parse_method(p, sd, name, type_void(p->ty), mname, mspan, mvirtual);
+            continue;
         }
         Type *mt = parse_type(p);
         if (mt == NULL) {
@@ -9194,7 +10624,8 @@ static Stmt *parse_stmt(Parser *p) {
      * without a lookup, so `P r = new P();` could not be written at all, and
      * `P* q = null;` fell through to the expression parser and read as a
      * variable named `P`. Both are fixed by resolving the name first. */
-    if (at_typed_decl(p) && base_type_or_name(p, cur(p)) != NULL)
+    if ((at_typed_decl(p) && base_type_or_name(p, cur(p)) != NULL) ||
+        (at_typed_decl(p) && at_ns_typed(p)))
         return parse_var_decl(p);
 
     if (is_type_token(cur(p)->kind)) {
@@ -9203,6 +10634,18 @@ static Stmt *parse_stmt(Parser *p) {
     if (t->kind == T_IDENT && at_typed_decl(p)) {
         /* The name is in declaration position but is not a type. Say which one,
          * then skip the declaration so the rest of the block still parses. */
+        {
+            char dpath[256];
+            int dend = 0;
+            if (ns_scan_path(p, p->pos, dpath, sizeof dpath, &dend)) {
+                diag_error_code(t->span, "unknown_type", "unknown type '%s'", dpath);
+                int guard = 0;
+                while (!at(p, T_SEMI) && !at(p, T_EOF) && guard++ < 256)
+                    advance(p);
+                match(p, T_SEMI);
+                return new_stmt(p, S_EXPR, t->span);
+            }
+        }
         suggest_in_scope(p, SK_TYPE, "type", t->text);
         diag_error_code(t->span, "unknown_type", "unknown type '%s'", t->text);
         int guard = 0;
@@ -9218,6 +10661,171 @@ static Stmt *parse_stmt(Parser *p) {
     Stmt *s = new_stmt(p, S_EXPR, start);
     s->expr = e;
     return s;
+}
+
+static void parse_top_item(Parser *p, Arena *arena, Stmt ***pitems, int *pn, int *pcap,
+                           int *phas_main, Span *pmain_span, int *ptop_stmts);
+static void parse_namespace(Parser *p, Arena *arena, Stmt ***pitems, int *pn, int *pcap,
+                            int *phas_main, Span *pmain_span, int *ptop_stmts);
+/* One top-level item: a function, a type, a const, a global, or a bare
+ * statement. Shared by the program loop and by `namespace` bodies, so the two
+ * accept exactly the same members. `has_main`/`top_stmts` are the program's
+ * entry-point bookkeeping; a `fn main` only counts as the entry point when it
+ * is declared outside any namespace (checked inside parse_func). */
+static void parse_top_item(Parser *p, Arena *arena, Stmt ***pitems, int *pn, int *pcap,
+                           int *phas_main, Span *pmain_span, int *ptop_stmts) {
+    Stmt **items = *pitems;
+    int n = *pn, cap = *pcap;
+    if (n == cap) {
+        int ncap = cap * 2;
+        Stmt **ni = arena_alloc_array(arena, (size_t)ncap, sizeof(Stmt *));
+        memcpy(ni, items, (size_t)n * sizeof(Stmt *));
+        items = ni;
+        cap = ncap;
+    }
+    if (at(p, T_KW_NAMESPACE)) {
+        parse_namespace(p, arena, pitems, pn, pcap, phas_main, pmain_span, ptop_stmts);
+        return;
+    }
+    if (at_func_decl(p)) {
+        Stmt *fn = parse_func(p, 0);
+        if (fn->is_entry) {
+            if (*phas_main) {
+                diag_error(fn->span,
+                           "a second function named 'main' is declared here; the first is at "
+                           "%s:%d, and a program has one entry point",
+                           pmain_span->file != NULL ? pmain_span->file : "another file",
+                           pmain_span->line);
+            } else {
+                *phas_main = 1;
+                *pmain_span = fn->span;
+            }
+        }
+        items[n++] = fn;
+    } else if ((at(p, T_KW_CLASS) || at(p, T_KW_STRUCT)) && peek(p, 1)->kind == T_IDENT &&
+               peek(p, 2)->kind == T_LT &&
+               (find_gtype(p, peek(p, 1)->text) != NULL ||
+                ns_lookup(p, peek(p, 1)->text, look_gtype) != NULL ||
+                find_gtype(p, ns_join(p, ns_here(p), peek(p, 1)->text)) != NULL)) {
+        /* A generic declaration is a template, and a template is not code.
+         * It emits nothing and defines nothing until something asks for an
+         * instance, which re-parses these very tokens. Stepping over the
+         * whole thing is therefore not a shortcut: parsing it here would
+         * define a `Vec` that the instances have nothing to do with. */
+        p->pos = skip_generic_type_decl(p);
+        *pitems = items;
+        *pn = n;
+        *pcap = cap;
+        return;
+    } else if (at(p, T_KW_CLASS)) {
+        items[n++] = parse_struct_decl(p, 1); /* a class decl */
+    } else if (at(p, T_KW_STRUCT)) {
+        items[n++] = parse_struct_decl(p, 0); /* a type decl, not a statement */
+    } else if (at(p, T_KW_INTERFACE)) {
+        items[n++] = parse_interface_decl(p);
+    } else if (at(p, T_KW_ENUM)) {
+        items[n++] = parse_enum_decl(p); /* a type decl, not a statement */
+    } else if (at(p, T_KW_CONST)) {
+        /* A top-level const is a declaration, not a top-level statement, so
+         * it may sit alongside an explicit main(). It folds to a literal
+         * and emits no code. */
+        items[n++] = parse_const_decl(p);
+    } else if (at_prefixed_decl(p) && cur(p)->text[0] == 'g') {
+        /* Same reasoning, and it matters for exactly the same reason: a
+         * `gvar` is a declaration with storage of its own, emitted as data
+         * and as an initializer, so counting it as a top-level statement
+         * would put a project that declares one global beside an explicit
+         * main() into the "cannot combine" error -- which is the right
+         * error for a statement and the wrong one here.
+         *
+         * An `lvar` at the top level is the other thing, and it stays a
+         * statement: at file scope an lvar is a plain var, so it belongs in
+         * the synthesized entry exactly as a var does. */
+        items[n++] = parse_var_decl_kind(p, 'g');
+    } else {
+        if (p->ns_prefix != NULL && p->ns_prefix[0] != '\0') {
+            diag_error(cur(p)->span,
+                       "only declarations may appear inside 'namespace %s': move this statement "
+                       "into a function",
+                       p->ns_prefix);
+            advance(p);
+            *pitems = items;
+            *pn = n;
+            *pcap = cap;
+            return;
+        }
+        items[n++] = parse_stmt(p);
+        (*ptop_stmts)++;
+    }
+    *pitems = items;
+    *pn = n;
+    *pcap = cap;
+}
+
+/* `namespace netlink { ... }`: everything declared inside registers under
+ * "netlink.", so `class Lobby` becomes the type `netlink.Lobby` and
+ * `fn connect` the function `netlink.connect`. A single identifier nests
+ * relative to the enclosing block; a dotted header (`namespace a.b`) is
+ * absolute, which is how two files merge into one namespace by writing the
+ * same header -- and how `import "f.z" as netlink` (synthesized around the
+ * file's tokens) shares this one implementation. */
+static void parse_namespace(Parser *p, Arena *arena, Stmt ***pitems, int *pn, int *pcap,
+                            int *phas_main, Span *pmain_span, int *ptop_stmts) {
+    Span start = cur(p)->span;
+    advance(p); /* 'namespace' */
+    if (!at(p, T_IDENT)) {
+        diag_error(cur(p)->span, "expected a namespace name after 'namespace'");
+        return;
+    }
+    char name[256];
+    size_t n = 0;
+    int dotted = 0;
+    while (at(p, T_IDENT)) {
+        const char *t = cur(p)->text;
+        if (n > 0)
+            dotted = 1;
+        size_t tl = strlen(t);
+        if (n + tl + 1 >= sizeof name)
+            break;
+        if (n > 0)
+            name[n++] = '.';
+        memcpy(name + n, t, tl);
+        n += tl;
+        advance(p);
+        if (at(p, T_DOT) && peek(p, 1)->kind == T_IDENT) {
+            advance(p);
+            continue;
+        }
+        break;
+    }
+    name[n] = '\0';
+    if (!match(p, T_LBRACE)) {
+        diag_error(cur(p)->span, "expected '{' to open namespace body");
+        return;
+    }
+    char full[256];
+    if (dotted || p->ns_prefix == NULL || p->ns_prefix[0] == '\0') {
+        size_t fl = strlen(name);
+        if (fl >= sizeof full) {
+            diag_error(start, "namespace name is too long");
+            return;
+        }
+        memcpy(full, name, fl + 1);
+    } else {
+        int need = snprintf(full, sizeof full, "%s.%s", p->ns_prefix, name);
+        if (need < 0 || (size_t)need >= sizeof full) {
+            diag_error(start, "namespace name is too long");
+            return;
+        }
+    }
+    ns_declare(p, full);
+    char *saved = p->ns_prefix;
+    p->ns_prefix = arena_strdup(p->arena, full);
+    while (!at(p, T_RBRACE) && !at(p, T_EOF))
+        parse_top_item(p, arena, pitems, pn, pcap, phas_main, pmain_span, ptop_stmts);
+    if (!match(p, T_RBRACE))
+        diag_error(cur(p)->span, "expected '}' to close namespace '%s'", full);
+    p->ns_prefix = saved;
 }
 
 Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, int opt_level,
@@ -9252,9 +10860,11 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
     p.cur_ret = NULL;
     p.opt_level = opt_level;
 
+    prescan_namespaces(&p);
     prescan_struct_names(&p);
     prescan_struct_fields(&p);
     prescan_signatures(&p);
+    p.ns_prefix = NULL;
 
     Stmt *program = new_stmt(&p, S_BLOCK, cur(&p)->span);
     scope_push(&p);
@@ -9272,65 +10882,7 @@ Stmt *parse_program(Arena *arena, Token *toks, int ntoks, StringTable *strings, 
     int top_stmts = 0;
 
     while (!at(&p, T_EOF)) {
-        if (n == cap) {
-            int ncap = cap * 2;
-            Stmt **ni = arena_alloc_array(arena, (size_t)ncap, sizeof(Stmt *));
-            memcpy(ni, items, (size_t)n * sizeof(Stmt *));
-            items = ni;
-            cap = ncap;
-        }
-        if (at_func_decl(&p)) {
-            Stmt *fn = parse_func(&p, 0);
-            if (fn->is_entry) {
-                if (has_main) {
-                    diag_error(fn->span,
-                               "a second function named 'main' is declared here; the first is at "
-                               "%s:%d, and a program has one entry point",
-                               main_span.file != NULL ? main_span.file : "another file",
-                               main_span.line);
-                } else {
-                    has_main = 1;
-                    main_span = fn->span;
-                }
-            }
-            items[n++] = fn;
-        } else if ((at(&p, T_KW_CLASS) || at(&p, T_KW_STRUCT)) && peek(&p, 1)->kind == T_IDENT &&
-                   peek(&p, 2)->kind == T_LT && find_gtype(&p, peek(&p, 1)->text) != NULL) {
-            /* A generic declaration is a template, and a template is not code.
-             * It emits nothing and defines nothing until something asks for an
-             * instance, which re-parses these very tokens. Stepping over the
-             * whole thing is therefore not a shortcut: parsing it here would
-             * define a `Vec` that the instances have nothing to do with. */
-            p.pos = skip_generic_type_decl(&p);
-        } else if (at(&p, T_KW_CLASS)) {
-            items[n++] = parse_struct_decl(&p, 1); /* a class decl */
-        } else if (at(&p, T_KW_STRUCT)) {
-            items[n++] = parse_struct_decl(&p, 0); /* a type decl, not a statement */
-        } else if (at(&p, T_KW_INTERFACE)) {
-            items[n++] = parse_interface_decl(&p);
-        } else if (at(&p, T_KW_ENUM)) {
-            items[n++] = parse_enum_decl(&p); /* a type decl, not a statement */
-        } else if (at(&p, T_KW_CONST)) {
-            /* A top-level const is a declaration, not a top-level statement, so
-             * it may sit alongside an explicit main(). It folds to a literal
-             * and emits no code. */
-            items[n++] = parse_const_decl(&p);
-        } else if (at_prefixed_decl(&p) && cur(&p)->text[0] == 'g') {
-            /* Same reasoning, and it matters for exactly the same reason: a
-             * `gvar` is a declaration with storage of its own, emitted as data
-             * and as an initializer, so counting it as a top-level statement
-             * would put a project that declares one global beside an explicit
-             * main() into the "cannot combine" error -- which is the right
-             * error for a statement and the wrong one here.
-             *
-             * An `lvar` at the top level is the other thing, and it stays a
-             * statement: at file scope an lvar is a plain var, so it belongs in
-             * the synthesized entry exactly as a var does. */
-            items[n++] = parse_var_decl_kind(&p, 'g');
-        } else {
-            items[n++] = parse_stmt(&p);
-            top_stmts++;
-        }
+        parse_top_item(&p, arena, &items, &n, &cap, &has_main, &main_span, &top_stmts);
     }
 
     /* A lambda marks the captured declarations in the body of the function that

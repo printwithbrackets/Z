@@ -1,0 +1,67 @@
+// Namespaces: Python-style dotted modules.
+//
+// A `namespace` block qualifies every declaration inside it, so two files can
+// each declare `helper` and a reader can still say which one is meant. Use
+// sites spell the same dots: `netlink.Lobby`, `netlink.connect`. Inside the
+// block the qualifier is unnecessary, exactly like lexical scope.
+namespace netlink {
+const int PORT = 8080;
+
+int dbl(int x) { return x * 2; }
+
+fn triple(int x) -> int { return x * 3; }
+
+T ident<T>(T v) { return v; }
+
+fn useit() -> int { return dbl(21); }
+
+struct Pair { int a; int b; }
+
+class Lobby {
+    int users;
+    Lobby(int u) { this.users = u; }
+    virtual int Count() { return this.users; }
+    virtual string Name() { return "lobby"; }
+}
+
+interface Counter { int Count(); }
+
+enum State { Open, Shut(int code) }
+
+class Box<T> {
+    T v;
+    Box(T x) { this.v = x; }
+    virtual T Get() { return this.v; }
+}
+}
+
+namespace outer {
+namespace inner {
+fn deep() -> int { return 7; }
+}
+}
+
+namespace absolute.path {
+fn v() -> int { return 9; }
+}
+
+fn main() -> int {
+    Console.WriteLog(netlink.PORT);                             // 8080
+    Console.WriteLog(netlink.dbl(21));                          // 42
+    Console.WriteLog(netlink.triple(14));                       // 42
+    Console.WriteLog(netlink.ident(6));                         // 6
+    Console.WriteLog(netlink.useit());                          // 42
+    var p = new netlink.Pair(3, 4);
+    Console.WriteLog(p.a + p.b);                                // 7
+    var l = new netlink.Lobby(5);
+    Console.WriteLog(l.Count());                                // 5
+    netlink.Counter c = l;
+    Console.WriteLog(c.Count());                                // 5
+    Console.WriteLog(match Shut(2) { Open => 0, Shut(n) => n }); // 2
+    Console.WriteLog(match netlink.Shut(3) { Open => 0, Shut(n) => n }); // 3
+    var b = new netlink.Box<int>(8);
+    Console.WriteLog(b.Get());                                          // 8
+    Console.WriteLog(outer.inner.deep());                       // 7
+    Console.WriteLog(absolute.path.v());                        // 9
+    return 0;
+}

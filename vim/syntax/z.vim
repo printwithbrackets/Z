@@ -60,6 +60,8 @@ syn match   zKeyword  '\%(\.\)\@<!\<\%(base\|get\|set\)\>\ze\s*[;(]'
 syn match   zFunction '\<print\>\ze\s*('
 " C#-style declarations put the type first: `int fib(`, `T maxOf<T>(`.
 syn match   zFunction '\%(\%(\<\%(int\|bool\|string\|float\|void\)\>\|\<\u\w*\)\>\s\+\)\@<=\h\w*\%(\s*<[^<>]*>\)\=\ze\s*('
+" Rust-style declarations put `fn` first: `fn fib(`, `fn maxOf<T>(`.
+syn match   zFunction '\%(\<fn\>\s\+\)\@<=\h\w*\%(\s*<[^<>]*>\)\=\ze\s*('
 " Operator overloads are spelled `op_Add`, `op_Mul`, ...
 syn match   zFunction '\<op_\w\+\>'
 " Method calls: `.Sum(` -- `\zs` keeps the dot out of the highlight.
@@ -133,8 +135,8 @@ syn keyword zConditional if else
 syn keyword zRepeat      while for foreach
 syn keyword zStatement   in match
 syn keyword zReturn      return break continue
-syn keyword zModifier    virtual override extern export move
-syn keyword zKeyword     new struct class interface enum this import
+syn keyword zModifier    virtual override extern export move mut
+syn keyword zKeyword     new struct class interface enum this import namespace
 
 syn sync minlines=50
 syn sync maxlines=200

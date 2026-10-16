@@ -130,6 +130,24 @@ VariantDef *type_find_variant(TypeCtx *ctx, const char *name, UnionDef **owner) 
     return NULL;
 }
 
+VariantDef *type_find_variant_in_ns(TypeCtx *ctx, const char *variant, const char *ns,
+                                    UnionDef **owner) {
+    size_t nl = strlen(ns);
+    for (int i = 0; i < ctx->nunion; i++) {
+        UnionDef *ud = ctx->unions[i];
+        if (strncmp(ud->name, ns, nl) != 0 || ud->name[nl] != '.')
+            continue;
+        for (int v = 0; v < ud->nvariants; v++) {
+            if (strcmp(ud->variants[v].name, variant) == 0) {
+                if (owner != NULL)
+                    *owner = ud;
+                return &ud->variants[v];
+            }
+        }
+    }
+    return NULL;
+}
+
 UnionDef *type_find_variant_owner(TypeCtx *ctx, const char *name) {
     UnionDef *owner = NULL;
     return type_find_variant(ctx, name, &owner) != NULL ? owner : NULL;

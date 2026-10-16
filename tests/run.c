@@ -323,6 +323,10 @@ int main(int argc, char **argv) {
         "strings2",
         "collections",
         "collections2",
+        "stdlib_sq",
+        "stdlib_math",
+        "stdlib_str",
+        "strcmp_cond",
         "frame_layout",
         "bitwise",
         "consts",
@@ -392,6 +396,7 @@ int main(int argc, char **argv) {
         "overflow_isqrt",
         "temp_fuzz",
         "field_drop_gap",
+        "namespace",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -615,6 +620,7 @@ int main(int argc, char **argv) {
         "gvar_forward_ref",
         "duplicate_main",
         "lvar_top_level",
+        "namespace_member",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -1448,6 +1454,7 @@ int main(int argc, char **argv) {
      * through its own marker rather than by an import. */
     static const char *modules[] = {
         "imports/import_main",
+        "imports/alias_main",
         "project/project_main",
     };
     for (size_t i = 0; i < sizeof modules / sizeof modules[0]; i++) {

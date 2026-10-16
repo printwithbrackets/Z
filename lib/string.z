@@ -58,9 +58,37 @@ class StringBuilder {
         if (v) { this.append("true"); } else { this.append("false"); }
     }
 
+    /* appends `s` plus a newline, which is the shape line oriented output
+     * takes. two appends rather than a temporary, so nothing short lived is
+     * allocated on the way */
+    void appendLine(string s) {
+        this.append(s);
+        this.append("\n");
+    }
+
+    /* appends every element with no separator, which is the loop a caller
+     * would otherwise write by hand around `append`. the parameter is an
+     * array rather than a `Vec`, because that is what `split` returns, so
+     * its result feeds straight in. a `Vec` goes through `join` instead */
+    void appendAll(string[] parts) {
+        for (var i = 0; i < parts.length; i++) { this.append(parts[i]); }
+    }
+
+    /* appends every element with `sep` between them, which is `join` straight
+     * into the buffer rather than through a temporary string */
+    void appendJoin(string sep, string[] parts) {
+        for (var i = 0; i < parts.length; i++) {
+            if (i > 0) { this.append(sep); }
+            this.append(parts[i]);
+        }
+    }
+
     int length() { return len(buf); }
 
     bool isEmpty() { return len(buf) == 0; }
+
+    /* the C++ name for `isEmpty`, which is an alias and not a second body */
+    bool empty() { return len(buf) == 0; }
 
     /* The string built so far.
      *
