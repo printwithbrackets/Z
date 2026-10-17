@@ -129,16 +129,18 @@ function! z#SignsFrom(items) abort
     return
   endif
   call s:DefineSigns()
-  execute 'silent! sign unplace zerr'
-  execute 'silent! sign unplace zwarn'
+  " One group for both severities, cleared as a whole: `:sign unplace` by name
+  " is Vim-only grammar and Neovim rejects it, so names never travel through
+  " Ex commands here -- only the function calls below, which both editors share.
+  call sign_unplace('z')
   for l:item in a:items
     if !get(l:item, 'valid', 0) || get(l:item, 'type', '') !=# 'E'
           \ && get(l:item, 'type', '') !=# 'W'
       continue
     endif
-    " `:sign place` needs a path, and a quickfix item carries one as a buffer
+    " `sign_place` needs a path, and a quickfix item carries one as a buffer
     " number -- `filename` is not a key getqflist() hands back, so asking for it
-    " gets an empty string and `:sign place ... file=` then fails on it.
+    " gets an empty string and placing it would fail on it.
     let l:file = get(l:item, 'filename', '')
     if empty(l:file) && get(l:item, 'bufnr', 0) > 0
       let l:file = bufname(l:item.bufnr)
@@ -147,31 +149,31 @@ function! z#SignsFrom(items) abort
       continue
     endif
     let l:sign = l:item.type ==# 'E' ? 'zerr' : 'zwarn'
-    " `silent!`, because a sign is decoration. `:sign place` refuses a line
-    " that is past the end of a file the editor has not read, and it refuses
-    " outright in a headless nvim -- neither is a reason for `:Zcheck` to fail
-    " and lose the quickfix list it had already built.
-    execute 'silent! sign place ' . l:sign . ' line=' . l:item.lnum
-          \ . ' file=' . fnameescape(l:file)
+    " A sign is decoration, so placing one never fails the caller: the id is
+    " bumped per sign rather than derived from the line, because two problems
+    " on one line are two signs and one id cannot serve both.
+    let s:sign_id += 1
+    call sign_place(s:sign_id, 'z', l:sign, l:file, {'lnum': l:item.lnum})
   endfor
 endfunction
 
 " Signs are defined at the last moment rather than at load time: a user who has
 " not set `g:z_signs_*` gets the defaults, and defining them once at startup
 " would pin those before their config had a chance to change them.
+let s:sign_id = 0
 function! s:DefineSigns() abort
   if exists('s:signs_defined')
     return
   endif
   let s:signs_defined = 1
-  " `escape`, not `shellescape`: sign text is an Ex argument, and shellescape
-  " would hand `:sign define` the quote characters as part of the text, which
-  " is a two-character sign reading '>>'. Sign text has to be one or two
-  " display cells, so the default is two.
-  execute 'sign define zerr text=' . escape(get(g:, 'z_signs_error', '>>'), ' \')
-        \ . ' texthl=DiagnosticSignError'
-  execute 'sign define zwarn text=' . escape(get(g:, 'z_signs_warning', '>>'), ' \')
-        \ . ' texthl=DiagnosticSignWarn'
+  " The function call, not the Ex command: `:sign define` with a multi-byte
+  " glyph parses differently between Vim and Neovim, and the text arrives
+  " verbatim here either way. Sign text has to be one or two display cells,
+  " so the default is two.
+  call sign_define('zerr', {'text': get(g:, 'z_signs_error', '>>'),
+        \ 'texthl': 'DiagnosticSignError'})
+  call sign_define('zwarn', {'text': get(g:, 'z_signs_warning', '>>'),
+        \ 'texthl': 'DiagnosticSignWarn'})
 endfunction
 
 " Clears the quickfix list and the gutter signs. `:Zclearfix`, for when a stale

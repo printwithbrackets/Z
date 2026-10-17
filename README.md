@@ -191,7 +191,7 @@ directory, e.g. with lazy.nvim:
 
 | file | what it does |
 |---|---|
-| `syntax/z.vim` | highlighting: every keyword in `KEYWORDS[]`, every radix with `_` separators, duration literals (`2h21m37`), destructor declarations, the builtins, the surface names, and `$"..."` interpolation holes |
+| `syntax/z.vim` | highlighting: every keyword in `KEYWORDS[]`, every radix with `_` separators, duration literals (`2h21m37`), destructor declarations, the builtins, the surface names, `$"..."` interpolation holes, `fn` declarations, `namespace` blocks with their names, `import ... as` aliases, qualified types after `new`, and `N.CONST` members |
 | `ftplugin/z.vim` | comments, formatting, a brace/`match`-aware `indentexpr`, and `compiler z` |
 | `ftdetect/z.vim` | `*.z` |
 | `compiler/z.vim` | `makeprg` and `errorformat`, so `:make` and `:lmake` work |
