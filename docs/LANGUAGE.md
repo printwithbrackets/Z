@@ -501,10 +501,10 @@ assigning a `float` to an `int` is a compile error.
 
 ```
 structDecl := "struct" IDENT "{" member* "}"
-member     := type IDENT ";"                       // field
+member     := type IDENT ";"?                      // field (';' optional)
             | type IDENT "(" params ")" block      // method
-            | type IDENT "=>" expr ";"             // get-only property  [cut]
-            | type IDENT "{" "get" ";" ("set" ";")? "}"  // auto-property [cut]
+            | type IDENT "=>" expr ";"?            // get-only property  [cut]
+            | type IDENT "{" "get" ";"? ("set" ";"?)? "}"  // auto-property [cut]
 structLit  := "new" IDENT "(" expr ("," expr)* ")"
 destructor := "~" IDENT "(" ")" block
 ```
@@ -610,9 +610,9 @@ grammar and does not need the lexer to know the operator set.
 
 ```
 decl        := varDecl | constDecl | funcDecl | fnDecl | nestedFunc | statement
-varDecl     := ("var" | "auto") ["mut"] IDENT "=" expr ";"   [new: mut]
-             | type ["mut"] IDENT ("=" expr)? ";"
-constDecl   := "const" type IDENT "=" expr ";"
+varDecl     := ("var" | "auto") ["mut"] IDENT "=" expr ";"?   [new: mut]
+             | type ["mut"] IDENT ("=" expr)? ";"?
+constDecl   := "const" type IDENT "=" expr ";"?
 nestedFunc  := (type IDENT | "fn" IDENT ["->" type]) "(" params? ")" block
 type        := ("int" | "bool" | "string" | "float") "*"* "&"? "[]"*
              | "Result" "<" type "," type ">"
@@ -620,12 +620,12 @@ type        := ("int" | "bool" | "string" | "float") "*"* "&"? "[]"*
              | ("fn" | "method" | "closure") "(" typeList? ")" "->" type
              | "Vec" "<" type ">" | "Box" "<" type ">" | ...        [new]
 funcDecl    := type IDENT "(" params? ")" block              [legacy C-style]
-             | type IDENT "(" params? ")" ";"
-fnDecl      := "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] (block | "=>" expr ";")
-             | "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] ";"
-             | ("extern" | "export") "fn" IDENT "(" params? ")" ["->" type] (block | ";")
-externDecl  := "unsafe" "extern" type IDENT "(" params? ")" ";"     [new: unsafe]
-             | "unsafe" "extern" "fn" IDENT "(" params? ")" ["->" type] ";"
+             | type IDENT "(" params? ")" ";"?
+fnDecl      := "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] (block | "=>" expr ";"?)
+             | "fn" IDENT ["<" IDENT ("," IDENT)* ">"] "(" params? ")" ["->" type] ";"?
+             | ("extern" | "export") "fn" IDENT "(" params? ")" ["->" type] (block | ";"?)
+externDecl  := "unsafe" "extern" type IDENT "(" params? ")" ";"?     [new: unsafe]
+             | "unsafe" "extern" "fn" IDENT "(" params? ")" ["->" type] ";"?
 exportFunc  := "export" type IDENT "(" params? ")" block
              | "export" "fn" IDENT "(" params? ")" ["->" type] block
 params      := param ("," param)*
@@ -652,7 +652,8 @@ fn main() -> int {
 ```
 
 - `fn name(params) -> ret`. No arrow means `void`: `fn foo() { ... }`.
-  Expression bodies need the arrow: `fn add(int a, int b) -> int => a + b;`.
+  Expression bodies need the arrow: `fn add(int a, int b) -> int => a + b;`
+  (the `";"` is optional, as everywhere).
   Generics: `fn max<T>(T a, T b) -> T { ... }`.
 - Methods: `fn Name(params) -> Ret` inside `struct`/`class`
   (`virtual fn Speak() -> string`), `fn` interface members, and
@@ -966,9 +967,35 @@ whileStmt  := "while" "(" expr ")" statement
 forStmt    := "for" "(" (varDecl|exprStmt)? ";" expr? ";" expr? ")" statement
 foreachStmt:= "foreach" ("var"|"auto") IDENT "in" expr ")" statement
 rangeFor   := "for" "(" ("var"|"auto") "&"? IDENT ":" expr ")" statement  [new]
-returnStmt := "return" expr? ";"
+returnStmt := "return" expr? ";"?
 block      := "{" statement* "}"
 ```
+
+A `";"` terminator is optional everywhere above (and after an `import`): a
+statement ends where its syntax ends, so `var x = 5` followed by a newline
+needs no `";"`. A `";"` remains useful to show where a statement ends, e.g.
+two statements on one line (`var a = 1; var b = 2;`). The separators inside a
+C-style `for` header are optional on the same terms: `for (var i = 1 i < 10
+i++)` parses, since a header's three parts still take their turns. **[new]**
+
+The `";"` is not gone from the language: a statement with it omitted ends at a
+newline only when the next line cannot continue the expression before it, and
+these four openers always can — a line beginning with `-`, `(`, `[` or `.` is
+read as a continuation:
+
+```
+var a = 1
+-2            // a is 1 - 2, i.e. -1
+var f = inc
+(3)           // a call: f(3)
+var n = arr
+[0]           // n = arr[0]
+var m = str
+.length       // m = str.length
+```
+
+Write the `";"` when the next line starts with one of those characters and is
+meant as a statement of its own. **[new]**
 
 `if`/`while`/`for` conditions must be `bool`. `++`/`--` desugar to `x = x ± 1`.
 `break` leaves the innermost loop and `continue` starts its next iteration; in

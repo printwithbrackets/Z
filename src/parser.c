@@ -2699,10 +2699,76 @@ static int scan_method_signature(Parser *p, int i, StructDef *sd, const char *ct
     return j;
 }
 
-/* Index just past one plain field, `type name ;`, or `i` unchanged if this is
- * not one. A plain field is exactly that shape, which is what lets the pre-scan
- * stop at the first method and leave it to the real parser -- registering a
- * method twice would emit it twice. */
+/* Whether the token at `j` can begin the member that follows an
+ * expression-bodied member whose ';' was omitted. A member starts with a type,
+ * a destructor's `~`, or a `virtual`/`override` modifier. A bare identifier is
+ * deliberately not a stop: an expression body often ends in one (`=> v`), and
+ * stopping there would leave the body's last token for the member scanners to
+ * misread as a member of its own.
+ *
+ * The one identifier that is a stop is one that resolves as a type and is
+ * followed by the member's name. A member typed with a user-defined struct
+ * begins with an identifier, so `=> v` written before `P Copy()` reads as
+ * `v P Copy (` at the token level and nothing but type resolution tells the
+ * body's last token from the member's first: a value expression cannot begin
+ * with a type, while a member with no declared type is not legal. parse_type
+ * runs on a sub-parser here, the way scan_plain_field does, and its cursor
+ * landing on a name is what makes the shape `type name`. */
+static int at_member_start(Parser *p, int j) {
+    if (j >= p->ntoks)
+        return 1;
+    TokenKind k = p->toks[j].kind;
+    if (k == T_EOF || k == T_TILDE || k == T_KW_VIRTUAL || k == T_KW_OVERRIDE || is_type_token(k))
+        return 1;
+    if (k != T_IDENT)
+        return 0;
+    Parser sub = *p;
+    sub.pos = j;
+    if (parse_type(&sub) == NULL)
+        return 0;
+    return sub.pos < p->ntoks && p->toks[sub.pos].kind == T_IDENT;
+}
+
+/* Whether the token at `j` can begin whatever follows a top-level expression
+ * body: a declaration's leading type, a statement keyword, or two adjacent
+ * identifiers, which at statement level can only be a declaration's type and
+ * name. A lone identifier is not a stop, because a body often begins with one
+ * (a call's callee); stopping early only costs the pass a few tokens it then
+ * re-scans one at a time, while skipping past the next declaration would lose
+ * its signature and break calls made before it. */
+static int at_decl_start(Parser *p, int j) {
+    if (j >= p->ntoks)
+        return 1;
+    TokenKind k = p->toks[j].kind;
+    if (k == T_EOF || is_type_token(k))
+        return 1;
+    switch (k) {
+    case T_KW_VAR:
+    case T_KW_CONST:
+    case T_KW_RETURN:
+    case T_KW_IF:
+    case T_KW_WHILE:
+    case T_KW_FOR:
+    case T_KW_FOREACH:
+    case T_KW_BREAK:
+    case T_KW_CONTINUE:
+    case T_KW_MATCH:
+    case T_KW_MUT:
+    case T_KW_NAMESPACE:
+    case T_KW_IMPORT:
+    case T_KW_EXTERN:
+    case T_KW_EXPORT:
+        return 1;
+    default:
+        break;
+    }
+    return k == T_IDENT && j + 1 < p->ntoks && p->toks[j + 1].kind == T_IDENT;
+}
+
+/* Index just past one plain field, `type name` with an optional `;`, or `i`
+ * unchanged if this is not one. A plain field is exactly that shape, which is
+ * what lets the pre-scan stop at the first method and leave it to the real
+ * parser -- registering a method twice would emit it twice. */
 static int scan_plain_field(Parser *p, int i, StructDef *sd) {
     if (i >= p->ntoks)
         return i;
@@ -2713,16 +2779,32 @@ static int scan_plain_field(Parser *p, int i, StructDef *sd) {
         return i;
     char *name = p->toks[j].text;
     j++;
-    if (j >= p->ntoks || p->toks[j].kind != T_SEMI)
+    /* The ';' is optional: a field ends before '}', before the next member, or
+     * at an explicit ';'. Anything else (e.g. '(') is a method, not a field. */
+    if (j < p->ntoks && p->toks[j].kind == T_SEMI) {
+        j++;
+    } else if (j >= p->ntoks || p->toks[j].kind == T_RBRACE || p->toks[j].kind == T_TILDE ||
+               p->toks[j].kind == T_KW_VIRTUAL || p->toks[j].kind == T_KW_OVERRIDE ||
+               p->toks[j].kind == T_KW_FN || is_type_token(p->toks[j].kind) ||
+               p->toks[j].kind == T_IDENT) {
+        /* implicit terminator: leave j where it is */
+    } else {
         return i;
-    j++;
+    }
     /* Resolve the type with the cursor on it, without moving the caller's. */
     Parser sub = *p;
     sub.pos = i;
     Type *ft = parse_type(&sub);
     if (ft == NULL)
         return i;
-    struct_add_field(p->ty, sd, name, ft);
+    /* The instance of a generic type registers in parse_struct_decl, which
+     * re-reads every member with the parameters bound; this shared scan also
+     * runs for it, but only to keep the walk moving. Registering here as well
+     * put each field in the layout twice, which inflated a positional
+     * constructor's expected argument count and padded every object out to
+     * three sizes. */
+    if (p->inst_name == NULL)
+        struct_add_field(p->ty, sd, name, ft);
     return j;
 }
 
@@ -2795,9 +2877,14 @@ static int prescan_struct_members(Parser *p, StructDef *sd, int j, const char *c
                 skip_braced_block(&sub);
                 k = sub.pos;
             } else if (k < p->ntoks && p->toks[k].kind == T_FATARROW) {
-                while (k < p->ntoks && p->toks[k].kind != T_SEMI && p->toks[k].kind != T_EOF)
+                /* Expression-bodied destructor: skip to its terminator. The
+                 * ';' is optional, so a '}' (or end of file) ends it too -- as
+                 * does the first token that can begin the next member, which
+                 * keeps that member registered for the methods before it. */
+                while (k < p->ntoks && p->toks[k].kind != T_SEMI && p->toks[k].kind != T_EOF &&
+                       p->toks[k].kind != T_RBRACE && !at_member_start(p, k))
                     k++;
-                if (k < p->ntoks)
+                if (k < p->ntoks && p->toks[k].kind == T_SEMI)
                     k++;
             }
             if (k == j + 1) {
@@ -2836,10 +2923,14 @@ static int prescan_struct_members(Parser *p, StructDef *sd, int j, const char *c
                     j++;
                 }
             } else if (j < p->ntoks && p->toks[j].kind == T_FATARROW) {
-                /* An expression-bodied member: skip to its semicolon. */
-                while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
+                /* An expression-bodied member: skip to its terminator. The ';'
+                 * is optional, so a '}' (or end of file) ends it too -- as does
+                 * the first token that can begin the next member, which keeps
+                 * that member registered for the methods before it. */
+                while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF &&
+                       p->toks[j].kind != T_RBRACE && !at_member_start(p, j))
                     j++;
-                if (j < p->ntoks)
+                if (j < p->ntoks && p->toks[j].kind == T_SEMI)
                     j++;
             }
             continue;
@@ -2993,10 +3084,9 @@ static void prescan_struct_fields(Parser *p) {
                 if (iface_find_method(id, mname) == NULL)
                     iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, rt));
                 j = after;
+                /* Signatures end with an optional ';'. */
                 if (j < p->ntoks && p->toks[j].kind == T_SEMI)
                     j++;
-                else
-                    break;
                 continue;
             }
             int tstart = j;
@@ -3041,10 +3131,9 @@ static void prescan_struct_fields(Parser *p) {
             }
             if (iface_find_method(id, mname) == NULL)
                 iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, rt));
+            /* Signatures end with an optional ';'. */
             if (j < p->ntoks && p->toks[j].kind == T_SEMI)
                 j++;
-            else
-                break;
         }
         id->prescanned = 1;
         i = j - 1;
@@ -3217,10 +3306,44 @@ static int prescan_fn_sig(Parser *p, int fi, int is_extern_export, int kw_extern
             add_sig(p, fname, ret, ptypes, np, is_ext);
         }
         j++;
-        while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
+        /* Skip the expression body. The ';' is optional, so an unmatched
+         * closer or the end of the file ends it too -- an expression cannot
+         * contain one at depth zero. Depth is tracked so a ';' inside
+         * parens/braces (e.g. a for header in a lambda body) does not end
+         * the skip early, and the first token that can begin the next
+         * declaration or statement ends it as well, so a declaration written
+         * after the omitted ';' stays registered for the calls before it. */
+        int pd = 0, brd = 0, bcd = 0;
+        while (j < p->ntoks) {
+            TokenKind k = p->toks[j].kind;
+            if (k == T_EOF)
+                break;
+            if (k == T_LPAREN)
+                pd++;
+            else if (k == T_LBRACKET)
+                brd++;
+            else if (k == T_LBRACE)
+                bcd++;
+            else if (k == T_RPAREN) {
+                if (pd == 0)
+                    break;
+                pd--;
+            } else if (k == T_RBRACKET) {
+                if (brd == 0)
+                    break;
+                brd--;
+            } else if (k == T_RBRACE) {
+                if (bcd == 0)
+                    break;
+                bcd--;
+            } else if (k == T_SEMI && pd == 0 && brd == 0 && bcd == 0) {
+                j++;
+                break;
+            } else if (pd == 0 && brd == 0 && bcd == 0 && at_decl_start(p, j)) {
+                break;
+            }
             j++;
-        if (j < p->ntoks)
-            j++;
+        }
         *out_next = j;
         return 1;
     }
@@ -3288,11 +3411,20 @@ static void prescan_signatures(Parser *p) {
                 }
                 if (j < p->ntoks && p->toks[j].kind == T_RPAREN)
                     j++;
-                if (j < p->ntoks && p->toks[j].kind == T_SEMI && kw_extern) {
+                /* An extern declaration ends with an optional ';': record the
+                 * signature whenever the shape matched, consuming a ';' when
+                 * one is written. */
+                if (kw_extern &&
+                    (j >= p->ntoks || p->toks[j].kind == T_SEMI || p->toks[j].kind == T_RBRACE ||
+                     p->toks[j].kind == T_EOF || is_type_token(p->toks[j].kind) ||
+                     p->toks[j].kind == T_IDENT || p->toks[j].kind == T_KW_FN ||
+                     p->toks[j].kind == T_KW_EXTERN || p->toks[j].kind == T_KW_EXPORT)) {
                     Type *ret = parse_type_at(p, i + 1);
                     add_sig_ex(p, ns_join(p, pfx, p->toks[skip_type_tokens(p, i + 1)].text), ret,
                                ptypes, np, 0, 1);
-                    i = j + 1;
+                    if (j < p->ntoks && p->toks[j].kind == T_SEMI)
+                        j++;
+                    i = j;
                     continue;
                 }
                 if (j < p->ntoks && p->toks[j].kind == T_LBRACE && !kw_extern) {
@@ -3345,6 +3477,12 @@ static void prescan_signatures(Parser *p) {
                     i++;
                     break;
                 } else if (k == T_EOF) {
+                    break;
+                } else if (braces == 0 && at_decl_start(p, i)) {
+                    /* The ';' after the lambda was omitted: stop at the first
+                     * token that can begin the next declaration or statement,
+                     * so what follows stays registered for the calls before
+                     * it. */
                     break;
                 }
                 i++;
@@ -3414,15 +3552,47 @@ static void prescan_signatures(Parser *p) {
                     continue;
                 }
                 if (j < p->ntoks && p->toks[j].kind == T_FATARROW) {
-                    /* Expression-bodied function: record signature, skip to ';'. */
+                    /* Expression-bodied function: record signature, skip the
+                     * body. The ';' is optional, so an unmatched closer or the
+                     * end of the file ends it too -- as does the first token
+                     * that can begin the next declaration or statement, so a
+                     * declaration written after the omitted ';' stays
+                     * registered for the calls before it. */
                     Type *ret = parse_type_at(p, i);
                     add_sig(p, ns_join(p, pfx, p->toks[skip_type_tokens(p, i)].text), ret, ptypes,
                             np, is_ext);
                     j++;
-                    while (j < p->ntoks && p->toks[j].kind != T_SEMI && p->toks[j].kind != T_EOF)
+                    int pd = 0, brd = 0, bcd = 0;
+                    while (j < p->ntoks) {
+                        TokenKind k = p->toks[j].kind;
+                        if (k == T_EOF)
+                            break;
+                        if (k == T_LPAREN)
+                            pd++;
+                        else if (k == T_LBRACKET)
+                            brd++;
+                        else if (k == T_LBRACE)
+                            bcd++;
+                        else if (k == T_RPAREN) {
+                            if (pd == 0)
+                                break;
+                            pd--;
+                        } else if (k == T_RBRACKET) {
+                            if (brd == 0)
+                                break;
+                            brd--;
+                        } else if (k == T_RBRACE) {
+                            if (bcd == 0)
+                                break;
+                            bcd--;
+                        } else if (k == T_SEMI && pd == 0 && brd == 0 && bcd == 0) {
+                            j++;
+                            break;
+                        } else if (pd == 0 && brd == 0 && bcd == 0 && at_decl_start(p, j)) {
+                            break;
+                        }
                         j++;
-                    if (j < p->ntoks)
-                        j++;
+                    }
                     i = j;
                     continue;
                 }
@@ -6841,11 +7011,12 @@ static Expr *parse_expr(Parser *p) {
 
 /* ---- statement parsing ---- */
 
-static void expect_semi(Parser *p) {
-    if (!match(p, T_SEMI)) {
-        diag_error(cur(p)->span, "expected ';' but found %s", token_kind_name(cur(p)->kind));
-    }
-}
+/* Statement terminators are optional: a trailing ';' is consumed when one is
+ * written, and a missing one is fine. Statements already end where their
+ * syntax ends, so `var x = 5` followed by a newline parses as one declaration
+ * whether or not a ';' is written between them. A ';' remains useful to show
+ * where a statement ends -- e.g. two statements on one line. */
+static void expect_semi(Parser *p) { match(p, T_SEMI); }
 
 /* Registers a compile-time constant. */
 static void const_define(Parser *p, char *name, Type *ty, long long ival, int str_id) {
@@ -7014,14 +7185,14 @@ static Stmt *parse_const_decl(Parser *p) {
     Type *ty = parse_type(p);
     if (ty == NULL) {
         diag_error(cur(p)->span, "const needs a type");
-        while (!at(p, T_SEMI) && !at(p, T_EOF))
+        while (!at(p, T_SEMI) && !at(p, T_EOF) && !at(p, T_RBRACE))
             advance(p);
         match(p, T_SEMI);
         return new_stmt(p, S_EXPR, start);
     }
     if (!at(p, T_IDENT)) {
         diag_error(cur(p)->span, "expected const name");
-        while (!at(p, T_SEMI) && !at(p, T_EOF))
+        while (!at(p, T_SEMI) && !at(p, T_EOF) && !at(p, T_RBRACE))
             advance(p);
         match(p, T_SEMI);
         return new_stmt(p, S_EXPR, start);
@@ -7031,7 +7202,7 @@ static Stmt *parse_const_decl(Parser *p) {
     advance(p);
     if (!match(p, T_ASSIGN)) {
         diag_error(cur(p)->span, "const '%s' needs an initializer", name);
-        while (!at(p, T_SEMI) && !at(p, T_EOF))
+        while (!at(p, T_SEMI) && !at(p, T_EOF) && !at(p, T_RBRACE))
             advance(p);
         match(p, T_SEMI);
         return new_stmt(p, S_EXPR, start);
@@ -8707,12 +8878,20 @@ static Stmt *parse_func(Parser *p, int nested) {
     fn->is_ext = is_ext;
     fn->is_extern = is_extern;
     fn->is_export = is_export;
-    if (is_export && at(p, T_SEMI))
+    /* `export` publishes the name so C can call it, which needs the body to
+     * come from. With a `;` the declaration-only path below handles it, but
+     * with neither `;` nor a body opener the body read falls through to
+     * parse_block, whose generic "expected '{'" blames the token that comes
+     * next and then reads that next declaration as this body's first
+     * statement. Naming the export here and taking the declaration-only
+     * path keeps the recovery where a ';' would have put it. */
+    int export_bodyless = is_export && !at(p, T_FATARROW) && !at(p, T_LBRACE);
+    if (is_export && (at(p, T_SEMI) || export_bodyless))
         diag_error(start,
                    "'export' function '%s' needs a body; use 'extern' to declare a C "
                    "function",
                    src_name);
-    if (at(p, T_SEMI) || is_extern) {
+    if (at(p, T_SEMI) || is_extern || (export_bodyless)) {
         /* Declaration only. Nothing is emitted; the pre-scan already recorded
          * the signature. */
         if (nested && !is_extern)
@@ -8977,8 +9156,8 @@ static Stmt *parse_interface_decl(Parser *p) {
             } else {
                 iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, ret));
             }
-            if (!match(p, T_SEMI))
-                break;
+            /* Method signatures end with an optional ';'. */
+            match(p, T_SEMI);
             continue;
         }
         Type *ret = parse_type(p);
@@ -9021,8 +9200,8 @@ static Stmt *parse_interface_decl(Parser *p) {
         } else {
             iface_add_method(p->ty, id, mname, type_fnptr(p->ty, ptypes, np, ret));
         }
-        if (!match(p, T_SEMI))
-            break;
+        /* Method signatures end with an optional ';'. */
+        match(p, T_SEMI);
     }
     if (!match(p, T_RBRACE)) {
         diag_error(cur(p)->span, "expected '}' to close interface body");
@@ -10275,9 +10454,12 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
         if (at(p, T_LPAREN)) {
             /* method */
             parse_method(p, sd, name, mt, mname, mspan, mvirtual);
-        } else if (at(p, T_SEMI)) {
-            /* plain field */
-            advance(p);
+        } else if (at(p, T_SEMI) || at(p, T_RBRACE) || at(p, T_TILDE) || at(p, T_KW_VIRTUAL) ||
+                   at(p, T_KW_OVERRIDE) || at(p, T_KW_FN) || is_type_token(cur(p)->kind) ||
+                   at(p, T_IDENT)) {
+            /* plain field; the ';' is optional, so a field before '}' or before
+             * the next member needs no terminator. */
+            match(p, T_SEMI);
             if (sd != NULL)
                 struct_add_field(p->ty, sd, mname, mt);
         } else if (at(p, T_LBRACE)) {
@@ -10363,7 +10545,7 @@ static Stmt *parse_struct_decl(Parser *p, int is_class) {
             p->cur_this = st;
             expect_semi(p);
         } else {
-            diag_error(cur(p)->span, "expected ';', '(', or '=>' after member name");
+            diag_error(cur(p)->span, "expected '(', '=>' or a new member after member name");
             break;
         }
     }
@@ -10640,7 +10822,7 @@ static Stmt *parse_stmt(Parser *p) {
             if (ns_scan_path(p, p->pos, dpath, sizeof dpath, &dend)) {
                 diag_error_code(t->span, "unknown_type", "unknown type '%s'", dpath);
                 int guard = 0;
-                while (!at(p, T_SEMI) && !at(p, T_EOF) && guard++ < 256)
+                while (!at(p, T_SEMI) && !at(p, T_EOF) && !at(p, T_RBRACE) && guard++ < 256)
                     advance(p);
                 match(p, T_SEMI);
                 return new_stmt(p, S_EXPR, t->span);
@@ -10649,7 +10831,7 @@ static Stmt *parse_stmt(Parser *p) {
         suggest_in_scope(p, SK_TYPE, "type", t->text);
         diag_error_code(t->span, "unknown_type", "unknown type '%s'", t->text);
         int guard = 0;
-        while (!at(p, T_SEMI) && !at(p, T_EOF) && guard++ < 256)
+        while (!at(p, T_SEMI) && !at(p, T_EOF) && !at(p, T_RBRACE) && guard++ < 256)
             advance(p);
         match(p, T_SEMI);
         return new_stmt(p, S_EXPR, t->span);

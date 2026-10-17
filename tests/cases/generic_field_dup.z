@@ -1,0 +1,11 @@
+// A generic instance lays its fields out twice: the signature pass run at the
+// point the instance exists re-uses the same member scan that adds plain
+// fields, and the member reader adds them again. The field count grows past
+// what a positional constructor takes, so `new Pair<int>(1, 2)` is judged to
+// expect four arguments instead of two.
+struct Pair<T> {
+    T a
+    T b
+}
+var p = new Pair<int>(1, 2)
+Console.WriteLog(p.a + p.b)

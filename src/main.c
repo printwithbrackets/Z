@@ -271,9 +271,10 @@ static char *strdup_or_die(const char *s);
  * stack.
  *
  * Grown rather than fixed. 64 was generous for an import tree -- a cap rather
- * than a number anyone hit -- but a project is every `.z` under its root, and a
- * tree of a hundred files would have failed with "too many imported files" and
- * no way to raise it. */
+ * than a number anyone hit -- but a project is every `.z` under its root, and
+ * a tree of a hundred files would have failed with "too many imported files"
+ * and no way to raise it. */
+#define Z_IMPORT_DEPTH_MAX 128
 static const char **loaded_path = NULL; /* already expanded (arena-owned) */
 static int n_loaded = 0, loaded_cap = 0;
 static const char **loading_path = NULL; /* on the current expansion stack */
@@ -656,6 +657,18 @@ static int expand_file_text(Arena *arena, const char *path, const char *text, lo
                 path);
         return 1;
     }
+    /* A chain reports itself before it exhausts anything: cycles are caught by
+     * the stack above, but a graph that is legal yet absurd (a generator that
+     * emits one import per row for ten thousand rows) would otherwise grow this
+     * stack without end. A depth where the diagnostic still names the real
+     * problem beats a stack overflow that names the C runtime. */
+    if (n_loading >= Z_IMPORT_DEPTH_MAX) {
+        fprintf(stderr,
+                "%s: import chain is deeper than %d files: more than 128 chained "
+                "imports are not expanded\n",
+                s_prog, Z_IMPORT_DEPTH_MAX);
+        return 1;
+    }
     list_push(&loading_path, &n_loading, &loading_cap, path); /* arena-owned */
 
     /* Keep the text in the arena: diagnostics render an excerpt from it long
@@ -784,28 +797,42 @@ static int expand_file_text(Arena *arena, const char *path, const char *text, lo
             continue;
         }
         if (t->kind == T_KW_IMPORT && (depth == 0 || nns > 0)) {
-            /* `import "file.z";` or `import "file.z" as alias;`. The alias is
-             * contextual: `as` stays a usable identifier everywhere else. */
+            /* `import "file.z"` or `import "file.z" as alias`, each with an
+             * optional trailing ';'. The alias is contextual: `as` stays a
+             * usable identifier everywhere else. */
             const char *alias = NULL;
             int consumed;
             if (i + 2 >= ntoks || toks[i + 1].kind != T_STRING) {
-                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\";`\n",
+                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\"`\n",
                         t->span.file ? t->span.file : path, t->span.line, t->span.col);
                 n_loading--;
                 return 1;
             }
-            if (i + 4 < ntoks && toks[i + 2].kind == T_IDENT && toks[i + 2].text != NULL &&
-                strcmp(toks[i + 2].text, "as") == 0 && toks[i + 3].kind == T_IDENT &&
-                toks[i + 4].kind == T_SEMI) {
-                alias = toks[i + 3].text;
-                consumed = 4;
-            } else if (i + 2 < ntoks && toks[i + 2].kind == T_SEMI) {
-                consumed = 2;
-            } else {
-                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\";`\n",
+            /* `as` is contextual, so nothing stops a malformed `import "f.z"`
+             * as` from reaching this point except this check. Without it the
+             * file spliced anyway, the bare `as` stayed in the token stream and
+             * was reported one level later as an undefined variable the user
+             * never wrote. */
+            if (i + 2 < ntoks && toks[i + 2].kind == T_IDENT && toks[i + 2].text != NULL &&
+                strcmp(toks[i + 2].text, "as") == 0 &&
+                !(i + 3 < ntoks && toks[i + 3].kind == T_IDENT && toks[i + 3].text != NULL)) {
+                fprintf(stderr, "%s:%d:%d: error: expected `import \"file.z\"`\n",
                         t->span.file ? t->span.file : path, t->span.line, t->span.col);
                 n_loading--;
                 return 1;
+            }
+            if (i + 3 < ntoks && toks[i + 2].kind == T_IDENT && toks[i + 2].text != NULL &&
+                strcmp(toks[i + 2].text, "as") == 0 && toks[i + 3].kind == T_IDENT) {
+                alias = toks[i + 3].text;
+                /* `consumed` is the offset of the last consumed token: the
+                 * loop's own `i++` steps past it. */
+                consumed = 3;
+                if (i + 4 < ntoks && toks[i + 4].kind == T_SEMI)
+                    consumed = 4;
+            } else {
+                consumed = 1;
+                if (i + 2 < ntoks && toks[i + 2].kind == T_SEMI)
+                    consumed = 2;
             }
             const char *top = nns > 0 ? ns_stack[nns - 1] : "";
             char *rel = strings->items[toks[i + 1].str_id];
@@ -1054,12 +1081,11 @@ static int compile(const char *src, const char *exe, const char *asm_path, int b
      * It inherits the last real token's position rather than being zeroed, because
      * a diagnostic whose expected token is the end of the file is reported at this
      * token's span, and a zeroed span prints as `0:0` and quotes the file's first
-     * line. That is how a missing `;` at the end of the last line came to be
-     * reported on line 1, pointing at a comment that had nothing to do with it.
+     * line.
      *
      * Pointing at the last token rather than one byte past it is also the more
-     * useful answer: "expected ';' but found end of file" wants to show the token
-     * the semicolon should have followed. */
+     * useful answer for a diagnostic at end of file: it shows the token the
+     * parser was reading when the file ran out. */
     if (ntoks == tcap) {
         Token *bigger = arena_alloc_array(&arena, ntoks + 1, sizeof(Token));
         if (ntoks > 0)

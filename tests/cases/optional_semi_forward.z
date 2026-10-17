@@ -1,0 +1,12 @@
+// Forward references across an omitted ';': the pre-scan must stop an
+// expression body at the first token that can begin the next declaration, or
+// everything written after it goes unregistered and the calls made before it
+// fail. Each body below ends at a newline with no ';' written.
+int f() => 5
+int g() => 6
+var lam = (int x) => x + 1
+int h() { return 9 }
+Console.WriteLog(g())
+Console.WriteLog(lam(1) + h())
+struct S { int v int A() { return this.C() } int B() => v int C() => v * 3 }
+Console.WriteLog(new S(21).A())

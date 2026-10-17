@@ -1,0 +1,6 @@
+// fn-style headers spell the signature `fn name(...) -> T`, so the export
+// diagnostic cannot sit only on the ';' path, since with the ';' omitted the
+// suffix reads as a bare return type and the parser reported a generic
+// "expected '{' to open a block" instead of naming the real problem
+export fn f() -> int
+fn main() -> int { return 0 }

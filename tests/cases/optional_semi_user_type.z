@@ -1,0 +1,15 @@
+// A member whose return type is a user-defined struct, written after an
+// expression-bodied member whose ';' was omitted. The body ends in a bare
+// identifier, so the pre-scan must resolve `P` as a type to find the member
+// that follows it, or `Copy` goes missing from S's layout and the call made
+// before it fails.
+struct P { int v }
+struct S {
+    int v
+    int A() { return this.Copy().v * 2 }
+    int B() => v
+    P Copy() => new P(v)
+}
+var s = new S(3)
+Console.WriteLog(s.A())
+Console.WriteLog(s.Copy().v)
