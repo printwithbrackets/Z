@@ -44,7 +44,7 @@
  *
  * Hand-maintained and bumped with the tag, because the build has no other
  * source of truth -- the Makefile knows the C toolchain and not the release. */
-#define Z_VERSION "0.3.0"
+#define Z_VERSION "0.4.0"
 
 /* The name this binary was reached by. `gzz` is a symlink to this same
  * executable, named the way the gcc family names a driver after what it drives
