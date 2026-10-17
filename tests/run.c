@@ -1314,7 +1314,8 @@ int main(int argc, char **argv) {
      * container is still live at exit and the report is not empty. Only the
      * string blocks are asserted about, which is the part a container's
      * destructor is responsible for. */
-    static const char *leaks[] = {"vec_string", "map_string", "vec_grow_owned", "map_rehash_owned"};
+    static const char *leaks[] = {"vec_string", "map_string", "vec_grow_owned", "map_rehash_owned",
+                                   "nested_reassign"};
     const char *lk_dir = "tests/leaks";
     if (asan_available(zq)) {
         char leak_out[256];

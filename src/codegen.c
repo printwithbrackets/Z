@@ -3637,9 +3637,19 @@ static void gen_void_expr(CG *cg, Expr *e) {
     /* The in-place forms below read and write the register the destination slot
      * was allocated, so a captured destination is not one of them: its slot holds
      * a box pointer, and `b += 10` added 10 to the address of the cell rather than
-     * to the value inside it. Those go to gen_expr, which dereferences. */
-    if (e != NULL && e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR &&
-        !is_aggregate(e->type) && !e->lhs->agg_param && !e->lhs->boxed) {
+     * to the value inside it. Those go to gen_expr, which dereferences.
+     *
+     * `frees_old` is the same kind of exclusion: an assignment that replaces a
+     * string slot has to release the allocation it held, and every in-place form
+     * below writes the destination without ever reading or freeing the old value.
+     * The release lives in the E_ASSIGN arm of gen_expr, so a plain assignment
+     * that owns its destination's old value is handed there rather than folded
+     * into a bare `mov`. Skipping that was a per-iteration leak: `row = row + "."`
+     * as a statement kept `row` in a register, took the in-place path, and leaked
+     * every older concatenation (the nested-loop `z_concat` leak). */
+    if (e != NULL && e->kind == E_ASSIGN && !e->frees_old && e->lhs != NULL &&
+        e->lhs->kind == E_VAR && !is_aggregate(e->type) && !e->lhs->agg_param &&
+        !e->lhs->boxed) {
         /* Never a register for a global: it has no slot, so this is NULL and the
          * path below falls through to an address-and-store, which is what a
          * global needs. */
