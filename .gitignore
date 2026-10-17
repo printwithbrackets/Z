@@ -15,3 +15,8 @@
 *.out
 # Embedded runtime temp files
 /tmp/z_*
+
+# A mistyped relative path creates a literal `..../` directory. It is never
+# source -- only a place a stale compiler binary or stray output landed -- so it
+# is ignored rather than committed by accident.
+/..../
