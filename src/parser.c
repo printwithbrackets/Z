@@ -7821,6 +7821,61 @@ static void check_return_of_owned_local(Parser *p, Stmt *s) {
         found->name);
 }
 
+/* A non-void function whose body can reach the closing brace hands the caller
+ * whatever the return register happened to hold -- the leftover of the last
+ * call the body made, usually -- with nothing at the source that says so. The
+ * value then flows on as if it had been computed. `bare_return_nonvoid` covers
+ * the same mistake written as an explicit `return;`; this is the silent form,
+ * where the reader never wrote the word at all.
+ *
+ * `int main` is the one exemption, and it is C's: running off the end of main
+ * returns 0. The parser marks the function so codegen can zero the return
+ * register on the fall-through path; every other non-void function that can
+ * fall through is rejected here, before codegen ever sees it. */
+
+/* True when control can reach the end of this statement. A statement list is
+ * scanned in full rather than only its last entry, so
+ *     return x;
+ *     <dead code>
+ * counts as a body that cannot fall through: the last statement is unreachable,
+ * but control still leaves at the return above it. `stmt_terminates` cannot
+ * answer this -- it looks only at the last statement -- which is why this is a
+ * separate walk rather than a change to it. */
+static int stmt_falls_through(Stmt *s) {
+    if (s == NULL)
+        return 1;
+    switch (s->kind) {
+    case S_RETURN:
+    case S_BREAK:
+    case S_CONTINUE:
+        return 0;
+    case S_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            if (!stmt_falls_through(s->items[i]))
+                return 0;
+        return 1;
+    case S_IF:
+        /* Without an `else` the condition can be false and control passes on. */
+        if (s->orelse == NULL)
+            return 1;
+        return stmt_falls_through(s->body) || stmt_falls_through(s->orelse);
+    default:
+        return 1;
+    }
+}
+
+static void check_falls_off_end(Stmt *fn, Type *ret, int is_entry, Span span, const char *name) {
+    if (fn->fbody == NULL || is_unk(ret) || is_kind(ret, TK_VOID))
+        return;
+    if (!stmt_falls_through(fn->fbody))
+        return;
+    fn->falls_off = 1;
+    if (is_entry && is_kind(ret, TK_INT))
+        return;
+    diag_error_code(span, "missing_return",
+                    "function '%s' can reach its closing brace without returning a value", name);
+}
+
 /* Expands every block scope and every return in a statement list. Inner first,
  * so a nested block's values are destroyed before the enclosing block's.
  *
@@ -9057,6 +9112,11 @@ static Stmt *parse_func(Parser *p, int nested) {
     if (fn->fbody != NULL)
         close_form_stmts(p, &fn->fbody, 1);
 
+    check_falls_off_end(fn, fn->ret_type,
+                        strcmp(src_name, "main") == 0 &&
+                            (p->ns_prefix == NULL || p->ns_prefix[0] == '\0'),
+                        start, src_name);
+
     if (saved_ncaptured > 0)
         memcpy(p->captured, saved_captured, (size_t)saved_ncaptured * sizeof(Var));
     p->ncaptured = saved_ncaptured;
@@ -9911,6 +9971,8 @@ static Stmt *parse_method(Parser *p, StructDef *sd, const char *sname, Type *ret
         fn->fbody = parse_block(p);
     }
     fn->locals_bytes = p->next_offset;
+
+    check_falls_off_end(fn, ret, 0, start, ctxlabel);
 
     if (nexplicit > 0) {
         ptypes = arena_alloc_array(p->arena, (size_t)nexplicit, sizeof(Type *));

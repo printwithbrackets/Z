@@ -5418,6 +5418,13 @@ static void emit_function(CG *cg, Stmt *fn) {
         }
     }
     gen_block_items(cg, fn->fbody);
+    /* `int main` that runs off its closing brace returns 0, as C defines. The
+     * parser records the fall-through and exempts main from the missing-return
+     * error, so this is the one function whose fall-off leaves a defined value:
+     * without it the process exited with whatever the last call happened to
+     * leave in rax. */
+    if (fn->falls_off)
+        buf_puts(cg->out, "  xor eax, eax\n");
     if (have_dbg)
         dbg_collect_locals(cg, df, fn->fbody);
     /* rsp is already at the deepest saved pool register once rbp is rebased,

@@ -1001,6 +1001,16 @@ meant as a statement of its own. **[new]**
 `break` leaves the innermost loop and `continue` starts its next iteration; in
 a `for`, `continue` jumps to the step. Both are a compile error outside a loop.
 
+A function with a non-`void` return type must return a value on every path out
+of its body. Control that reaches the closing `}` has nothing to hand back, so
+the caller reads whatever the return register happened to hold — the leftover of
+the last call the body made. That is the same mistake as a `return;` with no
+value, written by leaving the word out, and it is rejected the same way: the
+diagnostic `missing_return` names the function and carries the `note: in function
+'f'` that every diagnostic inside a body gets. `int main` is the one exemption,
+and it is C's: running off the end of `main` returns `0` rather than an
+undefined value.
+
 **[new]** `while (let v = recv(ch)) { ... }` binds `v` for the body and is false
 when `recv` yields `Err`, so a channel loop reads as a loop rather than as a
 loop plus an unwrap.
