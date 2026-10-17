@@ -196,7 +196,7 @@ directory, e.g. with lazy.nvim:
 | `ftdetect/z.vim` | `*.z` |
 | `compiler/z.vim` | `makeprg` and `errorformat`, so `:make` and `:lmake` work |
 | `plugin/z.vim` | the commands below |
-| `autoload/z.vim` | shared helpers: running the compiler, and JSON diagnostics to quickfix |
+| `autoload/z.vim` | shared helpers: running the compiler, and the JSON diagnostics they report through |
 
 ### Errors and warnings
 
@@ -206,10 +206,10 @@ unrelated entry. `:Zcheck` reads `--error-format=json` instead, so each problem
 carries its code and each note that names a span is a line you can jump to:
 
 ```vim
-:Zcheck        " compile the current file, fill the quickfix list, open it
-:Zcheck!       " same, without opening the window
+:Zcheck        " compile the current file and report the diagnostics
+:Zcheck!       " same, and also open the quickfix list
 :Zlmake        " into the location list instead of the quickfix list
-:Zclearfix     " empty the list and remove the gutter signs
+:Zclearfix     " empty the list and remove the diagnostics and gutter signs
 :Zsigns        " re-place the gutter signs from the current quickfix list
 :Zversion      " print the compiler version
 ```
@@ -221,19 +221,36 @@ carries its code and each note that names a span is a line you can jump to:
   probe.z|4| I| [note] 'mine' is declared here; write 'return move mine;' to hand it to the caller
 ```
 
-Errors, warnings and notes arrive as `E`, `W` and `I`, so `:cnext` can be filtered
-with `:cdo`. Errors and warnings also get a gutter sign (`DiagnosticSignError`
-and `DiagnosticSignWarn`); set `g:z_signs_error` and `g:z_signs_warning` to
-change the glyph. A note that names a span — "declared here" — becomes its own
-entry rather than being appended to the message, because the place it points at
-is the thing worth looking at.
+On Neovim the report goes through Neovim's own diagnostics system, the same
+machinery an LSP server feeds: the message is drawn on the line it is about, the
+sign is in the gutter, the float carries the full text, and the built-in
+commands do the walking. No quickfix window opens; the summary
+(`Z: 1 error(s), 1 warning(s)`) is echoed instead, and `:Zcheck!` still opens
+the list for the days `:cnext` is the right navigation. `g:z_virtual_text = 0`
+restores the quickfix flow everywhere.
+
+```vim
+:lua vim.diagnostic.open_float()   " the full text of the problem at hand
+:lua vim.diagnostic.goto_next()    " and goto_prev() for the way back
+```
+
+Errors, warnings and notes arrive as `E`, `W` and `I`, which become the error,
+warning and info severities of the diagnostics system (and `:cnext` filterable
+types in the list). Errors and warnings also get a gutter sign
+(`DiagnosticSignError` and `DiagnosticSignWarn`); set `g:z_signs_error` and
+`g:z_signs_warning` to change the glyph when the quickfix flow is in use, since
+inside the diagnostics system the sign belongs to Neovim's own configuration. A note that names a span, "declared here", becomes its own diagnostic at the
+place it points at rather than being appended to the message, because that
+place is the thing worth looking at.
 
 Two settings, both off by default, plus a quiet flag that is on by default:
 
 ```vim
 let g:z_check_on_write = 1        " run :Zcheck after each write (default 0)
 let g:z_check_on_write_quiet = 0  " open the quickfix window on every save (default 1:
-                                  " only open when there is an error)
+                                  " only open when there is an error). Inline
+                                  " mode never opens it, for a summary line.
+let g:z_virtual_text = 0          " restore the quickfix flow on Neovim (default 1)
 let g:z_compiler = '/usr/local/bin/z'
 ```
 

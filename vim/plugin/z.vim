@@ -3,10 +3,19 @@
 " Loaded from plugin/ on startup, so these exist in any buffer once the runtime
 " path is set -- no ftplugin needed.
 "
-"   :Zcheck        compile the current file, put the diagnostics in the quickfix
-"                  list, and open it
-"   :Zcheck!       same, but do not open the quickfix window
-"   :Zlmake        compile into the location list instead
+" On Neovim the diagnostics render through Neovim's own diagnostics system: the
+" message sits on the line it is about, the sign is in the gutter, and the
+" built-in commands carry the rest:
+"
+"   :lua vim.diagnostic.open_float()   " the full text of the problem at hand
+"   :lua vim.diagnostic.goto_next()    " and goto_prev() for the way back
+"
+" No quickfix window opens. `:Zcheck!` opens one anyway, filled with the same
+" report, for the days a list is what the navigation wants.
+"
+"   :Zcheck        compile the current file and report the diagnostics
+"   :Zcheck!       same, and also open the quickfix list
+"   :Zlmake        same, into the location list (window under the same rule)
 "   :Zclearfix     empty the quickfix list and remove the gutter signs
 "   :Zsigns        re-place the gutter signs from the current quickfix list
 "   :Zversion      print the compiler version
@@ -20,7 +29,10 @@
 " default: compiling on save is a choice, and a slow one, so it is opt-in.
 "   let g:z_check_on_write = 1
 " `g:z_check_on_write_quiet` (default 1) keeps the quickfix window from opening
-" on every save and only opens it when something is wrong.
+" on every save and only opens it when something is wrong. With the inline
+" diagnostics there is no window at all, and the summary line does the talking.
+" `g:z_virtual_text` (default 1 on Neovim, always off on Vim) sends the
+" diagnostics through vim.diagnostic; 0 restores the quickfix flow everywhere.
 " `g:z_compiler` overrides the compiler binary; vim/compiler/z.vim uses it too.
 
 if exists('g:loaded_z_plugin')
@@ -71,11 +83,21 @@ function! s:Check(bang, local) abort
   echomsg l:msg
   echohl None
 
-  " A bang suppresses the window (Vim convention: :Zcheck opens, :Zcheck!
-  " does not); otherwise the list opens, location list for :Zlmake.
+  " Inline mode already put the message on the problem's line, so there is no
+  " window to open: the summary above and the on-line text carry it. The bang
+  " opens the list anyway, the way back for anything `:cnext` does better.
   " `empty()` and not `!`, because the bang arrives as the string "!" and a
   " non-numeric string is falsy in a Vim condition, so `!a:bang` would open on
   " :Zcheck! -- the same inversion this replaces.
+  if z#Inline()
+    if !empty(a:bang)
+      execute (a:local ? 'lopen' : 'copen')
+    endif
+    return
+  endif
+
+  " A bang suppresses the window (Vim convention: :Zcheck opens, :Zcheck!
+  " does not); otherwise the list opens, location list for :Zlmake.
   if empty(a:bang)
     execute (a:local ? 'lopen' : 'copen')
   endif

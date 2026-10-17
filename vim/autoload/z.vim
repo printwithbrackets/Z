@@ -94,11 +94,116 @@ function! s:Type(severity) abort
   return a:severity ==# 'warning' ? 'W' : (a:severity ==# 'info' ? 'I' : 'E')
 endfunction
 
-" Puts items in the quickfix list and refreshes the gutter signs from it, then
-" returns the number of real problems (errors and warnings, not notes).
+" On Neovim the diagnostics go through Neovim's own diagnostics system rather
+" than through the quickfix list and our own sign placement: the message is
+" drawn on the line the problem is on, the float carries the full text, and
+" vim.diagnostic.goto_next() does the walking. g:z_virtual_text = 0 restores
+" the quickfix flow. The lua block sits at column zero: the end marker has to,
+" and `lua` inside an `if` is fine with the block untouched.
+if has('nvim')
+lua << LUA
+  -- One namespace holds everything this plugin placed, so clearing a buffer
+  -- is setting an empty list on it again.
+  local ns = vim.api.nvim_create_namespace('z-diagnostics')
+  local sev = {
+    E = vim.diagnostic.severity.ERROR,
+    W = vim.diagnostic.severity.WARN,
+    I = vim.diagnostic.severity.INFO,
+  }
+  -- Takes the quickfix-shaped list z#Diagnostics builds and files one
+  -- diagnostic per item on the buffer the item names, so a note that points at
+  -- the declaration in an imported file lands on that file's own copy.
+  function _G.z_diag_set(items)
+    local per_buf = {}
+    for _, it in ipairs(items) do
+      local buf = it.bufnr
+      if not (buf and buf > 0) and it.filename and it.filename ~= '' then
+        buf = vim.fn.bufnr(it.filename)
+      end
+      if buf and buf > 0 and vim.api.nvim_buf_is_loaded(buf) and it.lnum and it.lnum > 0 then
+        -- The underline runs from the span start to the last printed cell of
+        -- the line, because the compiler's span length did not survive the
+        -- quickfix shape. A message that past the line's end clamps to it.
+        local col = tonumber(it.col) or 1
+        local line = vim.api.nvim_buf_get_lines(buf, it.lnum - 1, it.lnum, false)[1]
+        local endc = line and #vim.trim(line) or col
+        if endc < col then
+          endc = col
+        end
+        local d = {
+          lnum = it.lnum - 1,
+          col = col - 1,
+          end_lnum = it.lnum - 1,
+          end_col = endc,
+          severity = sev[it.type] or sev.I,
+          message = it.text,
+          source = 'z',
+        }
+        local diags = per_buf[buf]
+        if diags == nil then
+          diags = {}
+          per_buf[buf] = diags
+        end
+        table.insert(diags, d)
+      end
+    end
+    for buf, diags in pairs(per_buf) do
+      vim.diagnostic.set(ns, buf, diags, {})
+    end
+  end
+  function _G.z_diag_clear()
+    -- Every buffer this plugin ever touched, not just the one with focus: the
+    -- command is :Zclearfix and a report that spans imported files leaves
+    -- diagnostics behind on each of their buffers.
+    local diags = vim.diagnostic.get(nil, {namespace = ns})
+    for _, d in ipairs(diags) do
+      vim.diagnostic.set(ns, d.bufnr, {}, {})
+    end
+  end
+LUA
+endif
+
+" Diagnostics land inline on Neovim, or in the gutter everywhere else. The
+" quickfix/location list itself is filled by the reporters either way, so old
+" habits such as `:cnext` keep working; the window opening is what differs.
+" Inside the inline branch SignsFrom only clears the plugin's own leftovers,
+" because the diagnostics system keeps its own sign and doubling up on one
+" column is a fight over which wins.
+function! z#Show(items) abort
+  if z#Inline()
+    call luaeval('_G.z_diag_set(_A)', a:items)
+  endif
+  call z#SignsFrom(a:items)
+endfunction
+
+" Whether the editor's own diagnostics carry the report. Checked per call, like
+" every other user flag here, so it can flip during a session. Public because
+" the commands in plugin/z.vim branch on it without touching the lists.
+function! z#Inline() abort
+  return has('nvim') && get(g:, 'z_virtual_text', 1)
+        \ && luaeval('vim.diagnostic ~= nil')
+endfunction
+
+" One-line counts, the echo the list window replaced on Neovim.
+function! s:EchoSummary(items) abort
+  let l:errors = len(filter(copy(a:items), 'v:val.type ==# "E"'))
+  let l:warns = len(filter(copy(a:items), 'v:val.type ==# "W"'))
+  if l:errors > 0
+    echohl DiagnosticError
+  elseif l:warns > 0
+    echohl DiagnosticWarn
+  else
+    echohl DiagnosticInfo
+  endif
+  echomsg printf('Z: %d error(s), %d warning(s)', l:errors, l:warns)
+  echohl None
+endfunction
+
+" Puts items in the quickfix list and the report on screen, then returns the
+" number of real problems (errors and warnings, not notes).
 function! z#Report(items, title) abort
   call setqflist([], 'r', {'title': a:title, 'items': a:items})
-  call z#Signs()
+  call z#Show(a:items)
   return len(filter(copy(a:items), 'v:val.type !=# "I"'))
 endfunction
 
@@ -108,7 +213,7 @@ endfunction
 " wrong when switching between two files you are editing.
 function! z#ReportLocal(items, title) abort
   call setloclist(0, [], 'r', {'title': a:title, 'items': a:items})
-  call z#SignsFrom(a:items)
+  call z#Show(a:items)
   return len(filter(copy(a:items), 'v:val.type !=# "I"'))
 endfunction
 
@@ -124,6 +229,9 @@ endfunction
 
 " Places a gutter sign per error and warning in `items`. Notes are left out:
 " a note is a pointer to where else to look, not somewhere this file is wrong.
+" In inline mode this only clears the plugin's own leftovers, because the
+" diagnostics system places the sign itself and two severities in one cell
+" would be a fight over which wins.
 function! z#SignsFrom(items) abort
   if !has('signs')
     return
@@ -133,6 +241,9 @@ function! z#SignsFrom(items) abort
   " is Vim-only grammar and Neovim rejects it, so names never travel through
   " Ex commands here -- only the function calls below, which both editors share.
   call sign_unplace('z')
+  if z#Inline()
+    return
+  endif
   for l:item in a:items
     if !get(l:item, 'valid', 0) || get(l:item, 'type', '') !=# 'E'
           \ && get(l:item, 'type', '') !=# 'W'
@@ -176,10 +287,13 @@ function! s:DefineSigns() abort
         \ 'texthl': 'DiagnosticSignWarn'})
 endfunction
 
-" Clears the quickfix list and the gutter signs. `:Zclearfix`, for when a stale
-" list is more confusing than an empty one.
+" Clears the quickfix list, the diagnostics and the gutter signs. `:Zclearfix`,
+" for when a stale list is more confusing than an empty one.
 function! z#Clear() abort
   call setqflist([], 'r')
+  if z#Inline()
+    call luaeval('_G.z_diag_clear()')
+  endif
   call z#Signs()
 endfunction
 
@@ -197,8 +311,15 @@ function! z#CheckOnWrite() abort
   if empty(expand('%:p')) || &buftype !=# ''
     return
   endif
-let l:items = z#Diagnostics(expand('%:p'))
+  let l:items = z#Diagnostics(expand('%:p'))
   call z#Report(l:items, 'z: ' . fnamemodify(expand('%:p'), ':t'))
+  if z#Inline()
+    " The report is on the line and the sign is in the gutter, so the window
+    " that would have opened has nothing left to say. A one-line count stands
+    " in for it, which also makes a save that fixed everything visible.
+    call s:EchoSummary(l:items)
+    return
+  endif
   if empty(l:items)
     return
   endif
