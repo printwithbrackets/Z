@@ -394,8 +394,8 @@ static void show_excerpt(Span span) {
     while (line_end < len && text[line_end] != '\n')
         line_end++;
 
-    /* A fixed-width gutter, so the caret line below lines up with the text
-     * above it without having to measure what was printed. */
+        /* A fixed-width gutter, so the caret line below lines up with the text
+         * above it without having to measure what was printed. */
 #define GUTTER_W 8
     char num[24];
     snprintf(num, sizeof num, "%*d | ", GUTTER_W - 3, span.line);
