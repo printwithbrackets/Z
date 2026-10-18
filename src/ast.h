@@ -230,6 +230,15 @@ struct Stmt {
      * the same drops a second time at its own exit. */
     int owns_drops;
 
+    /* The destructor pass records here that this node's scopes have already had
+     * their drops appended. A program with top-level statements keeps those
+     * statement nodes both in the program's item list and inside the entry
+     * function synthesized for them, so a walk of the program list reaches each
+     * one twice. `build_drops` answers from the scope rather than the block, so
+     * the second append would add the same releases again -- a double free
+     * rather than a repeat no-op. The flag makes the pass idempotent per node. */
+    int drops_done;
+
     /* LICM: loop-invariant subexpressions hoisted out of this loop, computed
      * once before the loop and read from a frame slot inside it. */
     int *hoist_slots;

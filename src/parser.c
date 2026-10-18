@@ -7892,6 +7892,14 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
         if (s == NULL)
             continue;
         if (s->kind == S_BLOCK) {
+            /* A top-level block is reached twice: once as an item of the program
+             * list and once inside the entry function synthesized for those same
+             * statements. Both walks would append this scope's releases to the
+             * block, so the second free of every string live at the end. The flag
+             * makes the second visit a no-op. */
+            if (s->drops_done)
+                continue;
+            s->drops_done = 1;
             /* Inside before outside, so the inner block's drops are already
              * sitting at the end of its own body when the enclosing ones land. */
             if (s->own_scope != NULL)
@@ -7944,6 +7952,14 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
             continue;
         }
         if (s->kind == S_FUNC) {
+            /* Guarded for the same reason as S_BLOCK: the entry function the
+             * parser synthesizes for top-level statements is an item of the
+             * program list while its body's statements are also reached through
+             * that list. Revisiting would recompute `owns_drops` from a partial
+             * walk and append the body's fall-off-the-end drops a second time. */
+            if (s->drops_done)
+                continue;
+            s->drops_done = 1;
             /* A function is an item of the program list, and its body is where
              * every local it owns lives. Without this the pass never looks
              * inside a function at all. */
@@ -7978,6 +7994,12 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
             continue;
         }
         if (s->kind == S_STRUCT || s->kind == S_UNION) {
+            /* Idempotent for the same reason: a top-level type declaration is an
+             * item of the program list and its methods' bodies are walked here,
+             * so a repeated visit would append each method body's drops twice. */
+            if (s->drops_done)
+                continue;
+            s->drops_done = 1;
             /* A method body is where every local a method owns lives, and a
              * method is not an item of the program list: it hangs off the
              * StructDef, which is all `sdef` names. So the S_FUNC arm below never

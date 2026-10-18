@@ -368,6 +368,8 @@ int main(int argc, char **argv) {
         "strreturn",
         "return_param",
         "fall_off_main",
+        "toplevel_nested_string",
+        "toplevel_input_local",
         "gvar_lvar",
         "stdin",
         "surface",
