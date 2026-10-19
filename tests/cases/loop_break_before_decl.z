@@ -1,0 +1,15 @@
+// A `break` that runs before a loop-body local's declaration must not release
+// that local. The break destroys the loop-body scope so the iteration's owned
+// values do not leak, but a local declared *after* the jump has not run its
+// initializer this iteration: its slot still holds the previous iteration's
+// value, already released at the end of that iteration, so the break's drop is
+// a double free (`free(): double free detected in tcache 2`, no output).
+//
+// Reads three lines, breaks on the third turn before reading, and prints the
+// two it saw.
+for (var i = 0; i < 5; i++) {
+    if (i == 2) { break; }
+    var line = read_string();
+    Console.WriteLog(line);
+}
+Console.WriteLog("done");

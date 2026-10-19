@@ -370,6 +370,7 @@ int main(int argc, char **argv) {
         "fall_off_main",
         "toplevel_nested_string",
         "toplevel_input_local",
+        "loop_break_before_decl",
         "gvar_lvar",
         "stdin",
         "surface",

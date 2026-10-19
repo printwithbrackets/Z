@@ -7571,7 +7571,7 @@ static int stmt_terminates(Stmt *s) {
  * frame slot for a struct. Passing the address of a class's *pointer* variable
  * would make `this` point at the frame slot rather than the object, so every
  * field read inside a destructor came back as whatever the frame held. */
-static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
+static Stmt *build_drops(Parser *p, Scope *sc, Span span, const Span *limit) {
     if (sc == NULL || sc->ndrops == 0)
         return NULL;
     int n = sc->ndrops;
@@ -7579,6 +7579,18 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span) {
     int k = 0;
     for (int i = 0; i < n; i++) {
         Var *v = sc->drops[n - 1 - i];
+        /* A jump (`break`/`continue`) or a `return` destroys only the locals
+         * whose initializer has already run on the path that reaches it. A local
+         * declared after the jump in the same block has not run yet, and its slot
+         * still holds the *previous* iteration's value -- already released at the
+         * end of that iteration -- so releasing it here is a double free. The
+         * locals declared before the jump are exactly those written before it, so
+         * the jump's own position is the cutoff. `limit` is NULL where there is
+         * nothing to cut: the end of a block has no declaration after it. */
+        if (limit != NULL && v->decl_span.start > limit->start &&
+            (limit->file == NULL || v->decl_span.file == NULL ||
+             strcmp(v->decl_span.file, limit->file) == 0))
+            continue;
         /* A moved-from local is not owned by anything. `move` is how a value is
          * handed on rather than shared, and the handover empties the source, so
          * running a destructor on it afterwards destroys the caller's value.
@@ -7724,7 +7736,7 @@ static Stmt *build_drops_to(Parser *p, Scope *inner, Scope *stop, Span span) {
     Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
     int k = 0;
     for (Scope *sc = inner; sc != NULL && sc != stop; sc = sc->parent) {
-        Stmt *d = build_drops(p, sc, span);
+        Stmt *d = build_drops(p, sc, span, &span);
         if (d == NULL)
             continue;
         for (int j = 0; j < d->nitems; j++)
@@ -7752,7 +7764,7 @@ static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span) {
     Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
     int k = 0;
     for (Scope *sc = inner; sc != NULL && !sc->is_fn_body; sc = sc->parent) {
-        Stmt *d = build_drops(p, sc, span);
+        Stmt *d = build_drops(p, sc, span, &span);
         if (d == NULL)
             continue;
         for (int j = 0; j < d->nitems; j++)
@@ -7904,7 +7916,7 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
              * sitting at the end of its own body when the enclosing ones land. */
             if (s->own_scope != NULL)
                 emitted += emit_drops_in(p, s->items, s->nitems);
-            Stmt *d = build_drops(p, s->own_scope, s->span);
+            Stmt *d = build_drops(p, s->own_scope, s->span, NULL);
             if (d != NULL) {
                 list_append(p, &s->items, &s->nitems, d);
                 emitted += d->nitems;
@@ -7983,7 +7995,7 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
                  * are unreachable, which costs a few bytes of assembly and
                  * nothing else: the return path already has its own copy. */
                 if (s->fbody->kind == S_BLOCK) {
-                    Stmt *d = build_drops(p, s->fbody->own_scope, s->fbody->span);
+                    Stmt *d = build_drops(p, s->fbody->own_scope, s->fbody->span, NULL);
                     if (d != NULL) {
                         list_append(p, &s->fbody->items, &s->fbody->nitems, d);
                         emitted += d->nitems;
@@ -8018,7 +8030,7 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
                     continue;
                 if (mfn->fbody->kind == S_BLOCK) {
                     emitted += emit_drops_in(p, mfn->fbody->items, mfn->fbody->nitems);
-                    Stmt *d = build_drops(p, mfn->fbody->own_scope, mfn->fbody->span);
+                    Stmt *d = build_drops(p, mfn->fbody->own_scope, mfn->fbody->span, NULL);
                     if (d != NULL) {
                         list_append(p, &mfn->fbody->items, &mfn->fbody->nitems, d);
                         emitted += d->nitems;
