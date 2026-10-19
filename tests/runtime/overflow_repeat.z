@@ -1,0 +1,13 @@
+// `repeat` whose result would exceed LONG_MAX is refused the same way as an
+// overflowing array: `z: allocation size overflow` and exit 1. `"ab"` is 2
+// bytes, so `LONG_MAX/2 + 1` repetitions need 9223372036854775808 bytes, one
+// past LONG_MAX, and the `ls > LONG_MAX/n` check in `z_repeat` fires before
+// any allocation. The bound itself is printed first so a run that did not
+// overflow would be visible as a wrong answer rather than a hang.
+int main() {
+    var half = 4611686018427387903;
+    Console.WriteLog(half);
+    var s = repeat("ab", half + 1);
+    Console.WriteLog("unreachable");
+    return 0;
+}

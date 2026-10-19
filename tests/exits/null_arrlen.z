@@ -1,0 +1,11 @@
+// `.length` on a null array reads the length header at ptr[-8], so it is
+// checked like `*p` rather than faulting there with no message: a runtime
+// error and exit 134 with checks on, a bare SIGSEGV with --no-bounds.
+int[] noArr() { return null; }
+int main() {
+    Console.WriteLog(1);
+    var a = noArr();
+    Console.WriteLog(a.length);
+    Console.WriteLog(2);
+    return 0;
+}

@@ -1,0 +1,8 @@
+// The same double release as toplevel_nested_string, through a different value:
+// a string read from input and stored in a loop-body local at top level. The
+// local's slot was released once by the block's drops and again by the walk of
+// the program list, so the second iteration freed the first line a second time.
+for (var i = 0; i < 3; i++) {
+    var line = read_string();
+    Console.WriteLog("got " + line);
+}

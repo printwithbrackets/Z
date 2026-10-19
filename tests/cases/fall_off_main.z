@@ -1,0 +1,12 @@
+// Running off the end of `int main` returns 0, as C defines, instead of
+// whatever the return register happened to hold -- here the 7 left by the last
+// call, which used to become the process exit status. The harness asserts the
+// status is zero, so this fails on a compiler that leaks the register.
+int seven() {
+    return 7;
+}
+
+int main() {
+    Console.WriteLog("before fall-off");
+    seven();
+}

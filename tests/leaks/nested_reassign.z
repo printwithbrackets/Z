@@ -1,0 +1,29 @@
+// Assigning over a string must release the value it overwrote, including when
+// the destination is a register-resident local inside a loop. The assignment
+// fast path stored the new pointer and skipped the release, so every iteration
+// of a nested loop leaked the string it replaced -- eight allocations here,
+// each from z_concat.
+//
+// The leak is invisible in the output and in the exit status, which is exactly
+// what this case exists to catch: built with AddressSanitizer and run with leak
+// detection on, it fails if any block still live at exit came from the string
+// allocator. The array that is allocated twice and kept only from the second is
+// a deliberate, definitely-lost allocation: a heap array cannot be released from
+// Z yet, and this is what makes LeakSanitizer print a report at all, so a clean
+// run still exercises the check rather than passing because nothing ran.
+
+int main() {
+    var s = "start";
+    for (var i = 0; i < 3; i++) {
+        for (var j = 0; j < 3; j++) {
+            s = "row " + int_to_string(i) + " col " + int_to_string(j);
+            Console.WriteLog(s);
+        }
+    }
+
+    var pad = new int[8];
+    pad = new int[8];
+    pad[0] = 1;
+    Console.WriteLog(pad[0]);
+    return 0;
+}

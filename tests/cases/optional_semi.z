@@ -1,0 +1,34 @@
+// Semicolons are optional statement terminators: every statement below ends
+// at a newline with no ';' written, and the program still compiles and runs.
+struct Point { int x; int y }
+
+int Twice(int n) => n * 2
+
+interface Greeter { string greet(string name) }
+
+struct Person { string name
+string greet(string who) { return "hi " + who } }
+
+int main() {
+    var x = 5
+    var y = 10
+    Console.WriteLog(x + y)
+    Console.WriteLog(Twice(21))
+    var total = 0
+    for (var i = 1; i <= 10; i++) {
+        total += i
+    }
+    Console.WriteLog(total)
+    var p = new Point(3, 4)
+    Console.WriteLog(p.x + p.y)
+    var person = new Person("bob")
+    Console.WriteLog(person.greet("al"))
+    if (x < y) {
+        Console.WriteLog("less")
+    }
+    while (x < 8) {
+        x = x + 1
+    }
+    Console.WriteLog(x)
+    return 0
+}

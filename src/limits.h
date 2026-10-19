@@ -55,10 +55,11 @@
  * Where Z_INTRINSIC_LIST is lowered inline to a couple of instructions, every one
  * of these is a call into the runtime, so codegen only has to name the symbol.
  *
- * exp, log, tan and the rest of the transcendentals are deliberately absent: with
- * no floating-point type they would have to invent a fixed-point convention that
- * means nothing at the call site, which is the very thing sin/cos already have to
- * apologize for. They belong with a real float type.
+ * exp, log, tan and the rest of the transcendentals are deliberately absent:
+ * they belong with the float overloads of sqrt/sin/cos, which do not exist yet.
+ * An integer-only exp would have to invent a fixed-point convention that means
+ * nothing at the call site, which is the very thing sin/cos already have to
+ * apologize for.
  *
  * int_to_string, float_to_string and char_str are the number- and byte-to-text
  * operations under names of their own. `"" + i` does the same job and is the

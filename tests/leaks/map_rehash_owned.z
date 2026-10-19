@@ -1,0 +1,34 @@
+// ASan gate for Map rehash with owning keys and values.
+//
+// Same rehash as tests/cases/map_rehash_owned.z but run under
+// AddressSanitizer with leak detection. Asserts no heap-use-after-free, no
+// double free, and no leaked string block (`zstr_alloc_impl`). The three
+// parallel arrays behind the map are still live at exit, and class-handle
+// values (`Tracked*`) are expected to leak (their `drop_value` is a no-op),
+// both safe-direction leaks rather than wrong frees.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    {
+        var ss = new Map<string, string>();
+        for (var i = 0; i < 50; i++) { ss.set("k" + int_to_string(i), "v" + int_to_string(i)); }
+        Console.WriteLog(ss.size());
+        Console.WriteLog(ss.get("k49", "?"));
+    }
+    {
+        var si = new Map<string, int>();
+        for (var j = 0; j < 30; j++) { si.set("key " + int_to_string(j), j); }
+        Console.WriteLog(si.size());
+    }
+    {
+        var objs = new Map<int, Tracked*>();
+        for (var m = 0; m < 50; m++) { objs.set(m, new Tracked(m)); }
+        Console.WriteLog(objs.size());
+        Console.WriteLog(objs.get(49, new Tracked(0 - 1)).id);
+    }
+    Console.WriteLog("done");
+    return 0;
+}

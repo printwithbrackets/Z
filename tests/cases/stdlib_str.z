@@ -1,0 +1,97 @@
+// The string and file helpers: parsing, counting, classifying, splitting
+// into lines, the StringBuilder extras and the whole-file io layer.
+//
+// File paths live under /tmp like the files test does, so every run starts
+// from a truncate rather than from leftover state.
+int main() {
+    /* ---- parse_int ---- */
+    Console.WriteLog(match parse_int("42") { Ok(v) => v, Err(_) => -1 });        // 42
+    Console.WriteLog(match parse_int("-17") { Ok(v) => v, Err(_) => 0 });        // -17
+    Console.WriteLog(match parse_int("+8") { Ok(v) => v, Err(_) => 0 });         // 8
+    Console.WriteLog(match parse_int("0") { Ok(v) => v, Err(_) => -1 });         // 0
+    Console.WriteLog(match parse_int("") { Ok(_) => 1, Err(_) => 0 });           // 0
+    Console.WriteLog(match parse_int("12x") { Ok(_) => 1, Err(_) => 0 });        // 0
+    Console.WriteLog(match parse_int("-") { Ok(_) => 1, Err(_) => 0 });          // 0
+    Console.WriteLog(match parse_int("  3") { Ok(_) => 1, Err(_) => 0 });       // 0
+    Console.WriteLog(parse_int_or("42", -1));                                    // 42
+    Console.WriteLog(parse_int_or("nope", -1));                                  // -1
+    Console.WriteLog(parse_int_or("", 7));                                      // 7
+
+    /* ---- count_sub ---- */
+    Console.WriteLog(count_sub("aaa", "a"));        // 3
+    Console.WriteLog(count_sub("aaa", "aa"));       // 1 -- non-overlapping
+    Console.WriteLog(count_sub("a,b,c", ","));      // 2
+    Console.WriteLog(count_sub("abc", "z"));        // 0
+    Console.WriteLog(count_sub("abc", ""));         // 0
+
+    /* ---- byte classifiers: ASCII-only, like upper and lower ---- */
+    Console.WriteLog(is_digit(char_at("5", 0)));     // true
+    Console.WriteLog(is_digit(char_at("a", 0)));     // false
+    Console.WriteLog(is_alpha(char_at("q", 0)));     // true
+    Console.WriteLog(is_alpha(char_at("Q", 0)));     // true
+    Console.WriteLog(is_alpha(char_at("5", 0)));     // false
+    Console.WriteLog(is_space(char_at(" ", 0)));     // true
+    Console.WriteLog(is_space(char_at("\t", 0)));    // true
+    Console.WriteLog(is_space(char_at("x", 0)));     // false
+
+    /* ---- lines: split on newline, tolerating carriage returns ---- */
+    var ls = lines("a\nb\nc");
+    Console.WriteLog(ls.length);                    // 3
+    Console.WriteLog(join("|", ls));                // a|b|c
+    var cr = lines("a\r\nb\r\nc");
+    Console.WriteLog(join("|", cr));                // a|b|c
+    Console.WriteLog(lines("").length);             // 1 -- split keeps the one empty piece
+
+    /* ---- StringBuilder extras ---- */
+    var b = new StringBuilder();
+    b.appendLine("first");
+    b.appendLine("second");
+    Console.WriteLog(b.length() > 0);               // true
+    var bl = lines(b.toString());
+    Console.WriteLog(bl.length);                    // 2
+    Console.WriteLog(bl[0]);                        // first
+    var parts = split("x,y,z", ",");
+    var j = new StringBuilder();
+    j.appendAll(parts);
+    Console.WriteLog(j.toString());                 // xyz
+    var jj = new StringBuilder();
+    jj.appendJoin(", ", parts);
+    Console.WriteLog(jj.toString());                // x, y, z
+    Console.WriteLog(j.empty());                    // false -- the C++ spelling
+    j.clear();
+    Console.WriteLog(j.empty());                    // true
+
+    /* ---- file helpers over /tmp ---- */
+    Console.WriteLog(match str_file_checks() { Ok(n) => n, Err(_) => -1 });
+    return 0;
+}
+
+/* the file helpers need `?`, which only works in a function returning a
+ * `Result`, so they live here rather than in main. every value printed is
+ * the helper's answer, and the final 0 says the whole chain succeeded */
+Result<int, IoError*> str_file_checks() {
+    var path = "/tmp/z_test_stdlib_io.txt";
+    Console.WriteLog(file_exists(path + ".nope"));  // false
+    var w = file_write(path, "hello\nworld\n")?;
+    Console.WriteLog(w);                            // 12
+    Console.WriteLog(file_exists(path));            // true
+    var t = file_read(path)?;
+    Console.WriteLog(t == "hello\nworld\n");        // true
+    var f = openFile(path, "a")?;
+    var wl = f.writeLine("third")?;
+    Console.WriteLog(wl);                           // 6
+    f.close()?;
+    var all = file_read(path)?;
+    Console.WriteLog(all);                          // hello, world and third, each on a line
+    var a = file_append(path, "fourth\n")?;
+    Console.WriteLog(a);                            // 7
+    var o = openFile(path, "r")?;
+    var text2 = o.readAllText()?;
+    var got = lines(text2);
+    Console.WriteLog(got.length);               // 4
+    Console.WriteLog(join("|", got));           // hello|world|third|fourth
+    o.close()?;
+    var txt = file_read(path)?;
+    Console.WriteLog(lines(txt).length);            // 4
+    return Ok(0);
+}

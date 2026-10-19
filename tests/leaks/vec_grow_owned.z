@@ -1,0 +1,42 @@
+// ASan gate for Vec grow with owning element types.
+//
+// Same growth as tests/cases/vec_grow_owned.z but run under
+// AddressSanitizer with leak detection (see tests/run.c leaks gate).
+// Asserts: no use-after-free, no double free, no buffer overflow, and no
+// leaked block from the string allocator (`zstr_alloc_impl`). The heap arrays
+// behind the vectors (`new T[n]`) are still live at exit -- Z cannot release
+// a heap array yet -- so the report is not empty; only string blocks are
+// asserted about. Class-handle elements (`Tracked*`) are expected to leak
+// (their `drop_value` is a no-op: codegen only releases strings), and that
+// leak is the safe direction, not a double free.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    {
+        var grid = new Vec<Vec<int>*>();
+        for (var row = 0; row < 10; row++) {
+            var line = new Vec<int>();
+            for (var col = 0; col < 5; col++) { line.push(row * 10 + col); }
+            grid.push(line);
+        }
+        Console.WriteLog(grid.size());
+        Console.WriteLog(grid.at(9).at(4));
+    }
+    {
+        var strs = new Vec<string>();
+        for (var i = 0; i < 40; i++) { strs.push("element " + int_to_string(i)); }
+        Console.WriteLog(strs.size());
+        Console.WriteLog(strs.at(39));
+    }
+    {
+        var objs = new Vec<Tracked*>();
+        for (var k = 0; k < 20; k++) { objs.push(new Tracked(k)); }
+        Console.WriteLog(objs.size());
+        Console.WriteLog(objs.at(19).id);
+    }
+    Console.WriteLog("done");
+    return 0;
+}

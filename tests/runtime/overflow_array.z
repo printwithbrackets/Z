@@ -1,0 +1,10 @@
+// A heap array whose byte count wraps the allocator is refused with
+// `z: allocation size overflow` and exit 1, rather than handing back an
+// undersized block the fill below would write past. `new int[LONG_MAX]`
+// needs 8*LONG_MAX bytes, which wraps `size_t` on 64-bit, so the single
+// checked multiply in `z_newarray` fires before any allocation happens.
+int main() {
+    var a = new int[9223372036854775807];
+    Console.WriteLog(a.length);
+    return 0;
+}

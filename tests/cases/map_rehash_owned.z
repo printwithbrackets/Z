@@ -1,0 +1,52 @@
+// Map rehash with owning keys and values.
+//
+// Forces `Map.Rehash` (lib/collections.z:594-636) with owning types: string
+// keys, string values, and class-handle values. Each `set` past the 0.7 load
+// factor rehashes into a doubled table, moving every live entry with
+// `keys[j] = oldK[i]` / `vals[j] = oldV[i]` and then `drop_value` on the old
+// slots.
+//
+// Copy-then-drop analysis: for strings the move is a `str_dup` plus a free of
+// the old bytes, so the new table owns the new copies. For a class handle the
+// move is a pointer alias and `drop_value` is a no-op (codegen only releases
+// strings), so old and new tables share the objects and the old arrays leak
+// (a heap array Z cannot free yet). No double free, no use-after-free: the
+// counts and lookups below survive every rehash and run clean under ASan
+// apart from the expected leaks. No fix to `Rehash` is needed; see
+// tests/leaks/map_rehash_owned.z for the ASan gate.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    // String keys and string values, 50 entries: 16 -> 32 -> 64 -> 128 slots.
+    var ss = new Map<string, string>();
+    for (var i = 0; i < 50; i++) { ss.set("k" + i, "v" + i); }
+    Console.WriteLog(ss.size());            // 50
+    Console.WriteLog(ss.get("k0", "?"));    // v0
+    Console.WriteLog(ss.get("k49", "?"));   // v49
+    Console.WriteLog(ss.get("missing", "?")); // ?
+
+    // String keys, int values.
+    var si = new Map<string, int>();
+    for (var j = 0; j < 30; j++) { si.set("key " + j, j * 2); }
+    Console.WriteLog(si.size());            // 30
+    Console.WriteLog(si.get("key 7", 0 - 1)); // 14
+
+    // Int keys, string values.
+    var is_ = new Map<int, string>();
+    for (var k = 0; k < 30; k++) { is_.set(k, "val" + k); }
+    Console.WriteLog(is_.size());           // 30
+    Console.WriteLog(is_.get(29, "?"));     // val29
+
+    // Int keys, class-handle values: 50 entries force three rehashes. The
+    // objects stay reachable through the new table.
+    var objs = new Map<int, Tracked*>();
+    for (var m = 0; m < 50; m++) { objs.set(m, new Tracked(m)); }
+    Console.WriteLog(objs.size());          // 50
+    Console.WriteLog(objs.get(0, new Tracked(0 - 1)).id);   // 0
+    Console.WriteLog(objs.get(49, new Tracked(0 - 1)).id);  // 49
+    Console.WriteLog("done");
+    return 0;
+}

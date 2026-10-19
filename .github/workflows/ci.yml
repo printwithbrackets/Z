@@ -1,0 +1,32 @@
+# CI matrix for Z (installed as .github/workflows/ci.yml).
+# The full suite runs at every optimization level via `make test-all`, since a
+# pass that only runs at -O2/-O3 can miscompile with the default level showing
+# nothing wrong (see Makefile `test-all` comment + README "Known miscompiles").
+# `make test-all` loops -O0..-O3 via Z_TEST_OPT and fails on the first
+# non-zero exit. The ASan leak gate (`vec_string`, `map_string`,
+# `vec_grow_owned`, `map_rehash_owned`) runs inside `make test-asan` when the
+# toolchain supports `-fsanitize=address`, else reports `skip`.
+# The second axis builds the compiler itself under both gcc and clang, because
+# float codegen has diverged between backends before; the generated code is
+# still linked with the system `cc`.
+name: z-matrix
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build with ${{ matrix.cc }}
+        run: make -j$(nproc) CC=${{ matrix.cc }}
+      - name: test all opt levels with ${{ matrix.cc }}
+        run: make test-all CC=${{ matrix.cc }}
+      - name: asan leaks with ${{ matrix.cc }}
+        run: make test-asan CC=${{ matrix.cc }}
+      - name: clang-format
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang-format
+          clang-format --dry-run --Werror src/*.c src/*.h tests/run.c

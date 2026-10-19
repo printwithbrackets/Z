@@ -1,0 +1,58 @@
+// Vec grow with owning element types.
+//
+// Forces `Vec.Grow` (lib/collections.z:320-337) with nested owning types:
+// a `Vec<Vec<int>*>` (a vector of vectors, the reference-semantics case),
+// a `Vec<string>` (string elements are copied on store and released on grow),
+// and a `Vec<Tracked*>` (a class handle with a destructor).
+//
+// Copy-then-drop analysis (see task report): `Grow` copies each element with
+// `bigger[i] = data[i]` and then `drop_value(data[k])`. For `string` the copy
+// is a `str_dup` and the drop frees the old bytes, so the grown vector owns
+// the new copies and nothing leaks or aliases. For a class handle the copy is
+// a plain pointer alias and `drop_value` lowers to nothing (codegen only
+// releases strings), so the old and new buffers share the same objects and
+// the old buffer leaks (a heap array, which Z cannot free yet). There is no
+// double free and no use-after-free: the program below prints the right
+// values and runs clean under ASan (only the expected leaks remain).
+// No fix to `Grow` is needed; see tests/leaks/vec_grow_owned.z for the ASan
+// gate.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    // Nested vectors: 10 rows forces 8 -> 16 growth of the outer vector,
+    // and each inner vector grows 0 -> 5 on its own.
+    var grid = new Vec<Vec<int>*>();
+    for (var row = 0; row < 10; row++) {
+        var line = new Vec<int>();
+        for (var col = 0; col < 5; col++) { line.push(row * 10 + col); }
+        grid.push(line);
+    }
+    Console.WriteLog(grid.size());          // 10
+    Console.WriteLog(grid.at(0).at(0));     // 0
+    Console.WriteLog(grid.at(9).at(4));     // 94
+    Console.WriteLog(grid.at(5).size());    // 5
+    grid.at(0).push(99);
+    Console.WriteLog(grid.at(0).size());    // 6
+    Console.WriteLog(grid.at(0).at(5));     // 99
+
+    // Strings: 40 pushes force 8 -> 16 -> 32 -> 64 growth, exercising the
+    // copy-then-drop path for an owning element type.
+    var strs = new Vec<string>();
+    for (var i = 0; i < 40; i++) { strs.push("element " + i); }
+    Console.WriteLog(strs.size());          // 40
+    Console.WriteLog(strs.at(0));           // element 0
+    Console.WriteLog(strs.at(39));          // element 39
+
+    // Class handles: 20 pushes force 8 -> 16 -> 32 growth. The objects stay
+    // reachable through the new buffer; nothing is freed twice.
+    var objs = new Vec<Tracked*>();
+    for (var k = 0; k < 20; k++) { objs.push(new Tracked(k)); }
+    Console.WriteLog(objs.size());          // 20
+    Console.WriteLog(objs.at(0).id);        // 0
+    Console.WriteLog(objs.at(19).id);       // 19
+    Console.WriteLog("done");
+    return 0;
+}

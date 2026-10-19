@@ -45,6 +45,13 @@
  * **Fields and methods are not private.** Z has no visibility yet, so the
  * convention here is a comment and a leading capital for the few methods that
  * are plumbing (`grow`, `find`, `slotFor`, `rehash`). M13 makes it real.
+ *
+ * Two companions live beside this file. `lib/stack_queue.z` holds the `Stack`
+ * and `Queue` built on top of `Vec`, and `lib/math.z` holds the scalar
+ * integer helpers. Sorting and searching a vector stay with the caller: a
+ * free function naming `Vec<int>` breaks every unit declaring its own `Vec`,
+ * and a generic `sort<T>` would order class elements by identity, which is
+ * the wrong question the same way a generic `indexOf` would be.
  */
 
 /* The type codes `typeof` returns. These are the compiler's TypeKind values, in
@@ -126,6 +133,31 @@ class Vec<T> {
         return data[i];
     }
 
+    /* the first element, which dies on an empty vector rather than reading
+     * whatever the buffer holds, because an unchecked read is the wrong
+     * default in the same way it is for `at` */
+    T first() {
+        if (len == 0) {
+            Console.WriteLog("Vec.first on an empty vector");
+            die(1);
+        }
+        return data[0];
+    }
+
+    /* the last element, with the same empty check as `first` */
+    T last() {
+        if (len == 0) {
+            Console.WriteLog("Vec.last on an empty vector");
+            die(1);
+        }
+        return data[len - 1];
+    }
+
+    /* the C++ names for `first` and `last`, which are aliases and not second
+     * bodies so the two spellings cannot drift apart */
+    T front() { return this.first(); }
+    T back() { return this.last(); }
+
     /* Appends. Amortized O(1): the buffer doubles, so n appends copy n elements
      * in total rather than n squared. */
     void push(T v) {
@@ -153,6 +185,36 @@ class Vec<T> {
             data[len + i] = other.data[i];
         }
         len = len + other.len;
+    }
+
+    /* writes the element at `i`, with the same range check `at` performs, so a
+     * wrong index says which index and which length rather than writing past
+     * the live elements. a store releases the value it overwrites, which is
+     * what keeps this safe for a vector of strings */
+    void set(int i, T v) {
+        if (i < 0 || i >= len) {
+            Console.WriteLog("Vec index " + i + " out of range, length is " + len);
+            die(1);
+        }
+        data[i] = v;
+    }
+
+    /* exchanges the elements at `i` and `j`, after checking both, because a
+     * sort that swaps without checking is a sort that cannot say which index
+     * was wrong. the temporary is a copy, so each store releases what it
+     * overwrites and nothing is freed twice */
+    void swap(int i, int j) {
+        if (i < 0 || i >= len) {
+            Console.WriteLog("Vec index " + i + " out of range, length is " + len);
+            die(1);
+        }
+        if (j < 0 || j >= len) {
+            Console.WriteLog("Vec index " + j + " out of range, length is " + len);
+            die(1);
+        }
+        var t = data[i];
+        data[i] = data[j];
+        data[j] = t;
     }
 
     /* Removes and returns the last element. */
@@ -269,6 +331,41 @@ class Vec<T> {
 
     /* The first `n` elements, as a new vector. */
     Vec<T>* take(int n) { return this.slice(0, n); }
+
+    /* reverses the elements in place, without allocating, which is the form a
+     * caller wants when the original order is not needed afterwards. `slice`
+     * and `reversed` above are the copies for when it is */
+    void reverseInPlace() {
+        var i = 0;
+        var j = len - 1;
+        while (i < j) {
+            this.swap(i, j);
+            i++;
+            j--;
+        }
+    }
+
+    /* shortens the vector to `n` elements, releasing the ones left behind. a
+     * negative `n` empties it and anything past the end is a no-op, because
+     * growing is `reserve` and not this. the released slots are blanked as
+     * they go, which is what makes refilling them afterwards safe */
+    void truncate(int n) {
+        if (n < 0) { n = 0; }
+        if (n >= len) { return; }
+        for (var t = n; t < len; t++) { drop_value(data[t]); }
+        len = n;
+    }
+
+    /* a deep copy with its own buffer, so pushing to one leaves the other
+     * alone. this is the explicit copy the class decision asks for, since a
+     * plain assignment shares the vector rather than copying it */
+    Vec<T>* clone() {
+        var out = new Vec<T>();
+        out.reserve(len);
+        for (var i = 0; i < len; i++) { out.push(data[i]); }
+        /* handed over rather than destroyed on the way out. see `reversed`. */
+        return move out;
+    }
 
     /* Room for `n` elements in total, without changing the length. The way to
      * pre-size a vector that is about to be filled, and the replacement for a
@@ -504,6 +601,28 @@ class Map<K,V> {
         used = 0;
     }
 
+    /* inserts every entry of `other` into this map, overwriting on collision,
+     * so the other map wins where both hold a key. reading rather than moving,
+     * which is why `other` is still whole afterwards */
+    void merge(Map<K,V>* other) {
+        for (var i = 0; i < other.cap; i++) {
+            if (other.state[i] == 1) { this.set(other.keys[i], other.vals[i]); }
+        }
+    }
+
+    /* a copy with its own tables, so writing to one leaves the other alone.
+     * built with `reserve` up front rather than one growth at a time, because
+     * the size is already known */
+    Map<K,V>* clone() {
+        var out = new Map<K,V>();
+        out.reserve(len);
+        for (var i = 0; i < cap; i++) {
+            if (state[i] == 1) { out.set(keys[i], vals[i]); }
+        }
+        /* handed over rather than destroyed on the way out. see `reversed`. */
+        return move out;
+    }
+
     /* The keys, in slot order.
      *
      * Neither insertion order nor sorted, and neither is free: insertion order
@@ -692,6 +811,50 @@ class Set<T> {
 
     bool remove(T v) { return inner.remove(v); }
     void clear() { inner.clear(); }
+
+    /* a copy with its own table, so adding to one leaves the other alone */
+    Set<T>* clone() {
+        var out = new Set<T>();
+        var vs = this.values();
+        for (var i = 0; i < vs.size(); i++) { out.add(vs.at(i)); }
+        /* handed over rather than destroyed on the way out. see `reversed`. */
+        return move out;
+    }
+
+    /* adds every element of `other` to this one, which is the in place union.
+     * cloning first is how a caller keeps both inputs, since this mutates */
+    void unionWith(Set<T>* other) {
+        var vs = other.values();
+        for (var i = 0; i < vs.size(); i++) { this.add(vs.at(i)); }
+    }
+
+    /* keeps only the elements that are also in `other`. the loop walks a
+     * snapshot rather than the set itself, because removing while walking the
+     * live table would move the entries under the walk */
+    void intersectWith(Set<T>* other) {
+        var vs = this.values();
+        for (var i = 0; i < vs.size(); i++) {
+            if (!other.has(vs.at(i))) { this.remove(vs.at(i)); }
+        }
+    }
+
+    /* removes every element of `other` from this one, which is the set
+     * difference. like above this walks a snapshot of the other set */
+    void subtract(Set<T>* other) {
+        var vs = other.values();
+        for (var i = 0; i < vs.size(); i++) { this.remove(vs.at(i)); }
+    }
+
+    /* true when every element of this set is also in `other`. the flipped
+     * form of `containsAll`, which reads the other way round and is the one a
+     * caller reaches for when the smaller set is on the left */
+    bool isSubsetOf(Set<T>* other) {
+        var vs = this.values();
+        for (var i = 0; i < vs.size(); i++) {
+            if (!other.has(vs.at(i))) { return false; }
+        }
+        return true;
+    }
 
     /* The elements, in slot order -- the order keysOf gives, because it is the
      * same Map underneath. */

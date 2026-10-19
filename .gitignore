@@ -2,12 +2,21 @@
 *.o
 *.d
 /z
+/gzz
 /tests/run
 # Generated from runtime/z_rt.c by the Makefile
 /src/runtime_src.h
+# Generated from lib/*.z by the Makefile
+/src/std_src.h
+/tests/run.d
 
 # Compiler output
 *.s
 *.out
 # Embedded runtime temp files
 /tmp/z_*
+
+# A mistyped relative path creates a literal `..../` directory. It is never
+# source -- only a place a stale compiler binary or stray output landed -- so it
+# is ignored rather than committed by accident.
+/..../

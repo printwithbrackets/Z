@@ -14,8 +14,16 @@ struct ArenaBlock {
     size_t used;     /* bytes consumed from this block */
 };
 
-/* Rounds n up to the next multiple of ARENA_ALIGN. */
-static size_t align_up(size_t n) { return (n + (ARENA_ALIGN - 1)) & ~(size_t)(ARENA_ALIGN - 1); }
+/* Rounds n up to the next multiple of ARENA_ALIGN. Aborts on wrap: without
+ * the check a huge n would wrap to a small need and hand back an undersized
+ * block. */
+static size_t align_up(size_t n) {
+    if (n > SIZE_MAX - (ARENA_ALIGN - 1)) {
+        fprintf(stderr, "z: allocation size overflow\n");
+        exit(1);
+    }
+    return (n + (ARENA_ALIGN - 1)) & ~(size_t)(ARENA_ALIGN - 1);
+}
 
 /* Byte size of the header including its trailing alignment padding. */
 static size_t header_size(void) { return align_up(sizeof(ArenaBlock)); }
@@ -30,7 +38,15 @@ void *arena_alloc(Arena *arena, size_t size) {
     ArenaBlock *b = arena->head;
     if (b == NULL || b->capacity - b->used < need) {
         size_t block = need > ARENA_MIN_BLOCK ? need : ARENA_MIN_BLOCK;
-        ArenaBlock *nb = malloc(sizeof *nb + header_size() + block);
+        size_t hdr = header_size();
+        /* The malloc size itself must not wrap: need is already range-checked
+         * by align_up, but adding the header could still overflow for a need
+         * near SIZE_MAX. */
+        if (block > SIZE_MAX - sizeof *b - hdr) {
+            fprintf(stderr, "z: allocation size overflow\n");
+            exit(1);
+        }
+        ArenaBlock *nb = malloc(sizeof *nb + hdr + block);
         if (nb == NULL) {
             fprintf(stderr, "z: out of memory\n");
             exit(1);
@@ -61,6 +77,10 @@ void *arena_alloc_array(Arena *arena, size_t count, size_t size) {
 char *arena_strdup(Arena *arena, const char *s) { return arena_strndup(arena, s, strlen(s)); }
 
 char *arena_strndup(Arena *arena, const char *s, size_t n) {
+    if (n == SIZE_MAX) {
+        fprintf(stderr, "z: allocation size overflow\n");
+        exit(1);
+    }
     char *p = arena_alloc(arena, n + 1);
     if (p == NULL)
         return NULL;

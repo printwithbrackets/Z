@@ -6,7 +6,8 @@
 " the decoder in lex_string_escape() there, the builtins mirror
 " Z_INTRINSIC_LIST and Z_BUILTIN_LIST in src/limits.h, the duration units mirror
 " duration_unit_us() in src/lexer.c, and the surface names mirror the defaults
-" in surface_new() (src/surface.c).
+" in surface_new() (src/surface.c). Keep the builtin list below in sync with
+" Z_INTRINSIC_LIST and Z_BUILTIN_LIST in src/limits.h by hand.
 "
 " NOTE 1: `:syn` does not support line continuation, so every item is one line.
 " NOTE 2: every pattern is in single quotes. In a double-quoted Vim string `\<`
@@ -59,14 +60,24 @@ syn match   zKeyword  '\%(\.\)\@<!\<\%(base\|get\|set\)\>\ze\s*[;(]'
 syn match   zFunction '\<print\>\ze\s*('
 " C#-style declarations put the type first: `int fib(`, `T maxOf<T>(`.
 syn match   zFunction '\%(\%(\<\%(int\|bool\|string\|float\|void\)\>\|\<\u\w*\)\>\s\+\)\@<=\h\w*\%(\s*<[^<>]*>\)\=\ze\s*('
+" Rust-style declarations put `fn` first: `fn fib(`, `fn maxOf<T>(`.
+syn match   zFunction '\%(\<fn\>\s\+\)\@<=\h\w*\%(\s*<[^<>]*>\)\=\ze\s*('
 " Operator overloads are spelled `op_Add`, `op_Mul`, ...
 syn match   zFunction '\<op_\w\+\>'
+" An all-caps member is a constant: `net.PORT`. The rule sits before the
+" method-call rule below it on purpose: a call that happens to be all caps
+" (`.GET(`) starts at the same column as this rule, and at a tie the rule
+" defined later wins, so the call must come after to keep the bracket reading
+" as a call rather than a large constant.
+syn match   zConstant '\.\zs\<[A-Z][A-Z0-9_]*\>'
 " Method calls: `.Sum(` -- `\zs` keeps the dot out of the highlight.
 syn match   zFunction '\.\zs\h\w*\ze\s*('
 syn match   zProperty '\.\zslength\>'
 " `new Point(1, 2)` instantiates a type, so colour the name as one. Defined
-" after the call rules so it wins the tie with them.
+" after the call rules so it wins the tie with them. The qualified form --
+" `new netlink.Lobby(3)` -- colours the whole path, for the same reason.
 syn match   zTypeName '\%(\<new\>\s\+\)\@<=\<\u\w*\>'
+syn match   zTypeName '\%(\<new\>\s\+\)\@<=\h\w*\%(\.\w\+\)\+\ze\s*('
 " A destructor declaration is `~Type(`. The `~` has to be written `\~`, or it is
 " the previous-substitute atom rather than the character, and the name has to
 " follow it so `~5` still reads as the bitwise-not operator.
@@ -77,6 +88,17 @@ syn match   zDestructor '\%(\.\)\@<!\~\zs\u\w*'
 " `gvar`/`lvar` and the g/l-prefixed form of every type name.
 syn match zGlobal '\<\%(g\%(var\|int\|bool\|string\|float\|auto\)\|g\u\w*\)\>'
 syn match zLocal  '\<\%(l\%(var\|int\|bool\|string\|float\|auto\)\|l\u\w*\)\>'
+" Namespaces and import aliases. A keyword that has already matched can never
+" start another match, so `namespace net` and `import "x" as y` chain forward
+" with nextgroup instead: the name after `namespace` is a type-level scope,
+" dotted (`a.b`) or not. `as` is only special on an import line -- everywhere
+" else it stays an ordinary identifier.
+syn keyword zNsDecl namespace nextgroup=zNsName skipwhite skipempty
+syn match zNsName '\h\w*\%(\.\h\w*\)*' contained
+" The import block sits after the string regions below: an import path starts
+" with the same `"` as zString and zString is defined later, so zImportPath has
+" no chance until it comes after it. Without the move the alias chain dies at
+" the path and `import ... as alias` highlights nothing after the path.
 " `gvar(x)`, `var(x)`, `lvar(x)`: the same words followed by a parenthesis,
 " which is how a reader tells a declaration from the name of a tier. `\ze`
 " leaves the bracket out of the highlight.
@@ -106,9 +128,17 @@ syn match   zEscape '\\\%(x\x\x\|u\x\x\x\x\|[ntr0\\{}"]\)'
 " effect here, and the lists are the only thing keeping holes nestable.
 syn region zInterpString matchgroup=zStringQuote start=+\$"+ end=+"+ contains=zEscape,zInterpHole
 syn region zString matchgroup=zStringQuote start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=zEscape
-syn region zInterpHole matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment,zInterpHole2
-syn region zInterpHole2 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment,zInterpHole3
-syn region zInterpHole3 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zDestructor,zOperator,zDelimiter,zComment
+syn region zInterpHole matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zConstant,zDestructor,zOperator,zDelimiter,zComment,zInterpHole2
+syn region zInterpHole2 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zConstant,zDestructor,zOperator,zDelimiter,zComment,zInterpHole3
+syn region zInterpHole3 matchgroup=zInterpDelim start=+{+ end=+}+ contained contains=zType,zTypeName,zBoolean,zStorageClass,zConditional,zRepeat,zStatement,zReturn,zModifier,zKeyword,zNumber,zFloat,zDuration,zString,zInterpString,zEscape,zFunction,zProperty,zBuiltin,zGlobal,zLocal,zTierRef,zConstant,zDestructor,zOperator,zDelimiter,zComment
+
+" Import aliases, defined after the string regions so `import "x.z" as y`
+" chains through the path: the alias that follows the path only highlights
+" while the whole chain survives.
+syn keyword zImportKw import nextgroup=zImportPath skipwhite skipempty
+syn region zImportPath start=+"+ skip=+\\\\\|\\"+ end=+"+ contained nextgroup=zImportAs skipwhite skipempty
+syn match zImportAs '\<as\>' contained nextgroup=zImportAlias skipwhite skipempty
+syn match zImportAlias '\h\w*' contained
 
 " Comments come last: `//` and `/*` start at the same column as the `/`
 " operator, and whichever is defined last is the one that wins.
@@ -132,8 +162,8 @@ syn keyword zConditional if else
 syn keyword zRepeat      while for foreach
 syn keyword zStatement   in match
 syn keyword zReturn      return break continue
-syn keyword zModifier    virtual override extern export move
-syn keyword zKeyword     new struct class interface enum this import
+syn keyword zModifier    virtual override extern export move mut
+syn keyword zKeyword     new struct class interface enum this
 
 syn sync minlines=50
 syn sync maxlines=200
@@ -149,6 +179,7 @@ hi def link zNumber          Number
 hi def link zFloat           Float
 hi def link zDuration        Number
 hi def link zBoolean         Boolean
+hi def link zConstant        Constant
 hi def link zType            Type
 hi def link zTypeName        Type
 hi def link zStorageClass    StorageClass
@@ -158,6 +189,12 @@ hi def link zRepeat          Repeat
 hi def link zStatement       Statement
 hi def link zReturn          Statement
 hi def link zKeyword         Keyword
+hi def link zNsDecl           Keyword
+hi def link zNsName            Type
+hi def link zImportKw          Keyword
+hi def link zImportPath        String
+hi def link zImportAs          Keyword
+hi def link zImportAlias       Type
 hi def link zFunction        Function
 hi def link zProperty        Identifier
 hi def link zBuiltin         Function

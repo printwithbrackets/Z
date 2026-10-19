@@ -1,0 +1,4 @@
+// `import "file.z" as` with no alias after it must be a diagnostic, not a
+// silent splice that leaves the bare `as` behind as a stray token.
+import "import_as_lib.z" as
+fn main() -> int { return 0 }

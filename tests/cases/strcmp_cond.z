@@ -1,0 +1,57 @@
+// String comparison in conditions compares content, not pointers.
+//
+// The branch fast path used to emit a raw pointer compare whenever both sides
+// were locals, so two equal strings in different allocations read as different
+// exactly when the same spelling as a call argument compared correctly. Every
+// shape below failed before the fix when both sides were locals holding heap
+// strings: copies, concatenations, elements read out of a vector, and
+// parameters handed to a function.
+bool same(string a, string b) {
+    if (a == b) { return true; }
+    return false;
+}
+
+int main() {
+    var a = "apple";
+    var b = "apple";
+    if (a == b) { Console.WriteLog(1); } else { Console.WriteLog(0); }   // 1
+    if (a != b) { Console.WriteLog(1); } else { Console.WriteLog(0); }   // 0
+    if (a < b) { Console.WriteLog(1); } else { Console.WriteLog(0); }    // 0
+    if (a <= b) { Console.WriteLog(1); } else { Console.WriteLog(0); }   // 1
+
+    /* a copy lives in a different allocation with the same bytes, which is
+     * the case a pointer compare gets wrong */
+    var c = "apple";
+    var d = c;
+    if (c == d) { Console.WriteLog(1); } else { Console.WriteLog(0); }   // 1
+    if (d == "apple") { Console.WriteLog(1); } else { Console.WriteLog(0); } // 1
+
+    /* a concatenation is never the same allocation as a literal */
+    var e = "a" + "pple";
+    if (a == e) { Console.WriteLog(1); } else { Console.WriteLog(0); }   // 1
+    if (e == "apricot") { Console.WriteLog(1); } else { Console.WriteLog(0); } // 0
+    if (e < "apricot") { Console.WriteLog(1); } else { Console.WriteLog(0); }  // 1
+    if ("apricot" < e) { Console.WriteLog(1); } else { Console.WriteLog(0); }  // 0
+
+    /* elements read out of a vector are heap strings on both sides */
+    var v = new Vec<string>();
+    v.push("pear");
+    v.push("pear");
+    var first = v.at(0);
+    var second = v.at(1);
+    if (first == second) { Console.WriteLog(1); } else { Console.WriteLog(0); } // 1
+
+    /* parameters are locals too, so the same shape through a call */
+    Console.WriteLog(same("pear", "pear"));     // true
+    Console.WriteLog(same("pear", "plum"));     // false
+
+    /* a string condition driving a loop, not just a branch */
+    var n = 0;
+    var s = "go";
+    while (s == "go") {
+        n = n + 1;
+        if (n >= 3) { s = "stop"; }
+    }
+    Console.WriteLog(n);                        // 3
+    return 0;
+}

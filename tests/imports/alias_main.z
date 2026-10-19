@@ -1,0 +1,15 @@
+// Aliased imports: `import "lib/netalias.z" as net` parses the file as if it
+// had been written inside `namespace net`, so its declarations arrive
+// qualified and cannot collide with same-named locals.
+import "lib/netalias.z" as net;
+
+fn openLobby(int n) -> int { return n + 1; }
+
+fn main() -> int {
+    var l = new net.Lobby(21);
+    Console.WriteLog(l.Count());          // 21
+    Console.WriteLog(net.openLobby(20));  // 40, the library's, not the local's
+    Console.WriteLog(openLobby(20));      // 21, the local one
+    Console.WriteLog(net.PORT);           // 8080
+    return 0;
+}

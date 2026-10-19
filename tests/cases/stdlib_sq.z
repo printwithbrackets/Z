@@ -1,0 +1,120 @@
+// The container extras: Vec first/last/set/swap/reverse/truncate/clone,
+// Map merge/clone, Set algebra, and the Stack and Queue containers.
+//
+// Map and Set iteration order is slot order rather than anything meaningful,
+// so this case asserts on sizes and membership rather than on printed order.
+int main() {
+    /* ---- Vec: ends ---- */
+    var v = new Vec<int>();
+    for (var i = 0; i < 5; i++) { v.push(i * 10); }
+    Console.WriteLog(v.first());              // 0
+    Console.WriteLog(v.last());               // 40
+    Console.WriteLog(v.front());              // 0 -- the C++ spelling
+    Console.WriteLog(v.back());               // 40 -- the C++ spelling
+
+    /* ---- Vec: set and swap ---- */
+    v.set(0, 99);
+    Console.WriteLog(v.first());              // 99
+    v.swap(0, 4);
+    Console.WriteLog(v.first());              // 40
+    Console.WriteLog(v.last());               // 99
+
+    /* ---- Vec: reverse in place, then truncate ---- */
+    v.reverseInPlace();
+    Console.WriteLog(v.join(","));            // 99,30,20,10,40
+    v.truncate(3);
+    Console.WriteLog(v.join(","));            // 99,30,20
+    Console.WriteLog(v.size());               // 3
+    v.truncate(99);
+    Console.WriteLog(v.size());               // 3 -- growing is not its job
+
+    /* ---- Vec: clone is a copy, not a second handle ---- */
+    var c = v.clone();
+    c.push(7);
+    Console.WriteLog(v.size());               // 3
+    Console.WriteLog(c.size());               // 4
+    Console.WriteLog(c.last());               // 7
+
+    /* ---- Map: merge and clone ---- */
+    var a = new Map<string, int>();
+    a.set("x", 1);
+    a.set("y", 2);
+    var b = new Map<string, int>();
+    b.set("y", 20);
+    b.set("z", 3);
+    a.merge(b);
+    Console.WriteLog(a.size());               // 3
+    Console.WriteLog(a.get("y", -1));         // 20 -- the other map wins
+    Console.WriteLog(a.get("z", -1));         // 3
+    Console.WriteLog(b.size());               // 2 -- merging reads, it does not move
+    var ac = a.clone();
+    ac.set("x", 100);
+    Console.WriteLog(a.get("x", -1));         // 1
+    Console.WriteLog(ac.get("x", -1));        // 100
+
+    /* ---- Set: union, intersection, difference, subset ---- */
+    var s = new Set<int>();
+    s.add(1);
+    s.add(2);
+    s.add(3);
+    var t = new Set<int>();
+    t.add(3);
+    t.add(4);
+    var u = s.clone();
+    u.unionWith(t);
+    Console.WriteLog(u.size());               // 4
+    Console.WriteLog(u.has(1));               // true
+    Console.WriteLog(u.has(4));               // true
+    var n = s.clone();
+    n.intersectWith(t);
+    Console.WriteLog(n.size());               // 1
+    Console.WriteLog(n.has(3));               // true
+    var d = s.clone();
+    d.subtract(t);
+    Console.WriteLog(d.size());               // 2
+    Console.WriteLog(d.has(3));               // false
+    Console.WriteLog(t.isSubsetOf(u));        // true
+    Console.WriteLog(s.isSubsetOf(t));        // false
+    Console.WriteLog(s.size());               // 3 -- the inputs are untouched
+    Console.WriteLog(t.size());               // 2
+
+    /* ---- Stack: last in, first out ---- */
+    var st = new Stack<int>();
+    Console.WriteLog(st.isEmpty());           // true
+    st.push(1);
+    st.push(2);
+    st.push(3);
+    Console.WriteLog(st.size());              // 3
+    Console.WriteLog(st.peek());              // 3
+    Console.WriteLog(st.top());               // 3 -- the C++ spelling
+    Console.WriteLog(st.pop());               // 3
+    Console.WriteLog(st.pop());               // 2
+    Console.WriteLog(st.size());              // 1
+    st.clear();
+    Console.WriteLog(st.isEmpty());           // true
+
+    /* ---- Queue: first in, first out ---- */
+    var q = new Queue<string>();
+    q.enqueue("a");
+    q.enqueue("b");
+    q.enqueue("c");
+    Console.WriteLog(q.size());               // 3
+    Console.WriteLog(q.peek());               // a
+    Console.WriteLog(q.dequeue());            // a
+    Console.WriteLog(q.dequeue());            // b
+    q.enqueue("d");
+    q.enqueue("e");
+    Console.WriteLog(q.dequeue());            // c
+    Console.WriteLog(q.dequeue());            // d
+    Console.WriteLog(q.size());               // 1
+    Console.WriteLog(q.peek());               // e
+    /* enough traffic to force the head-index compaction, then drain it.
+     * one element plus a hundred more is a hundred and one, so a hundred
+     * dequeues leave the last one enqueued rather than the first */
+    for (var k = 0; k < 100; k++) { q.enqueue(int_to_string(k)); }
+    for (var m = 0; m < 100; m++) { q.dequeue(); }
+    Console.WriteLog(q.size());               // 1
+    Console.WriteLog(q.dequeue());            // 99
+    Console.WriteLog(q.isEmpty());            // true
+    return 0;
+}

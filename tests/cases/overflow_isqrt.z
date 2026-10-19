@@ -1,0 +1,26 @@
+// Integer edge semantics that do NOT overflow: exact answers.
+//
+// `sqrt` is an exact integer root; `sqrt(n)` with n < 2 returns n, so
+// `sqrt(-1)` is -1 (see intrinsics.z). `z_isqrt` uses `hi <= n/hi` so
+// `sqrt(LONG_MAX)` is exact (3037000499). `gcd`/`lcm` are sign-insensitive
+// and unsigned internally, so LONG_MIN needs no special case except the two
+// whose magnitude does not fit: `gcd(LONG_MIN,0)` is LONG_MIN and
+// `lcm(LONG_MIN,2)` overflows (see tests/runtime/overflow_lcm.z).
+// LONG_MIN is spelled `0 - 9223372036854775807 - 1` because the literal
+// 9223372036854775808 does not fit in `int`.
+int main() {
+    Console.WriteLog(sqrt(0 - 1));              // -1 (n < 2 returns n)
+    Console.WriteLog(sqrt(0 - 4));              // -4
+    Console.WriteLog(sqrt(9223372036854775807)); // 3037000499
+    var m = 0 - 9223372036854775807 - 1;
+    Console.WriteLog(sqrt(m));                  // LONG_MIN (n < 2 returns n)
+    Console.WriteLog(m);                        // -9223372036854775808
+    Console.WriteLog(gcd(m, 12));               // 4
+    Console.WriteLog(gcd(m, 0));                // -9223372036854775808
+    Console.WriteLog(gcd(0, 0));                // 0
+    Console.WriteLog(lcm(0, 5));                // 0
+    Console.WriteLog(lcm(4, 6));                // 12
+    Console.WriteLog(lcm(m, 0));                // 0
+    Console.WriteLog(abs(m));                   // -9223372036854775808 (wraps)
+    return 0;
+}

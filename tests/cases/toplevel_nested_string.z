@@ -1,0 +1,12 @@
+// Top-level statements are gathered into a synthesized entry function, but the
+// same statement nodes also stay in the program's item list. The destructor pass
+// walked both, so each block's drops were appended twice and a string slot in a
+// loop body was released twice -- `double free in tcache` before anything
+// printed. The output is checked byte for byte and the harness insists the
+// program exits zero, so a double free cannot pass by printing the right text
+// first.
+for (var y = 0; y < 3; y++) {
+    var row = "";
+    for (var x = 0; x < 4; x++) { row = row + "."; }
+    Console.WriteLog(row);
+}

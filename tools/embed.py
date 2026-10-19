@@ -63,6 +63,14 @@ def fragments(escaped: str, width: int) -> list:
     return out
 
 
+def table_lines(items):
+    """One entry per line, inside a `clang-format off` guard: the only layout
+    that stays under the column limit for any number of files. clang-format
+    would otherwise repack short tables onto shared lines, so its exact
+    spacing would have to be replicated here to stay clean."""
+    return ["    %s," % it for it in items]
+
+
 def main() -> int:
     prefix, paths = sys.argv[1], sys.argv[2:]
     if not paths:
@@ -82,10 +90,16 @@ def main() -> int:
         for n, chunk in enumerate(chunks):
             tail = ";" if n == len(chunks) - 1 else ""
             print('    "%s"%s' % (chunk, tail))
-    print('static const char *const %s_names[] = {%s};'
-          % (prefix, ", ".join('"%s"' % p for p in paths)))
-    print("static const char *const %s_srcs[] = {%s};"
-          % (prefix, ", ".join("%s_%d" % (prefix, i) for i in range(len(paths)))))
+    print("// clang-format off: table layout is fixed by the generator, not the formatter")
+    print("static const char *const %s_names[] = {" % prefix)
+    for line in table_lines(['"%s"' % p for p in paths]):
+        print(line.rstrip())
+    print("};")
+    print("static const char *const %s_srcs[] = {" % prefix)
+    for line in table_lines(["%s_%d" % (prefix, i) for i in range(len(paths))]):
+        print(line.rstrip())
+    print("};")
+    print("// clang-format on")
     print("#define %s_COUNT %d" % (prefix, len(paths)))
     return 0
 

@@ -7,6 +7,7 @@
  * about caret rendering or exact column numbers). */
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,6 +324,10 @@ int main(int argc, char **argv) {
         "strings2",
         "collections",
         "collections2",
+        "stdlib_sq",
+        "stdlib_math",
+        "stdlib_str",
+        "strcmp_cond",
         "frame_layout",
         "bitwise",
         "consts",
@@ -362,6 +367,10 @@ int main(int argc, char **argv) {
         "destructors",
         "strreturn",
         "return_param",
+        "fall_off_main",
+        "toplevel_nested_string",
+        "toplevel_input_local",
+        "loop_break_before_decl",
         "gvar_lvar",
         "stdin",
         "surface",
@@ -382,6 +391,21 @@ int main(int argc, char **argv) {
         "capture_param_spill",
         "capture_drop_box",
         "mangle_collision",
+        "vec_grow_owned",
+        "map_rehash_owned",
+        "dtor_break",
+        "dtor_continue",
+        "dtor_qmark",
+        "gvar_string_init",
+        "map_tombstone_stress",
+        "overflow_isqrt",
+        "temp_fuzz",
+        "field_drop_gap",
+        "namespace",
+        "optional_semi",
+        "optional_semi_forward",
+        "optional_semi_user_type",
+        "generic_field_dup",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
         snprintf(path, sizeof path, "%s/%s.z", case_dir, cases[i]);
@@ -464,7 +488,8 @@ int main(int argc, char **argv) {
      * the status was never read. Keeping it here rather than deleting it is what
      * stops that fix from being undone silently, because a harness that folded a
      * signal back into a success would fail this case and nothing else. */
-    static const char *exits[] = {"mainret", "stack_overflow", "null_deref"};
+    static const char *exits[] = {"mainret", "stack_overflow", "null_deref", "null_field",
+                                  "null_arrlen"};
     const char *ex_dir = "tests/exits";
     char exit_out[256];
     for (size_t i = 0; i < sizeof exits / sizeof *exits; i++) {
@@ -524,10 +549,10 @@ int main(int argc, char **argv) {
         "type_mismatch",
         "dup_struct_method",
         "bare_return_nonvoid",
+        "missing_return",
         "new_zero_array",
         "str_buf_use_after_move",
         "var_init_type",
-        "missing_semi",
         "unknown_func",
         "bad_condition",
         "arity",
@@ -580,7 +605,6 @@ int main(int argc, char **argv) {
         "lambda_fn_return",
         "lambda_in_lambda",
         "nested_fn_capture",
-        "semicolon_at_eof",
         "hold_arity",
         "hold_argtype",
         "fn_reads_toplevel_var",
@@ -601,6 +625,12 @@ int main(int argc, char **argv) {
         "enclosing_fn",
         "sig_note",
         "argtype_note",
+        "gvar_forward_ref",
+        "duplicate_main",
+        "lvar_top_level",
+        "namespace_member",
+        "import_as",
+        "export_no_body_fn",
     };
     for (size_t i = 0; i < sizeof(errs) / sizeof(*errs); i++) {
         snprintf(path, sizeof path, "%s/%s.z", err_dir, errs[i]);
@@ -1195,8 +1225,9 @@ int main(int argc, char **argv) {
      * the check happens, and a build with checks off by default passed them
      * either way. */
     static const char *aborts[] = {
-        "bounds_read",        "bounds_write",  "bounds_negative",
-        "bounds_runtime_len", "bounds_string", "bounds_in_loop",
+        "bounds_read",    "bounds_write",    "bounds_negative", "bounds_runtime_len",
+        "bounds_string",  "bounds_in_loop",  "vec_pop_empty",   "vec_remove_empty",
+        "overflow_array", "overflow_repeat", "overflow_lcm",
     };
     for (size_t i = 0; i < sizeof aborts / sizeof aborts[0]; i++) {
         snprintf(path, sizeof path, "%s/%s.z", rt_dir, aborts[i]);
@@ -1286,7 +1317,8 @@ int main(int argc, char **argv) {
      * container is still live at exit and the report is not empty. Only the
      * string blocks are asserted about, which is the part a container's
      * destructor is responsible for. */
-    static const char *leaks[] = {"vec_string", "map_string"};
+    static const char *leaks[] = {"vec_string", "map_string", "vec_grow_owned", "map_rehash_owned",
+                                  "nested_reassign"};
     const char *lk_dir = "tests/leaks";
     if (asan_available(zq)) {
         char leak_out[256];
@@ -1433,6 +1465,7 @@ int main(int argc, char **argv) {
      * through its own marker rather than by an import. */
     static const char *modules[] = {
         "imports/import_main",
+        "imports/alias_main",
         "project/project_main",
     };
     for (size_t i = 0; i < sizeof modules / sizeof modules[0]; i++) {
@@ -1454,6 +1487,85 @@ int main(int argc, char **argv) {
         }
         printf("ok   %s (modules)\n", modules[i]);
         pass++;
+    }
+
+    /* Import depth. A chain with no cycle of its own still grows the loading
+     * stack link by link, and a pathological tree has no other bound to hit --
+     * so the chain has to report itself as too deep rather than build. The
+     * chain is generated at run time because a committed copy of 150 files
+     * would spend the repository on one assertion. */
+    {
+        char ddir[192];
+        snprintf(ddir, sizeof ddir, "/tmp/z_test_import_depth_%ld", (long)getpid());
+        int ok = mkdir(ddir, 0777) == 0 || errno == EEXIST;
+        if (ok) {
+            char chainfile[256];
+            /* One link more than the file-chain needs to run the cap out: 129
+             * files would pass a cap of 128 by a hair. The leaf declares a
+             * function, so a truncated chain would fail on a missing symbol
+             * rather than silently succeed. */
+            enum { ZCHAIN = 130 };
+            for (int n = ZCHAIN - 1; n >= 1; n--) {
+                snprintf(chainfile, sizeof chainfile, "%s/d%d.z", ddir, n);
+                FILE *f = fopen(chainfile, "wb");
+                if (f == NULL) {
+                    fprintf(stderr, "FAIL import_depth (cannot write %s)\n", chainfile);
+                    ok = 0;
+                    break;
+                }
+                int rc;
+                if (n == ZCHAIN - 1)
+                    rc = fprintf(f, "int leaf(int x) => x\n");
+                else
+                    rc = fprintf(f, "import \"d%d.z\"\n", n + 1);
+                fclose(f);
+                if (rc < 0) {
+                    fprintf(stderr, "FAIL import_depth (cannot write %s)\n", chainfile);
+                    ok = 0;
+                    break;
+                }
+            }
+            if (ok) {
+                snprintf(chainfile, sizeof chainfile, "%s/main.z", ddir);
+                FILE *f = fopen(chainfile, "wb");
+                if (f == NULL ||
+                    fprintf(f, "import \"d1.z\"\nfn main() -> int { return leaf(2) }\n") < 0) {
+                    if (f)
+                        fclose(f);
+                    fprintf(stderr, "FAIL import_depth (cannot write main.z)\n");
+                    ok = 0;
+                } else {
+                    fclose(f);
+                    char actual[1 << 16];
+                    snprintf(cmd, sizeof cmd, "%s build %s -o %s 2>&1", zq, chainfile, test_bin);
+                    int rc = run_cmd_capture(cmd, actual, sizeof actual);
+                    if (rc == 0) {
+                        fprintf(stderr, "FAIL import_depth (a %d-link chain was accepted)\n",
+                                ZCHAIN - 1);
+                        ok = 0;
+                    } else if (strstr(actual, "more than 128 chained imports") == NULL) {
+                        fprintf(stderr, "FAIL import_depth (missing the depth diagnostic)\n%s\n",
+                                actual);
+                        ok = 0;
+                    }
+                }
+            }
+            /* The chain directory has a lifetime of this one assertion, and a
+             * chain the run leaves behind is 130 files of the next suite's tmp. */
+            for (int n = ZCHAIN - 1; n >= 1; n--) {
+                snprintf(chainfile, sizeof chainfile, "%s/d%d.z", ddir, n);
+                unlink(chainfile);
+            }
+            snprintf(chainfile, sizeof chainfile, "%s/main.z", ddir);
+            unlink(chainfile);
+            rmdir(ddir);
+        }
+        if (ok) {
+            printf("ok   import_depth (chained imports are capped at 128)\n");
+            pass++;
+        } else {
+            fail++;
+        }
     }
 
     /* A project with two entry points.

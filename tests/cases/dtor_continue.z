@@ -1,0 +1,24 @@
+// Destructor on `continue`: drops run when an iteration is skipped.
+//
+// Same note as dtor_break.z: README:54-59 says `continue` does not unwind,
+// but it does now (`build_drops_to` + `destructors.z` `jumps` case). Each
+// iteration owns a `Tracked`; `continue` must drop the current iteration's
+// value and the next iteration must still run with a fresh one.
+//
+// Verified passing 2026-10-11; no xfail in the harness, so this is golden.
+// A regression to the README behavior would drop only at loop end, merging
+// the three `drop` lines into one place after the loop.
+class Tracked {
+    int id;
+    Tracked(int v) { this.id = v; }
+    ~Tracked() { Console.WriteLog("drop " + this.id); }
+}
+int main() {
+    for (var i = 0; i < 3; i = i + 1) {
+        var owned = new Tracked(20 + i);
+        if (i == 1) { continue; }
+        Console.WriteLog("iter " + i);
+    }
+    Console.WriteLog("after continue");
+    return 0;
+}

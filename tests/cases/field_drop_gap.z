@@ -1,0 +1,35 @@
+// KNOWN GAP, documented rather than fixed: a class that owns a string field
+// but declares no destructor of its own is skipped by `build_drops`
+// (src/parser.c: `struct_find_dtor` finds nothing, so the value is dropped
+// from the list), and the field's bytes are never released. The program still
+// prints the right thing -- this golden checks that -- but the field copy is
+// live at exit:
+//
+//     $ ./z build field_drop_gap.z -o gap -fsanitize=address -g
+//     $ ASAN_OPTIONS=detect_leaks=1 ./gap
+//     leaked
+//     done
+//     ERROR: LeakSanitizer: detected memory leaks
+//     Indirect leak ... in zstr_alloc_impl ... in z_str_dup ... in Boxed
+//
+// (The object itself leaks too, which is by design: `new C()` has no free.
+// This case is about the field copy, the indirect leak above.)
+//
+// The constructor copies the argument into the field (`z_str_dup` in `Boxed`),
+// so the temporary is safe to release at the end of the statement and this is
+// a leak rather than a use-after-free. The struct form -- `new Holder("a"+"b")`
+// with `struct Holder { string name; }` -- does NOT copy: the field aliases
+// the temporary, the temporary is released, and the next read is a
+// heap-use-after-free. That shape is deliberately not in this file: a golden
+// must exit 0, and that program dies under AddressSanitizer. Recursive field
+// drops stay out until field ownership can be decided; see capture_drop_box.z.
+class Boxed {
+    string label;
+    Boxed(string s) { label = s; }
+}
+int main() {
+    var b = new Boxed("leak" + "ed");
+    Console.WriteLog(b.label);
+    Console.WriteLog("done");
+    return 0;
+}

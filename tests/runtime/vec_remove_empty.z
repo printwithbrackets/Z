@@ -1,0 +1,10 @@
+// `Vec.removeAt` past the end aborts with the index and length, the same
+// shape as `Vec.at` out of range. Empty and non-empty cases both abort;
+// the second read below is the one that must fail.
+int main() {
+    var v = new Vec<int>();
+    v.push(1);
+    Console.WriteLog(v.removeAt(0));  // 1
+    Console.WriteLog(v.removeAt(0));  // out of range, length is 0
+    return 0;
+}

@@ -36,8 +36,11 @@ typedef struct {
  * AMD64 ABI). Returns a malloc'd NUL-terminated string that the caller writes
  * to a .s file and hands to the system assembler. */
 typedef struct {
-    /* Emit a runtime range check on every array index. Off by default: the
-     * check costs a load of the length header plus two branches per access. */
+    /* Emit a runtime range check on every array index, and a null check on
+     * every `*` dereference. One flag covers both: --no-bounds turns off the
+     * array/string checks and implies no null-check either (there is no
+     * separate --no-null-check flag). Zero when opts is NULL; the driver
+     * passes 1 unless --no-bounds was given. */
     int bounds_checks;
     /* Emit DWARF debugging information: a line table for stepping and
      * breakpoints, and a symbol table naming every function, parameter and

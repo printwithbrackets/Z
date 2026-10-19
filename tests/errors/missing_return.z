@@ -1,0 +1,13 @@
+// A non-void function that can reach its closing brace has no value to hand
+// back, so the caller reads whatever the last call left in the return register.
+// It compiled silently and returned a number that was never computed, which is
+// the same mistake as a bare `return;` -- see bare_return_nonvoid.z -- written
+// by leaving the word out entirely.
+int f() {
+    Console.WriteLog("no return here");
+}
+
+int main() {
+    Console.WriteLog(f());
+    return 0;
+}

@@ -4,7 +4,7 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Version 0.1.1.** `z --version` reports it, and it is the tag the release is cut
+**Version 0.4.0.** `z --version` reports it, and it is the tag the release is cut
 from.
 
 **Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
@@ -54,9 +54,14 @@ written down next to the code that causes it.
 **Destructors are half-built, and the half that is missing is not reachable by
 accident.** A `~Type()` method runs when a value's scope ends, in reverse
 declaration order. It works on scope end, on `return` (unwinding every open
-scope, innermost first), per iteration in a loop body, and at the end of a void
-function. It does **not** yet run on `?`, on `break` or `continue`, and it does
-not tear down an owning field of a type with no destructor of its own.
+scope, innermost first), on `?` (via `try_drops`), on `break` and `continue`
+(via `jump_floor`), per iteration in a loop body, and at the end of a void
+function. It does not tear down an owning field of a type with no destructor
+of its own — `build_drops` skips a value whose own type has no `~Type()` even
+when a field of it needs a drop — and a captured class handle is deliberately
+left unmarked `boxed`, so its destructor is never reached and the object leaks
+rather than double-freeing an aliased field (see the comment at
+`src/parser.c` `build_drops`).
 
 **Returning a local that would be destroyed on the way out is now a compile
 error, not a footgun.** `R* f() { var mine = new R(5); return mine; }` is
@@ -106,6 +111,8 @@ v1 history and what came of it.
 make          # build ./z
 make test     # golden + diagnostic + warning test suite at -O1
 make test-all # the same suite at -O0, -O1, -O2 and -O3
+make test-asan # the suite's AddressSanitizer leak gate
+make bench    # benchmark the generated code (not part of test)
 make clean
 ```
 
@@ -126,13 +133,16 @@ Optimization levels are spelled like gcc's (`-O0`..`-O3`), and `-O2` turns on
 loop-invariant code motion. Array *and string* indexing is range-checked by
 default and `--no-bounds` turns it off, `-w` silences warnings, and `-Werror`
 makes them fail the build. Anything the compiler does not recognize is passed
-through to the linker.
+through to the linker, except an unknown `-W...` flag or `-O4` and above,
+which are errors rather than silent passthroughs.
 
-`--no-bounds` also drops the null-pointer check on `*`, so it is not only a
-throughput flag. With checks on, dereferencing a null pointer prints
+`--no-bounds` also drops the null-pointer checks, so it is not only a
+throughput flag. There is no separate `--no-null-check` flag: one flag covers
+both. With checks on, dereferencing a null pointer prints
 `runtime error: null pointer dereference` and exits 134; with `--no-bounds` it is
-a bare SIGSEGV and exit 139. The check covers the `*` operator only — `p.field`
-through a null pointer is still a bare SIGSEGV either way.
+a bare SIGSEGV and exit 139. The check covers the `*` operator, `p.field`
+through a null pointer, `arr.length` on a null array, `len(s)` on a null
+string, and indexing a null array or string.
 
 ```csharp
 int main() {
@@ -181,7 +191,7 @@ directory, e.g. with lazy.nvim:
 
 | file | what it does |
 |---|---|
-| `syntax/z.vim` | highlighting: every keyword in `KEYWORDS[]`, every radix with `_` separators, duration literals (`2h21m37`), destructor declarations, the builtins, the surface names, and `$"..."` interpolation holes |
+| `syntax/z.vim` | highlighting: every keyword in `KEYWORDS[]`, every radix with `_` separators, duration literals (`2h21m37`), destructor declarations, the builtins, the surface names, `$"..."` interpolation holes, `fn` declarations, `namespace` blocks with their names, `import ... as` aliases, qualified types after `new`, and `N.CONST` members |
 | `ftplugin/z.vim` | comments, formatting, a brace/`match`-aware `indentexpr`, and `compiler z` |
 | `ftdetect/z.vim` | `*.z` |
 | `compiler/z.vim` | `makeprg` and `errorformat`, so `:make` and `:lmake` work |
@@ -218,11 +228,12 @@ change the glyph. A note that names a span — "declared here" — becomes its o
 entry rather than being appended to the message, because the place it points at
 is the thing worth looking at.
 
-Two settings, both off by default:
+Two settings, both off by default, plus a quiet flag that is on by default:
 
 ```vim
-let g:z_check_on_write = 1        " run :Zcheck after each write
-let g:z_check_on_write_quiet = 0  " open the quickfix window on every save
+let g:z_check_on_write = 1        " run :Zcheck after each write (default 0)
+let g:z_check_on_write_quiet = 0  " open the quickfix window on every save (default 1:
+                                  " only open when there is an error)
 let g:z_compiler = '/usr/local/bin/z'
 ```
 
@@ -945,6 +956,19 @@ Recorded because each was invisible at the default optimization level, and
   that cannot lose a value, and a concrete value going to an interface boxes. So
   `float f = 3` is `3`, and `int x = "hello"` is a `type_mismatch`.
   `var_init` and `var_init_type` are the tests.
+- **A string comparison in a condition compared pointers.** `gen_cond_branch`
+  fast-paths a comparison of two pure operands into a raw integer `cmp` and a
+  conditional jump, without asking what type it was comparing. The value path
+  calls `z_strcmp`, so the same spelling compared content everywhere else and
+  only the branch read addresses. Two equal strings in different allocations --
+  a copy, a concatenation, two elements read out of a vector -- read as
+  different, while two names for the same interned literal read as equal, which
+  is why it looked intermittent rather than broken. A literal on either side
+  saved the comparison, because a literal is not pure and fell through to the
+  value path, so `m == "apple"` was true and `m == k` was false for the same
+  `m`. The branch now evaluates a string comparison normally and tests the
+  resulting bool, the way the float guard above it already does. `strcmp_cond`
+  is the test, and it fails on the old compiler in five of its fourteen lines.
 
 ## Performance
 
