@@ -256,8 +256,8 @@ struct Stmt {
     Stmt *fbody;
     Expr **params;
     int nparams;
-    int locals_bytes;        /* total bytes of the function's frame locals (params + locals) */
-    int is_entry;            /* the program's entry function */
+    int locals_bytes; /* total bytes of the function's frame locals (params + locals) */
+    int is_entry;     /* the program's entry function */
     /* The body can reach its closing brace with control still falling through,
      * so the return register holds whatever the last statement left. Set by the
      * parser, which is where the body shape is known; `int main` is the one

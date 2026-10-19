@@ -3648,8 +3648,7 @@ static void gen_void_expr(CG *cg, Expr *e) {
      * as a statement kept `row` in a register, took the in-place path, and leaked
      * every older concatenation (the nested-loop `z_concat` leak). */
     if (e != NULL && e->kind == E_ASSIGN && !e->frees_old && e->lhs != NULL &&
-        e->lhs->kind == E_VAR && !is_aggregate(e->type) && !e->lhs->agg_param &&
-        !e->lhs->boxed) {
+        e->lhs->kind == E_VAR && !is_aggregate(e->type) && !e->lhs->agg_param && !e->lhs->boxed) {
         /* Never a register for a global: it has no slot, so this is NULL and the
          * path below falls through to an address-and-store, which is what a
          * global needs. */
