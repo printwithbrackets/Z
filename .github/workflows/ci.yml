@@ -29,4 +29,4 @@ jobs:
       - name: clang-format
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clang-format
-          clang-format --dry-run --Werror src/*.c src/*.h tests/run.c
+          clang-format --dry-run --Werror src/*.c include/*.h tests/run.c src/parser/*.inc src/codegen/*.inc

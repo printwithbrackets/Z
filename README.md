@@ -4,7 +4,7 @@ A small, statically-typed systems language that compiles to native x86-64
 machine code. The compiler itself is written in C11 with no dependencies
 beyond a C toolchain.
 
-**Version 0.4.0.** `z --version` reports it, and it is the tag the release is cut
+**Version 0.4.1.** `z --version` reports it, and it is the tag the release is cut
 from.
 
 **Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
@@ -61,7 +61,7 @@ of its own — `build_drops` skips a value whose own type has no `~Type()` even
 when a field of it needs a drop — and a captured class handle is deliberately
 left unmarked `boxed`, so its destructor is never reached and the object leaks
 rather than double-freeing an aliased field (see the comment at
-`src/parser.c` `build_drops`).
+`src/parser/parser_07_destructor_pass.inc` `build_drops`).
 
 **Returning a local that would be destroyed on the way out is now a compile
 error, not a footgun.** `R* f() { var mine = new R(5); return mine; }` is
@@ -344,15 +344,22 @@ The compiler is a classic multi-pass pipeline, each pass in its own module:
 | Pass | File | Role |
 |------|------|------|
 | Lexer | `src/lexer.c` | source → tokens (spans, comments, string interning) |
-| Parser / checker | `src/parser.c` | recursive descent + precedence climbing; resolves names, type-checks, builds a typed AST; desugars `foreach`/`++` |
-| Types | `src/types.c` | pointer-based `Type` graph, sizes/alignment, struct defs |
-| Codegen | `src/codegen.c` | typed AST → x86-64 assembly (System V AMD64 ABI), lvalue/rvalue |
+| Parser / checker | `src/parser.c` + `src/parser/` | recursive descent + precedence climbing; resolves names, type-checks, builds a typed AST; desugars `foreach`/`++` |
+| Types | `src/types.c` | pointer-based `Type` graph: scalars, pointers, arrays, structs, tagged unions, type params; sizes and alignment |
+| Codegen | `src/codegen.c` + `src/codegen/` | typed AST → x86-64 assembly (System V AMD64 ABI), lvalue/rvalue |
 | Driver | `src/main.c` | orchestrates passes, embeds + links the runtime, invokes `cc` |
 | Runtime | `runtime/z_rt.c` | `malloc`-backed allocator plus `z_free`, heap array alloc, the string representation and its library; embedded in the binary |
 | Stdlib | `lib/*.z` | `StringBuilder` and the rest, in Z; embedded and spliced ahead of every unit |
-| Types | `src/types.c` | pointer-based `Type` graph: scalars, pointers, arrays, structs, tagged unions, type params |
 | Arena | `src/arena.c` | bump allocator — all compiler memory freed in one call |
 | Diag | `src/diag.c` | `file:line:col: error: …` with a caret under the token |
+
+`parser.c` and `codegen.c` are umbrella files. Each is still one translation
+unit, assembled from the named sections under `src/parser/` and `src/codegen/`
+and included in order, so the two largest passes read as a handful of
+thousand-line files with a section banner each rather than as bookmarks in a
+12,000-line one. Hand-written headers live in `include/`; object files, dep
+files, and the generated embedded-runtime and embedded-stdlib headers live in
+`build/`; `src/` holds only sources.
 
 Code generation uses an lvalue/rvalue split: `gen_addr` computes the address of
 a variable/index/deref, `gen_expr` loads through it. Operands are staged through

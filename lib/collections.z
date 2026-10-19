@@ -55,7 +55,7 @@
  */
 
 /* The type codes `typeof` returns. These are the compiler's TypeKind values, in
- * the enum's own order, and src/parser.c's type_kind_code is the other end of
+ * the enum's own order, and src/parser/parser_02_prescan_signatures.inc's type_kind_code is the other end of
  * this. The order is load-bearing: a code that moves silently turns every
  * `typeof` branch in the standard library into the wrong answer. */
 const int TYPE_VOID = 0;
