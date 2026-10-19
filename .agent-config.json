@@ -1,6 +1,6 @@
 {
   "testCommand": "make test",
-  "formatCommand": "clang-format -i src/*.c src/*.h tests/*.c",
+  "formatCommand": "clang-format -i src/*.c include/*.h tests/*.c src/parser/*.inc src/codegen/*.inc",
   "lintCommand": "make",
   "supportedLanguages": ["c"],
   "testFramework": "custom (tests/run.c golden + diagnostic harness)",

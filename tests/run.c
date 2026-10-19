@@ -1318,7 +1318,7 @@ int main(int argc, char **argv) {
      * string blocks are asserted about, which is the part a container's
      * destructor is responsible for. */
     static const char *leaks[] = {"vec_string", "map_string", "vec_grow_owned", "map_rehash_owned",
-                                   "nested_reassign"};
+                                  "nested_reassign"};
     const char *lk_dir = "tests/leaks";
     if (asan_available(zq)) {
         char leak_out[256];

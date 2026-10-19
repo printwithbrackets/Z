@@ -7,11 +7,17 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror
 # that is far better than the alternative, which is a hand-maintained array of
 # decimal byte values that no one can read or diff.
 CFLAGS  += -Wno-overlength-strings -MMD -MP
+# Layout: hand-written headers in include/, the generated embedded-runtime and
+# embedded-stdlib headers in build/, object files in build/ too. src/ holds only
+# sources and the two umbrella files (parser.c, codegen.c) that include the
+# sections under src/parser/ and src/codegen/. Both search paths are explicit, so
+# nothing depends on the compiler searching the directory of the including file.
+CFLAGS  += -Iinclude -Ibuild
 LDFLAGS ?=
 
 BIN     := z
 SRC     := $(wildcard src/*.c)
-OBJ     := $(SRC:.c=.o)
+OBJ     := $(patsubst src/%.c,build/%.o,$(SRC))
 DEP     := $(OBJ:.o=.d)
 
 # The standard library, in Z. Embedded into the compiler the same way the
@@ -32,21 +38,24 @@ STDLIB_SRC := $(firstword $(STDLIB))
 
 all: $(BIN)
 
-$(BIN): $(OBJ) src/runtime_src.h src/std_src.h
+$(BIN): $(OBJ) build/runtime_src.h build/std_src.h
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS)
 
-src/%.o: src/%.c
+build/%.o: src/%.c | build
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+build:
+	mkdir -p build
 
 # main.c includes the generated embedded-runtime and embedded-stdlib headers, so
 # they must be built before main.o on a clean build.
-# path.h is shared by main.c and surface.c (see src/path.h); SRC wildcards
+# path.h is shared by main.c and surface.c (see include/path.h); SRC wildcards
 # src/*.c so src/path.c builds without listing it, and -MMD tracks the header.
-src/main.o: src/runtime_src.h src/std_src.h
+build/main.o: build/runtime_src.h build/std_src.h
 
 # The Z runtime is embedded into the compiler as a byte array so a built
 # `z` is self-contained (no runtime file needed at compile time).
-src/runtime_src.h: runtime/z_rt.c tools/embed.py
+build/runtime_src.h: runtime/z_rt.c tools/embed.py | build
 	@python3 tools/embed.py runtime_src runtime/z_rt.c > $@
 
 # The standard library, the same way.
@@ -59,7 +68,7 @@ src/runtime_src.h: runtime/z_rt.c tools/embed.py
 # octal for every byte outside the printable ASCII range, so the generated file is
 # valid C regardless of what the sources contain, and the result is readable
 # enough to diff.
-src/std_src.h: $(STDLIB) tools/embed.py
+build/std_src.h: $(STDLIB) tools/embed.py | build
 	@python3 tools/embed.py std_src $(STDLIB) > $@
 
 # Golden + diagnostic tests; run after the compiler links.
@@ -95,7 +104,8 @@ tests/run: tests/run.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
-	rm -f $(BIN) $(OBJ) $(DEP) tests/run src/runtime_src.h src/std_src.h
+	rm -rf build
+	rm -f $(BIN) tests/run
 	rm -f /tmp/z_*.s /tmp/z_*.out /tmp/z_*_rt.c /tmp/z_*.o
 	rm -rf /tmp/z_test_* /tmp/z_exit_* /tmp/z_leak_* /tmp/z_asan_probe_*
 

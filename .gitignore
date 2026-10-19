@@ -1,13 +1,9 @@
-# Build artifacts
-*.o
-*.d
+# Build artifacts. Objects, dep files, and the two generated headers
+# (embedding runtime/z_rt.c and lib/*.z) all live under build/.
+/build/
 /z
 /gzz
 /tests/run
-# Generated from runtime/z_rt.c by the Makefile
-/src/runtime_src.h
-# Generated from lib/*.z by the Makefile
-/src/std_src.h
 /tests/run.d
 
 # Compiler output
