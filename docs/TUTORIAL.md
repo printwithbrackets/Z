@@ -370,15 +370,16 @@ be the one thing a diagnostic must not do.
 
 #### A project picks its own dialect
 
-The names above ship with Z. A project overrides them in a `.zignore/config.z`
-file, one mapping per line — what the program writes, then `=`, then what the
-compiler calls it:
+`Console.WriteLog` ships with Z. A project adds its own names, and may
+replace the shipped ones, in a `.zignore/config.z` file — one mapping per line,
+what the program writes, then `=`, then what the compiler calls it:
 
 ```
 # a comment
-Console.WriteLog = say
-StringBuilder   = TextBuffer
-append          = push
+say        = Console.WriteLog
+TextBuffer = StringBuilder
+push       = append
+finish     = toString
 ```
 
 That program is now written in its own vocabulary, and none of the compiler, the
@@ -485,7 +486,7 @@ Now the length is 4, every byte is reachable, `Console.WriteLog` writes all
 four, and
 `split`, `replace` and `index_of` all see it. C interoperability still stops at
 a zero — that is a property of C's strings, not a bug in this one — and
-[section 18](#types) says how a C caller gets past it.
+[section 19](#types) says how a C caller gets past it.
 
 **Comparison is by content, then by length.** Not by `strcmp`, which cannot order
 two strings that differ only after an embedded zero.
@@ -1454,9 +1455,9 @@ Console.WriteLog(animals[1].Speak());   // meow
 ```
 
 - `new C(args)` allocates an object on the `malloc` heap and runs the constructor
-  (a method named like the class). Fields start zeroed. The object is freed when
-  its scope ends **if the class has a `~C()` destructor**; without one it leaks,
-  which is a deliberate direction to be wrong in. See
+  (a method named like the class). Fields start zeroed. If the class has a
+  `~C()` destructor it runs when the scope ends, but the object's memory still
+  leaks; only `string` releases its storage today. See
   [Memory, destructors, and `move`](#16-memory-destructors-and-move).
 - There is no `: Base`, no `override` and no `base(args)`. Each is a diagnostic
   that says what to do instead, because a program carried over from a version
@@ -1577,9 +1578,10 @@ for (var i = 0; i < 3; i = i + 1) { var t = new Tracked(i); }
 // drops for i = 0, 1, 2, each before the next iteration starts
 ```
 
-It also runs on `return`, unwinding every open scope innermost first. It does
-**not** yet run on `?`, on `break`, or on `continue`, and a type with no
-destructor of its own does not tear down its owning fields.
+It also runs on `return`, `break`, `continue` and `?`, unwinding every open
+scope innermost first; a `?` builds its drop list where it is written, so a
+local declared after it is not dropped. A type with no destructor of its own
+does not tear down its owning fields.
 
 A `string` is owned too. It is copied deeply on every store, released when its
 scope ends, and released again when a slot is overwritten — so this is bounded:
@@ -1591,11 +1593,11 @@ for (var i = 0; i < 3; i = i + 1) { Console.WriteLog((s + "b").length); }
 
 ### What still leaks
 
-Being straight about it: a heap array is never freed, and a class object whose
-type has no `~Type()` is never freed. A closure cell is never freed. These leak
-by design for now, which is why the suite's AddressSanitizer run looks for
-use-after-free, double free and buffer overflow and **not** for leaks — the
-golden cases leak closure cells too.
+Being straight about it: a heap array is never freed, and a class object is
+never freed — a `~Type()` runs, but the block itself is not released. A closure
+cell is never freed. These leak by design for now. The suite's AddressSanitizer
+leak cases assert that no string allocation is still live at exit; they allow
+the heap arrays, class objects and closure cells above to leak.
 
 ```csharp
 // leaks.z
@@ -1745,10 +1747,10 @@ only known at runtime is still checked exactly, and a negative index is caught
 too. Out-of-range access aborts with a message instead of quietly reading
 whatever follows the array in the heap.
 
-The flag applies to `build` as well, and costs a length load plus two branches
-per access, which is why it is off by default — turn it on while testing, and
-leave it off for anything you care about throughput. Note that `--no-bounds` also
-drops the null-pointer check below, so it is not only a throughput flag.
+The checks apply to `build` as well, and cost a length load plus two branches per
+access, which is why `--no-bounds` is for measured, trusted code rather than the
+default. Note that it also drops the null-pointer checks below, so it is not
+only a throughput flag.
 
 ### Null pointer checks
 
@@ -1762,10 +1764,13 @@ $ echo $?
 134
 ```
 
-The check covers the `*` operator, so a null pointer is caught on a read and on
-a write alike. It does not cover field access: `p.x` through a null `p` is still
-a bare segfault (exit 139) whether or not checks are on. With `--no-bounds` the
-`*` case is a bare segfault too.
+The check covers `*`, so a null pointer is caught on a read and on a write
+alike, and it also covers `p.field` through a null pointer, `arr.length` on a
+null array, `s.length` on a null string, and indexing a null array or string.
+With `--no-bounds` every one of these is a bare segfault (exit 139).
+
+The builtin `len(s)` is the exception: it is a runtime call rather than a
+length load, and it answers 0 for a null string rather than aborting.
 
 ---
 
@@ -1945,7 +1950,7 @@ deliberately.
   those numbers, and the surplus is passed on the stack. Exceeding one is a
   compile error rather than silently wrong code.
 - **Array and string indexing is checked**, and `--no-bounds` turns it off. See
-  section 15.
+  section 16.
 - **A `string` is a sequence of bytes, and that is all it is.** `s.length`,
   `s[i]` and `s[a..b]` all count and slice bytes. Z has no character type, so
   one `é` is two ints and a `\uXXXX` escape is one to three of them: one below
@@ -1957,7 +1962,7 @@ deliberately.
   `StringBuilder` to build a string in a loop.
 - **A `const` must be declared before use**, unlike a function.
 - **`break`/`continue` outside a loop** is a compile error.
-- **Structs cannot be returned by value across the C boundary.** See section 17.
+- **Structs cannot be returned by value across the C boundary.** See section 19.
 - **`import` splices, it does not isolate -- unless aliased.** A plain import
   is visible everywhere, unqualified. `import "f.z" as net` parses the file
   inside `namespace net`, so its names arrive as `net.*` instead.

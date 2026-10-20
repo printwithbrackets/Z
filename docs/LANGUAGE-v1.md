@@ -1,7 +1,8 @@
 # Z — language specification (v1)
 
-**This is the v1 specification, kept as a record.** The compiler in this repository
-implements v1, but v1 has since changed underneath this document: inheritance and
+**This is the v1 specification, kept as a record.** The compiler in this
+repository started from v1 and now implements v1 plus v2 slices 1 and 2 and part
+of slice 3; v1 has since changed underneath this document: inheritance and
 `base(...)` were cut in v2 slice 2 and the collector was replaced by destructors
 in slice 3, and neither is reflected below. Where this document describes
 inheritance, `override`, `base(...)` or the garbage collector, it is describing

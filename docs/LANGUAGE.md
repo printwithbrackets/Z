@@ -4,10 +4,11 @@ Z is a small, statically-typed systems language. It compiles to native x86-64
 machine code. It has the shape of C++ — value types, references, templates,
 RAII, zero-cost abstractions — with the sharp parts taken off.
 
-**Status: this document specifies v2. v2 is not implemented.** The compiler in
-this repository implements v1, specified in [LANGUAGE-v1.md](LANGUAGE-v1.md) and
-in the "What exists today" appendix below. v2 is built in the five slices listed
-in [Roadmap](#roadmap), in order, each of which is a working compiler at its end.
+**Status: this document specifies v2. Slices 1 and 2 are implemented apart from
+the `T&` reference type, and slice 3 is partly implemented.** The compiler in
+this repository implements v1 plus those slices; the "What exists today"
+appendix below records the exact split. v2 is built in the five slices listed in
+[Roadmap](#roadmap), in order, each of which is a working compiler at its end.
 
 Everything in v2 marked **[now]** exists in the compiler today. Everything marked
 **[new]** is specified here and not yet built. **[cut]** is in v1 and is being
@@ -104,10 +105,10 @@ guaranteed](#memory-safety-what-is-and-is-not-guaranteed).
 
 ### 2. Destruction: destructors run on every exit path, including `?`
 
-**[partial]** A first cut of this section is in the compiler: the destructor
-syntax, reverse-declaration-order teardown, and the `return` and scope-end paths
-work today. The `?`, `break`, `continue` and panic paths do not, and a type with
-no destructor of its own does not tear down its owning fields. The `return` path
+**[partial]** The destructor syntax, reverse-declaration-order teardown, and the
+scope-end, `return`, `break`, `continue` and `?` paths work today. A type with
+no destructor of its own does not tear down its owning fields; panic is not a
+path the language has yet. The `return` path
 is enforced rather than merely correct: returning a local that would be destroyed
 on the way out is a diagnostic, so the one case this section has to worry about
 cannot be written. `move` exists and is checked for the types that can be
@@ -245,8 +246,9 @@ complain — and it was the golden tests that caught it rather than a crash.
 
 ### Slice 3 — GC to RAII, and ownership (3–4 weeks)
 
-The largest slice and the one with the named risk. The first two bullets are
-done, and the rest of the slice is waiting on them.
+The largest slice and the one with the named risk. The collector, allocator,
+`string` ownership and destructor-path bullets are done; `Vec<T>`, closures and
+the remaining `StringBuilder` work are still open.
 
 - **done — Delete** `z_gc_init`, the mark-sweep collector, `gc_mark`,
   `gc_mark_roots`, `gc_collect`, and the `gc_enabled` / `gc_threshold` state in
@@ -255,9 +257,9 @@ done, and the rest of the slice is waiting on them.
 - **done — Replace** `z_newarray` with a plain allocator and add `z_free`.
   `z_alloc` is `malloc` with a fatal allocation failure, and `z_free` is its
   counterpart. `z_str_free` and `z_array_free` are the two header-aware
-  spellings the compiler will call once ownership is tracked.
-  **Nothing calls them yet**, so every allocation a program makes is still live
-  at exit. That is deliberate and it is the reason the collector had to go
+  spellings; `z_str_free` is called for owned strings, while `z_array_free` is
+  not called yet, so heap arrays are still live at exit. That is deliberate and
+  it is the reason the collector had to go
   before the ownership rules rather than after: a destructor that freed
   unconditionally would double-free every value a program copied, so the
   frees cannot be wired up until a copy of an owning value is a diagnostic
@@ -333,10 +335,10 @@ Depends on slice 3 and is small because of it.
 Runs alongside 1–4 rather than after, because a golden suite that has not been
 ported yet is the thing that catches slice 3's destructor paths being wrong.
 
-- All 106 golden tests and 84 error tests rewritten to the v2 surface.
+- All 129 golden tests and 89 error tests rewritten to the v2 surface.
 - `lib/collections.z` and `lib/string.z` become structs with destructors.
 - `make test-all` at `-O0`–`-O3` stays the gate, for the reason in
-  [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels-command-line): a pass
+  [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels--command-line): a pass
   that only runs at `-O2` miscompiled once already.
 
 ## Memory safety: what is and is not guaranteed
@@ -364,8 +366,11 @@ will be misread.
 - **[now]** Dereferencing a null pointer through `*`, read or written, which
   prints `runtime error: null pointer dereference` and exits 134. This is the
   v1 compiler, where it rides the same flag as the bounds check: `--no-bounds`
-  restores the bare SIGSEGV and exit 139. It covers the `*` operator only, so
-  `p.field` through a null pointer is still a bare SIGSEGV either way.
+  restores the bare SIGSEGV and exit 139. It covers `*`, `p.field` through a
+  null pointer, `arr.length` on a null array, `s.length` on a null string, and
+  indexing a null array or string. The builtin `len(s)` is the exception: it is
+  a runtime call rather than a length load, and it answers 0 for a null string
+  rather than aborting.
 
 **Not guaranteed:**
 
@@ -1355,7 +1360,9 @@ a string's header is stored inside its own block rather than in front of it.
   **[now]**
 - `z_str_free(s)` / `z_array_free(p)` — the two header-aware spellings, which
   subtract the header before freeing and skip a literal, whose `cap` is 0.
-  **[now]**, but nothing calls them yet: see [Slice 3](#slice-3-gc-to-raii-and-ownership-34-weeks).
+  **[now]** `z_str_free` is called for owned strings and temporaries;
+  `z_array_free` is defined but not called yet: see
+  [Slice 3](#slice-3--gc-to-raii-and-ownership-34-weeks).
 - `z_box` becomes an `Rc` cell with a count.
 - Destructors emitted by the compiler run on every scope exit.
 - A leak report at exit for allocations the runtime can account for. A cycle is a
@@ -1432,8 +1439,8 @@ Loop-invariant code motion shipped exactly that way once.
 
 ## What exists today (v1 appendix)
 
-The compiler in this repository implements v1. Specifically, all of the following
-is real and tested today, and stays:
+The compiler in this repository implements v1 plus v2 slices 1 and 2 and part of
+slice 3. Specifically, all of the following is real and tested today, and stays:
 
 - top-level statements, `var`, `Console.WriteLog`, `int`/`bool`/`string`/`float`,
   and the three variable tiers -- `gvar` with its own storage, `lvar` beside a
@@ -1448,15 +1455,16 @@ is real and tested today, and stays:
   descriptors rather than stdio
 - the whole type system: pointers, structs with methods, enums, `Result<T,E>`
 - closures, nested functions, function pointers, bound method pointers
-- interfaces, classes with vtables, **`override` and inheritance** — the last of
-  these is what slice 2 removes
+- interfaces and classes with vtables (`override`, `base(...)` and inheritance
+  were removed in slice 2)
 - monomorphized generic functions and generic classes
 - a plain `malloc` allocator with a `free` to match it, no collector
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 235 tests in all — 106 golden, 84 diagnostic, and 45 runtime, interop, module,
-  warning and driver tests — with `make test-all` green across four `-O` levels
+- 277 checks in all — 129 golden, 89 diagnostic, and 59 runtime, interop, module,
+  warning, gate and driver tests — with `make test-all` green across four `-O`
+  levels
 
 **Destructors, partially.** `~Type()` is parsed, registered, and expanded into
 calls at the end of a scope. What works, and is tested:
