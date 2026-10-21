@@ -670,10 +670,18 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
     if (ic->self->locals_bytes < ptop)
         ic->self->locals_bytes = ptop;
     int rslot = inline_new_slot(&ic->self->locals_bytes, 8);
+    /* The frame has grown by now, and a refusal below has to give the slots
+     * back: a body that was not spliced must not leave the caller's frame
+     * bigger than it was. The size is restored from here rather than
+     * recomputed, because the two ways this can fail have each already
+     * allocated something of their own. */
+    int saved_bytes = ic->self->locals_bytes;
 
     Stmt *body = clone_stmt(p, callee->fbody);
-    if (body == NULL)
+    if (body == NULL) {
+        ic->self->locals_bytes = saved_bytes;
         return 0;
+    }
 
     /* The callee's locals have to move into the caller's frame before anything
      * else touches the copy. A body with a lambda in it is left alone: a lambda
@@ -685,6 +693,7 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
     int next_slot = ic->self->locals_bytes;
     if (inline_remap_stmt(ic, body, map, &nmap, &next_slot, &ptop, &pinned)) {
         /* Rolled back: the frame must not keep the slots a refused body took. */
+        ic->self->locals_bytes = saved_bytes;
         return 0;
     }
     ic->self->locals_bytes = next_slot;
@@ -695,8 +704,12 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
         inline_rewrite_list(ic, body->items, body->nitems, &fixed, rslot, callee->ret_type);
     else
         inline_rewrite(ic, body, &fixed, rslot, callee->ret_type);
-    if (fixed.n == 0)
+    if (fixed.n == 0) {
+        /* Rolled back for the same reason as the refusal above: the body was
+         * not spliced, so the frame must not keep its slots. */
+        ic->self->locals_bytes = saved_bytes;
         return 0;
+    }
 
     InlineBinding all[INLINE_MAX_STMT + 1];
     for (int i = 0; i < nb; i++)
