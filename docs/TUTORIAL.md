@@ -1962,6 +1962,11 @@ deliberately.
   `StringBuilder` to build a string in a loop.
 - **A `const` must be declared before use**, unlike a function.
 - **`break`/`continue` outside a loop** is a compile error.
+- **Nesting deeper than 256 is a compile error.** The parser recurses on the
+  shape of the input, so a program nested absurdly deep is rejected with
+  `nested more than 256 deep` rather than being compiled. The limit is on the
+  nesting and not on the size: an expression with a hundred thousand terms in
+  it is long, not deep, and compiles.
 - **Structs cannot be returned by value across the C boundary.** See section 19.
 - **`import` splices, it does not isolate -- unless aliased.** A plain import
   is visible everywhere, unqualified. `import "f.z" as net` parses the file

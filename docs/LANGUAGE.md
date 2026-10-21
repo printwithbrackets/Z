@@ -381,6 +381,14 @@ will be misread.
 - Anything the `unsafe` block asks the language to stop checking. That is what
   it is for, and it is marked at the point of use.
 
+**[now] Nesting deeper than the parser will descend.** The parser recurses on
+the shape of the input, so a program nested far deeper than anything a person
+writes is rejected with `nested more than 256 deep` rather than being compiled.
+The limit is on the parser's recursion and not on the input's length: a
+program with a hundred thousand terms in one expression is not deeply nested
+and compiles. A nest past the limit is a diagnostic, not a crash, and it is
+reported once rather than once per level.
+
 **No data races** on any value the compiler tracks, with the `unsafe extern`
 footnote from decision 3.
 
@@ -1462,7 +1470,7 @@ slice 3. Specifically, all of the following is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 277 checks in all — 129 golden, 89 diagnostic, and 59 runtime, interop, module,
+- 282 checks in all — 129 golden, 89 diagnostic, and 64 runtime, interop, module,
   warning, gate and driver tests — with `make test-all` green across four `-O`
   levels
 
