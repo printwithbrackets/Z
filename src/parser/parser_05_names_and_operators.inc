@@ -397,7 +397,22 @@ static Expr *parse_primary(Parser *p) {
             return parse_postfix(p, c);
         }
         advance(p);
+        /* A parenthesized expression is the deepest way to nest: every level
+         * costs a parenthesis, a call and a scope, and the whole nest is
+         * parsed before the first one is finished. It is bounded like every
+         * other descent. */
+        if (!enter_depth(p)) {
+            /* The rest of the nest is skipped rather than parsed, so the
+             * closing parentheses are consumed and the enclosing levels find
+             * their own ')' where they expect it. */
+            skip_past_bracket(p);
+            Expr *e = new_expr(p, E_INT, t->span);
+            e->ival = 0;
+            e->type = type_int(p->ty);
+            return parse_postfix(p, e);
+        }
         Expr *inner = parse_expr(p);
+        leave_depth(p);
         if (!match(p, T_RPAREN)) {
             diag_error(cur(p)->span, "expected ')' after expression");
         }
@@ -418,7 +433,15 @@ static Expr *parse_unary(Parser *p) {
      * and `f(move x)` moves into the argument. */
     if (t->kind == T_KW_MOVE) {
         advance(p);
+        /* A chain of `move`s is as deep as the expression it wraps, and it
+         * recurses to get there, so it is bounded like every other descent. */
+        if (!enter_depth(p)) {
+            Expr *e = new_expr(p, E_MOVE, t->span);
+            e->type = type_int(p->ty);
+            return e;
+        }
         Expr *operand = parse_unary(p);
+        leave_depth(p);
         Expr *e = new_expr(p, E_MOVE, t->span);
         e->lhs = operand;
         e->type = operand->type;
@@ -450,7 +473,16 @@ static Expr *parse_unary(Parser *p) {
     }
     if (t->kind == T_MINUS || t->kind == T_NOT || t->kind == T_TILDE) {
         advance(p);
+        /* A chain of unary operators recurses to its end, so it is bounded
+         * like every other descent. */
+        if (!enter_depth(p)) {
+            Expr *e = new_expr(p, E_UNARY, t->span);
+            e->op = t->kind;
+            e->type = type_int(p->ty);
+            return e;
+        }
         Expr *operand = parse_unary(p);
+        leave_depth(p);
         /* Fold unary minus / logical-not / bitwise-not on literals. */
         if (t->kind == T_TILDE && operand->kind == E_INT) {
             Expr *f = new_expr(p, E_INT, t->span);
@@ -703,7 +735,26 @@ static Expr *parse_expr(Parser *p) {
         int compound = k != T_ASSIGN;
         TokenKind bop = base_op(k);
         advance(p);
+        /* An assignment chain is right-associative, so `a = b = c` parses as
+         * `a = (b = c)` and the recursion is as deep as the chain. It is
+         * bounded like every other descent. */
+        if (!enter_depth(p)) {
+            /* The rest of the chain is stepped over rather than parsed, so the
+             * statements after it are still statements and not the tail of this
+             * one. */
+            skip_to_statement_end(p);
+            Expr *e = new_expr(p, E_ASSIGN, span);
+            e->op = bop;
+            e->compound = compound;
+            e->lhs = lhs;
+            e->rhs = new_expr(p, E_INT, cur(p)->span);
+            e->rhs->ival = 0;
+            e->rhs->type = type_int(p->ty);
+            e->type = NULL;
+            return e;
+        }
         Expr *rhs = parse_expr(p);
+        leave_depth(p);
         if (!is_lvalue(lhs)) {
             if (!is_unk(lhs->type)) {
                 diag_error(span, "left side of assignment must be a variable");

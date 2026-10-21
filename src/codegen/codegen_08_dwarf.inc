@@ -240,6 +240,41 @@ static void dbg_write_abbrev(Buf *b) {
 #undef ATTR_END
 }
 
+/* Emits `n` bytes as the body of an .asciz, escaping what the assembler needs
+ * escaped. The length is a parameter rather than a terminator because a Z string
+ * may contain a zero byte -- that is the whole point of it having a length --
+ * and a loop that stopped at the first zero would silently emit a truncated
+ * literal while the header above it claimed the full length. */
+static void emit_escaped_n(CG *cg, const char *s, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+        case '"':
+            buf_puts(cg->out, "\\\"");
+            break;
+        case '\\':
+            buf_puts(cg->out, "\\\\");
+            break;
+        case '\n':
+            buf_puts(cg->out, "\\n");
+            break;
+        case '\t':
+            buf_puts(cg->out, "\\t");
+            break;
+        case '\r':
+            buf_puts(cg->out, "\\r");
+            break;
+        default:
+            if (c < 32 || c >= 127)
+                buf_printf(cg->out, "\\%03o", c);
+            else {
+                char ch[2] = {(char)c, '\0'};
+                buf_puts(cg->out, ch);
+            }
+        }
+    }
+}
+
 /* The 1-based DWARF file number for `path`, adding a .file entry the first time
  * the file is seen. A compilation unit spans several files once `import` is
  * used, and every line marker names one of them by number.
@@ -268,7 +303,14 @@ static int dbg_file(CG *cg, const char *path) {
     }
     cg->dbg_file_names[cg->dbg_file_count] = path;
     cg->dbg_file_count++;
-    buf_printf(cg->out, "  .file %d \"%s\"\n", cg->dbg_file_count, path);
+    /* The path is escaped, because a file name is not under the program's
+     * control and a quote in it would otherwise end the string early and let
+     * the rest of the name be read as assembler directives. A name with a quote
+     * and a newline in it is legal on a Unix filesystem, and git and tar both
+     * permit one, so the name is data the compiler did not write. */
+    buf_printf(cg->out, "  .file %d \"", cg->dbg_file_count);
+    emit_escaped_n(cg, path, (int)strlen(path));
+    buf_puts(cg->out, "\"\n");
     return cg->dbg_file_count;
 }
 
@@ -857,39 +899,4 @@ static void emit_function(CG *cg, Stmt *fn) {
     buf_printf(cg->out, "  ret\n", sym);
     if (have_dbg)
         buf_printf(cg->out, "%s:\n", dbg_end);
-}
-
-/* Emits `n` bytes as the body of an .asciz, escaping what the assembler needs
- * escaped. The length is a parameter rather than a terminator because a Z string
- * may contain a zero byte -- that is the whole point of it having a length --
- * and a loop that stopped at the first zero would silently emit a truncated
- * literal while the header above it claimed the full length. */
-static void emit_escaped_n(CG *cg, const char *s, int n) {
-    for (int i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        switch (c) {
-        case '"':
-            buf_puts(cg->out, "\\\"");
-            break;
-        case '\\':
-            buf_puts(cg->out, "\\\\");
-            break;
-        case '\n':
-            buf_puts(cg->out, "\\n");
-            break;
-        case '\t':
-            buf_puts(cg->out, "\\t");
-            break;
-        case '\r':
-            buf_puts(cg->out, "\\r");
-            break;
-        default:
-            if (c < 32 || c >= 127)
-                buf_printf(cg->out, "\\%03o", c);
-            else {
-                char ch[2] = {(char)c, '\0'};
-                buf_puts(cg->out, ch);
-            }
-        }
-    }
 }

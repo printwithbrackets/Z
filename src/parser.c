@@ -115,6 +115,19 @@ typedef struct Scope {
  * before it can overflow the stack rather than after. */
 #define MAX_DROP_SCOPES 128
 
+/* How deep the recursive descent may go.
+ *
+ * Each level of nesting in the source -- a parenthesis, an index, a block --
+ * costs the parser a few C stack frames, and a program that nests far enough
+ * exhausts the stack before the parser reaches the end of the file. The limit
+ * is a multiple of what a program plausibly nests, so a real program is
+ * unaffected, and a hostile one gets a diagnostic instead of a signal.
+ *
+ * The number is deliberately not tied to the size of the input: a program with
+ * a hundred thousand terms in one expression is not deeply nested and must
+ * still compile. */
+#define MAX_PARSE_DEPTH 256
+
 /* A function declared inside another function, mapping the name the program
  * writes to the symbol emitted for it. */
 typedef struct LocalFn {
@@ -305,6 +318,27 @@ typedef struct {
      * enclosing function's. */
     Scope *open_scopes[MAX_DROP_SCOPES];
     int nopen;
+
+    /* How deep the recursive descent currently is.
+     *
+     * The parser recurses on the shape of the input: a parenthesis, an index
+     * and a nested block each step one level deeper, and there is no bound on
+     * how deep a program may nest. A file with tens of thousands of open
+     * parens therefore ran the C stack out and the compiler died on a signal
+     * rather than reporting a problem with the program.
+     *
+     * The limit is well above anything a person writes, and it is a limit on
+     * the *parser's* recursion rather than on the input's length, because a
+     * long expression is fine and a deeply nested one is not. */
+    int depth;
+
+    /* Whether the depth limit has already been reported, so a program nested
+     * past it produces one diagnostic rather than one per level. */
+    int depth_reported;
+
+    /* Whether the scope-stack limit has already been reported, for the same
+     * reason. */
+    int scope_limit_reported;
 
     /* Every scope that has been closed, newest first, for the deferred
      * unused-local report. See scope_pop. */

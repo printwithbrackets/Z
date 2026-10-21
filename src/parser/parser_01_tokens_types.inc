@@ -635,11 +635,19 @@ static void scope_push(Parser *p) {
     p->scope = s;
     /* Tracked so a `return` or a `?` can reach every scope it is leaving. A
      * scope beyond the limit is still pushed, so parsing continues and the
-     * program gets its other diagnostics rather than nothing. */
+     * program gets its other diagnostics rather than nothing.
+     *
+     * The diagnostic is reported once rather than once per level beyond the
+     * limit. A file nested a hundred thousand blocks deep would otherwise
+     * produce a hundred thousand of them, and each renders the source excerpt
+     * under it, so the output was larger than the input by orders of magnitude
+     * and took longer to write than the parse it was describing. */
     if (p->nopen < MAX_DROP_SCOPES)
         p->open_scopes[p->nopen++] = s;
-    else
+    else if (!p->scope_limit_reported) {
+        p->scope_limit_reported = 1;
         diag_error(cur(p)->span, "blocks nested more than %d deep", MAX_DROP_SCOPES);
+    }
 }
 
 /* Leaves a scope, reporting any variable declared in it that was never
@@ -1042,4 +1050,86 @@ static void skip_braced_block(Parser *p) {
             return;
         advance(p);
     } while (depth > 0);
+}
+
+/* Enters one level of the recursive descent, or reports that there is no more
+ * room for it.
+ *
+ * The parser recurses on the shape of the input, so a program nested far
+ * deeper than anything a person writes runs the C stack out and the compiler
+ * dies on a signal rather than saying anything about the program. The check is
+ * here rather than at each recursion site because the sites are the whole
+ * grammar: a parenthesis, an index, a block, a cast, a closure body.
+ *
+ * The error is reported once, not once per level. A file with a hundred
+ * thousand open parens would otherwise produce a hundred thousand diagnostics,
+ * and rendering each one with its source excerpt costs more than the parse it
+ * was reporting on -- the output alone was larger than the input by three
+ * orders of magnitude.
+ *
+ * Returns 1 when the caller may recurse, and 0 when it must not. On 0 the
+ * caller returns a placeholder rather than descending, and the parse continues
+ * at the level above, so one diagnostic describes the whole nest. */
+static int enter_depth(Parser *p) {
+    if (p->depth < MAX_PARSE_DEPTH) {
+        p->depth++;
+        return 1;
+    }
+    if (!p->depth_reported) {
+        p->depth_reported = 1;
+        diag_error(cur(p)->span, "nested more than %d deep", MAX_PARSE_DEPTH);
+    }
+    return 0;
+}
+
+/* Leaves one level of the recursive descent. Paired with enter_depth. */
+static void leave_depth(Parser *p) { p->depth--; }
+
+/* Consumes tokens up to and including the bracket that closes the one the
+ * caller is inside, so that a nest too deep to parse is stepped over rather
+ * than reported one level at a time.
+ *
+ * The closing bracket is found by counting, because the nest is exactly the
+ * thing that is too deep to descend into. The count starts at one for the
+ * bracket the caller is inside, and the token that brings it back to zero is
+ * the one that closes it. All three kinds of bracket are counted together, so
+ * a mismatched one in the input cannot end the skip early and leave the
+ * tokens after it to be parsed as if they were statements. */
+static void skip_past_bracket(Parser *p) {
+    int depth = 1;
+    while (!at(p, T_EOF)) {
+        if (at(p, T_LPAREN) || at(p, T_LBRACKET) || at(p, T_LBRACE))
+            depth++;
+        else if (at(p, T_RPAREN) || at(p, T_RBRACKET) || at(p, T_RBRACE)) {
+            depth--;
+            if (depth == 0) {
+                advance(p);
+                return;
+            }
+        }
+        advance(p);
+    }
+}
+
+/* Consumes tokens up to the ';' that ends the statement the caller is inside,
+ * for the same reason: the remainder of a nest too deep to parse has to be
+ * stepped over rather than parsed as a sequence of statements.
+ *
+ * The ';' is not consumed, so the statement the caller returns to still finds
+ * the terminator it expects. Brackets are counted, so a ';' inside one does
+ * not end the statement early. */
+static void skip_to_statement_end(Parser *p) {
+    int depth = 0;
+    while (!at(p, T_EOF)) {
+        if (at(p, T_LPAREN) || at(p, T_LBRACKET) || at(p, T_LBRACE))
+            depth++;
+        else if (at(p, T_RPAREN) || at(p, T_RBRACKET) || at(p, T_RBRACE)) {
+            if (depth == 0)
+                return;
+            depth--;
+        } else if (at(p, T_SEMI) && depth == 0) {
+            return;
+        }
+        advance(p);
+    }
 }

@@ -533,10 +533,23 @@ static void emit_drops(Parser *p, Stmt *program) {
 
 static Stmt *parse_block(Parser *p) {
     Span start = cur(p)->span;
-    if (!match(p, T_LBRACE)) {
+    if (!at(p, T_LBRACE)) {
         diag_error(cur(p)->span, "expected '{' to open a block");
         return new_stmt(p, S_BLOCK, start);
     }
+    /* A nested block is a nested scope, and the scope stack is a fixed array,
+     * so the depth at which scopes stop being recorded is already bounded. The
+     * recursion into parse_stmt is not, though: a block deep enough runs the C
+     * stack out. The two limits are the same number, so the diagnostic that
+     * says the nest is too deep is the one the reader sees.
+     *
+     * The check is before the '{' is consumed, because the body is skipped
+     * rather than parsed, and the skip needs to know where the body starts. */
+    if (!enter_depth(p)) {
+        skip_braced_block(p);
+        return new_stmt(p, S_BLOCK, start);
+    }
+    advance(p); /* the '{' */
     scope_push(p);
     int cap = 8, n = 0;
     Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
@@ -555,6 +568,7 @@ static Stmt *parse_block(Parser *p) {
             diag_warn(W_UNREACHABLE, cur(p)->span, "this statement can never run");
         items[n++] = parse_stmt(p);
     }
+    leave_depth(p);
     if (!match(p, T_RBRACE)) {
         diag_error(cur(p)->span, "expected '}' to close block");
     }
