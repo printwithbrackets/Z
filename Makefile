@@ -72,7 +72,13 @@ build/std_src.h: $(STDLIB) tools/embed.py | build
 	@python3 tools/embed.py std_src $(STDLIB) > $@
 
 # Golden + diagnostic tests; run after the compiler links.
+#
+# The embed.py tests are here because the generator's output is compiled into
+# the compiler: a literal it emits that is not valid C breaks the build, but
+# only for the sources that happen to trip it, so the generator is checked
+# against inputs chosen to trip it rather than against the ones it ships with.
 test: $(BIN) tests/run
+	@python3 tests/embed_test.py
 	@./tests/run ./$(BIN)
 
 # AddressSanitizer gate. The leak cases in tests/leaks/ are already part of
