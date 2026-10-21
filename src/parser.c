@@ -108,6 +108,19 @@ typedef struct Scope {
      * declared outside a function lives in a different frame, so naming it from
      * inside would read a slot holding something else entirely. */
     int is_fn_body;
+    /* The outermost scope of a lambda body.
+     *
+     * Name lookup does *not* stop here: a lambda can name the variables around
+     * it, and that is what a capture is. The destructor walk does, because the
+     * values a lambda's body releases must be the lambda's own. The lambda has
+     * its own frame, so a slot number in it means a different object than the
+     * same slot number in the function that wrote the lambda, and releasing
+     * the enclosing function's locals from inside the lambda frees the wrong
+     * thing -- the lambda's environment cell, or one of its own parameters.
+     *
+     * So this is a boundary for drops and not for names, which is why it is a
+     * separate flag rather than a reuse of is_fn_body. */
+    int is_lambda_body;
 } Scope;
 
 /* How deep the open-scope stack may get. A block nested this far is already past

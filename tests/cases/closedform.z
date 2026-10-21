@@ -145,8 +145,40 @@ int main() {
         Console.WriteLog(sum);                      // 3
     }
 
+    // ---- not solved: a write hidden inside another statement ----
+    // The start of the loop is found by scanning backwards for the nearest
+    // write to the induction variable. A statement that *contains* a write --
+    // an `if`, a nested loop -- is not a write the scan can see, and it used to
+    // step over it and take an older initialisation instead. The trip count
+    // computed from that is a different loop's answer, so the program computed
+    // one thing at -O0 and another at -O2.
+    //
+    // The scan now stops at a statement it cannot prove does not write the
+    // variable, which refuses the rewrite rather than guessing.
+    {
+        var sum = 0; var i = 0;
+        if (1 < 2) { i = 5; }            // a write the scan cannot see into
+        while (i < 10) { sum = sum + 1; i = i + 1; }
+        Console.WriteLog(sum);                      // 5
+    }
+    {
+        var sum = 0; var i = 0;
+        for (var j = 0; j < 1; j = j + 1) { i = 7; }  // same, from a nested loop
+        while (i < 10) { sum = sum + 1; i = i + 1; }
+        Console.WriteLog(sum);                      // 3
+    }
+    {
+        var sum = 0; var i = 0;
+        bump(&i);                         // a call may write through what it is given
+        while (i < 10) { sum = sum + 1; i = i + 1; }
+        Console.WriteLog(sum);                      // 0, because i is 10 already
+    }
+
     return 0;
 }
 
 int step() { return 3; }
+
+// Writes through a pointer, so the closed-form pass cannot see the write.
+void bump(int* p) { *p = 10; }
 

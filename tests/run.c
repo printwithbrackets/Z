@@ -390,6 +390,7 @@ int main(int argc, char **argv) {
         "capture_read_fastpaths",
         "capture_param_spill",
         "capture_drop_box",
+        "lambda_drops",
         "mangle_collision",
         "vec_grow_owned",
         "map_rehash_owned",

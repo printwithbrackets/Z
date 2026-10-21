@@ -20,6 +20,22 @@
  * implies.
  */
 
+/* The destructor walks for a scope that is leaving stop at.
+ *
+ * A function body's scope is one, because a `return` leaves the whole function
+ * and the values the function owns are destroyed on the way out. A lambda
+ * body's scope is one for a different reason: the lambda has its own frame, so
+ * a slot number in it names a different object than the same slot number in
+ * the function that wrote the lambda. Releasing the enclosing function's
+ * locals from inside the lambda frees the wrong thing -- the lambda's
+ * environment cell, or one of its own parameters -- and releasing the
+ * lambda's own parameters frees the caller's.
+ *
+ * Name lookup does *not* stop at a lambda boundary, because a lambda naming
+ * the variables around it is what a capture is. Only the destructor walk
+ * stops there. */
+static int drop_boundary(Scope *sc) { return sc->is_fn_body || sc->is_lambda_body; }
+
 /* The destructor calls for one scope, in reverse declaration order, or NULL when
  * the scope owns nothing.
  *
@@ -47,6 +63,16 @@ static Stmt *build_drops(Parser *p, Scope *sc, Span span, const Span *limit) {
         if (limit != NULL && v->decl_span.start > limit->start &&
             (limit->file == NULL || v->decl_span.file == NULL ||
              strcmp(v->decl_span.file, limit->file) == 0))
+            continue;
+        /* A parameter is a borrow. Whoever called this function owns the value,
+         * and the caller's scope is what releases it -- a callee that released
+         * it would be destroying something it was only lent.
+         *
+         * The scope boundaries above already keep the walk out of the caller's
+         * frame, so this is belt and braces: the rule is here rather than
+         * inferred from where the walk happens to stop, so that a scope added
+         * later without a boundary cannot turn a borrow into a free. */
+        if (v->is_param)
             continue;
         /* A moved-from local is not owned by anything. `move` is how a value is
          * handed on rather than shared, and the handover empties the source, so
@@ -186,13 +212,13 @@ static Stmt *build_drops_to(Parser *p, Scope *inner, Scope *stop, Span span) {
     if (inner == NULL)
         return NULL;
     int cap = 0;
-    for (Scope *sc = inner; sc != NULL && sc != stop; sc = sc->parent)
+    for (Scope *sc = inner; sc != NULL && sc != stop && !drop_boundary(sc); sc = sc->parent)
         cap += sc->ndrops;
     if (cap == 0)
         return NULL;
     Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
     int k = 0;
-    for (Scope *sc = inner; sc != NULL && sc != stop; sc = sc->parent) {
+    for (Scope *sc = inner; sc != NULL && sc != stop && !drop_boundary(sc); sc = sc->parent) {
         Stmt *d = build_drops(p, sc, span, &span);
         if (d == NULL)
             continue;
@@ -214,13 +240,13 @@ static Stmt *build_drops_chain(Parser *p, Scope *inner, Span span) {
     /* Count first so the list is allocated once. Upper bound: one destructor
      * call per recorded local across every scope on the chain. */
     int cap = 0;
-    for (Scope *sc = inner; sc != NULL; sc = sc->parent)
+    for (Scope *sc = inner; sc != NULL && !drop_boundary(sc); sc = sc->parent)
         cap += sc->ndrops;
     if (cap == 0)
         return NULL;
     Stmt **items = arena_alloc_array(p->arena, (size_t)cap, sizeof(Stmt *));
     int k = 0;
-    for (Scope *sc = inner; sc != NULL && !sc->is_fn_body; sc = sc->parent) {
+    for (Scope *sc = inner; sc != NULL && !drop_boundary(sc); sc = sc->parent) {
         Stmt *d = build_drops(p, sc, span, &span);
         if (d == NULL)
             continue;

@@ -1,0 +1,84 @@
+// A lambda's body releases the lambda's own values, and not the ones around it.
+//
+// The destructor walk goes up the scope chain from wherever a value is
+// destroyed, and it stopped at a function body's scope. A lambda's scope was
+// not one of those, so the walk carried on into the function that wrote the
+// lambda -- and the slot numbers in the lambda's frame are not the slot
+// numbers in that function's frame, so it released the wrong objects.
+//
+// Two things went wrong, and both are memory errors:
+//
+//   - The lambda's own `string` parameter was released when the lambda's body
+//     ended, which freed the *caller's* string. The caller then used it, and
+//     released it again at the end of its own scope.
+//
+//         ERROR: AddressSanitizer: heap-use-after-free
+//         READ of size 8 in zlen
+//         freed by thread T0 here: ... z_str_free ... in $lam0
+//
+//   - The enclosing function's locals were released from inside the lambda,
+//     where the same slot number names the lambda's environment cell or one of
+//     its own parameters.
+//
+// The fix is a scope boundary that the destructor walk stops at and name
+// lookup does not: a lambda may name the variables around it, and that is
+// what a capture is, but it must not release them.
+//
+// A golden test only sees the output, and a use-after-free is a crash, so what
+// this checks is that the programs run and print what they should. The
+// use-after-free was confirmed with `-fsanitize=address`.
+
+string takesAndReturns(string s) { return s; }
+
+int main() {
+    // A lambda parameter is a borrow. The caller owns the string, and the
+    // caller's scope releases it -- not the lambda, which is only lent it.
+    {
+        var t = "he" + "llo";
+        var f = (string s) => { return s; };
+        Console.WriteLog(f(t));      // hello
+        Console.WriteLog(t);         // hello, still the caller's
+    }
+    Console.WriteLog("past the first scope"); // reached
+
+    // The same, through a function rather than a lambda, so the two spellings
+    // are compared: a parameter is a borrow either way.
+    {
+        var u = "wor" + "ld";
+        Console.WriteLog(takesAndReturns(u)); // world
+        Console.WriteLog(u);                  // world
+    }
+    Console.WriteLog("past the second scope"); // reached
+
+    // A lambda written inside a function that holds a string of its own. The
+    // lambda must not release it: the slot it would release is the lambda's
+    // environment cell, not the function's string.
+    {
+        var s = "outer";
+        var g = () => { return 1; };
+        Console.WriteLog(g());       // 1
+        Console.WriteLog(s);         // outer, not released by the lambda
+    }
+    Console.WriteLog("past the third scope"); // reached
+
+    // A lambda that owns something itself. What the lambda allocates, the
+    // lambda releases.
+    {
+        var h = () => { var own = "in" + "ner"; return own; };
+        Console.WriteLog(h());        // inner
+    }
+    Console.WriteLog("past the fourth scope"); // reached
+
+    // A captured string, which must keep working: the capture is a copy in a
+    // heap cell, and the lambda releases the cell rather than the string.
+    {
+        var c = "cap" + "tured";
+        var k = () => len(c);
+        Console.WriteLog(k());        // 8
+        Console.WriteLog(c);          // captured
+    }
+    Console.WriteLog("past the fifth scope"); // reached
+
+    Console.WriteLog("done"); // reached
+    return 0;
+}
