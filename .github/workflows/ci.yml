@@ -4,8 +4,9 @@
 # nothing wrong (see Makefile `test-all` comment + README "Known miscompiles").
 # `make test-all` loops -O0..-O3 via Z_TEST_OPT and fails on the first
 # non-zero exit. The ASan leak gate (`vec_string`, `map_string`,
-# `vec_grow_owned`, `map_rehash_owned`) runs inside `make test-asan` when the
-# toolchain supports `-fsanitize=address`, else reports `skip`.
+# `vec_grow_owned`, `map_rehash_owned`, `nested_reassign`) runs inside
+# `make test-asan` when the toolchain supports `-fsanitize=address`, else
+# reports `skip`.
 # The second axis builds the compiler itself under both gcc and clang, because
 # float codegen has diverged between backends before; the generated code is
 # still linked with the system `cc`.

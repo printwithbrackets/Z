@@ -289,7 +289,12 @@ static int close_form_trip(Parser *p, Stmt *loop, Expr *step_in, int *ivar, long
  * One function because the start-of-loop search has to agree with itself about
  * what a write is: the nearest write wins, and a write it did not recognise
  * would let the search step over it and take an earlier one instead, which is a
- * different loop's start. */
+ * different loop's start.
+ *
+ * A statement this cannot see into is NOT reported as a write, because it may
+ * contain one. The distinction matters: "does not write it" and "might write
+ * it" are different answers, and the search below has to treat the second as
+ * the reason to stop. */
 static int stmt_writes_slot(Stmt *st, int slot) {
     if (st == NULL)
         return 0;
@@ -299,6 +304,36 @@ static int stmt_writes_slot(Stmt *st, int slot) {
         return 0;
     Expr *e = st->expr;
     return e->kind == E_ASSIGN && e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->slot == slot;
+}
+
+/* True when `st` might write `slot` even though it is not a plain assignment
+ * to it.
+ *
+ * An `if`, a loop, or a block can contain an assignment to the induction
+ * variable, and a statement this cannot see into is therefore a statement the
+ * start-of-loop search must not step over. Stepping over one lands on an older
+ * initialisation, and the closed form computed from that is a different loop's
+ * answer: the program computes one thing at -O0 and another at -O2.
+ *
+ * A plain expression statement whose expression is not an assignment is the
+ * same case: `f(i)` can write through a pointer the search cannot follow. */
+static int stmt_may_write_slot(Stmt *st, int slot) {
+    if (st == NULL)
+        return 0;
+    if (stmt_writes_slot(st, slot))
+        return 0;
+    if (st->kind == S_EXPR) {
+        /* A plain assignment to something else cannot write the slot. Any
+         * other expression might, through a call or a pointer. */
+        Expr *e = st->expr;
+        if (e != NULL && e->kind == E_ASSIGN)
+            return 0;
+        return 1;
+    }
+    if (st->kind == S_VAR)
+        return 0;
+    /* An `if`, a loop, a block, a `return`: it may contain a write. */
+    return 1;
 }
 
 /* Applies close_form_loop to every loop in a function body, innermost first, so
@@ -471,8 +506,17 @@ static Stmt *close_form_loop(Parser *p, Stmt *loop, Stmt **siblings, int sib_ind
          * know it latched onto whichever local it saw first. */
         for (int k = sib_index - 1; k >= 0 && !have_start; k--) {
             Stmt *prev = siblings[k];
-            if (!stmt_writes_slot(prev, ivar))
+            if (!stmt_writes_slot(prev, ivar)) {
+                /* A statement that might write the induction variable stops the
+                 * search. Stepping over it would land on an older write, and
+                 * the trip count computed from that is a different loop's
+                 * answer -- the program would compute one thing at -O0 and
+                 * another at -O2. Refusing the rewrite is the honest answer:
+                 * the start value is not known, so no trip count is known. */
+                if (stmt_may_write_slot(prev, ivar))
+                    break;
                 continue;
+            }
             /* The nearest write wins, and the search stops either way. A write
              * whose value is not a constant leaves the start unknown, which
              * refuses the rewrite rather than guessing. */

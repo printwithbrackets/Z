@@ -16,3 +16,7 @@
 # source -- only a place a stale compiler binary or stray output landed -- so it
 # is ignored rather than committed by accident.
 /..../
+
+# Python bytecode. tools/embed.py is imported by tests/embed_test.py, so
+# running the tests leaves a __pycache__ behind.
+/__pycache__/

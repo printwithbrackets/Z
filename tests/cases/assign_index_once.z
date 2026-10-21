@@ -1,0 +1,45 @@
+// A string assignment to an element evaluates its index once.
+//
+// A string slot owns exactly one value, so a plain assignment releases the one
+// it had. That release reads the destination first, which needs the
+// destination's address -- and the store needs the same address. Computing it
+// twice ran the index expression twice, so `a[i++] = "x"` released the value
+// in `a[i]` and wrote to `a[i + 1]`, and left `i` one higher than the
+// program wrote.
+//
+// The address is computed once now and reused by both.
+//
+// A golden test only sees the output, and a double free is a crash, so what
+// this checks is that the program computes the right thing. The double free
+// was confirmed with `-fsanitize=address` on the string cases, which now run
+// clean.
+
+int main() {
+    var a = new string[3];
+    a[0] = "zero";
+    a[1] = "one";
+    a[2] = "two";
+
+    // The index runs once, so the store lands in a[0] and i ends at 1.
+    var i = 0;
+    a[i++] = "NEW";
+    Console.WriteLog(a[0]); // NEW
+    Console.WriteLog(a[1]); // one
+    Console.WriteLog(a[2]); // two
+    Console.WriteLog(i);    // 1
+
+    // The same through a call, whose side effect is the same twice.
+    var j = 0;
+    a[next(&j)] = "AGAIN";
+    Console.WriteLog(a[0]); // AGAIN
+    Console.WriteLog(j);    // 1
+
+    return 0;
+}
+
+// Returns the index to use, and moves the caller's counter on.
+int next(int* p) {
+    int v = *p;
+    *p = v + 1;
+    return v;
+}

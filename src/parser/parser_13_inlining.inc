@@ -57,8 +57,13 @@ static int inline_new_slot(int *next_offset, int sz) {
 /* The state one function's inlining runs with. */
 typedef struct {
     Parser *p;
-    Stmt *self;      /* the function being inlined into, for the recursion check */
-    int budget;      /* expansions left in this function */
+    Stmt *self; /* the function being inlined into, for the recursion check */
+    /* The expansions left in this function.
+     *
+     * A pointer rather than a count, because a nested expansion is still an
+     * expansion in the *same* function: the cap is on the function's total, and
+     * a copy per level would multiply it by the depth. */
+    int *budget;
     int depth;       /* how many expansions deep this call is */
     int *next_label; /* the parser's label counter, so labels are unique */
     int used_any;    /* set when anything was inlined, to report growth */
@@ -110,6 +115,34 @@ static Expr *clone_expr(Parser *p, Expr *e) {
         c->args = NULL;
     }
     c->nargs = e->nargs;
+    /* A match's arms are copied too.
+     *
+     * They are not part of the `lhs`/`rhs`/`args` spine, so a copy that only
+     * followed that spine left every arm pointing into the tree it came from.
+     * The arm is then substituted *in place*, so the substitution reaches the
+     * callee's expression rather than the copy -- and the callee's expression
+     * names the callee's frame slots, which in the caller's frame are
+     * different variables entirely.
+     *
+     * A parameter referenced only in a match arm is the case that shows it:
+     * `match f(x) { Ok(v) => v, Err(_) => fallback }` names `fallback` in the
+     * arm and nowhere else, and the arm read whatever the caller's frame had
+     * at the callee's offset for it. */
+    if (e->narms > 0) {
+        MatchArm *na = arena_alloc_array(p->arena, (size_t)e->narms, sizeof(MatchArm));
+        for (int i = 0; i < e->narms; i++) {
+            na[i] = e->arms[i];
+            na[i].body = clone_expr(p, e->arms[i].body);
+            if (e->arms[i].nbind > 0) {
+                int *nb = arena_alloc_array(p->arena, (size_t)e->arms[i].nbind, sizeof(int));
+                memcpy(nb, e->arms[i].bind_slots, (size_t)e->arms[i].nbind * sizeof(int));
+                na[i].bind_slots = nb;
+            }
+        }
+        c->arms = na;
+    } else {
+        c->arms = NULL;
+    }
     return c;
 }
 
@@ -511,6 +544,10 @@ static Stmt *inline_single_return(Stmt *body) {
     return only;
 }
 
+/* Substitutes every single-return call anywhere in an expression. Safe at any
+ * depth because nothing is spliced: a call becomes its callee's expression. */
+static void inline_expr(InlineCtx *ic, FnTable *T, Expr **e);
+
 /* Rewrites a call in place when the callee is a single return, which needs no
  * statement around it. Returns 1 when something was done. The expression is
  * replaced through `*slot`. */
@@ -518,7 +555,7 @@ static int inline_substitute(InlineCtx *ic, FnTable *T, Expr **slot) {
     Expr *call = *slot;
     if (call == NULL || call->kind != E_CALL || call->is_extern)
         return 0;
-    if (ic->budget <= 0 || ic->depth >= INLINE_MAX_DEPTH)
+    if (*ic->budget <= 0 || ic->depth >= INLINE_MAX_DEPTH)
         return 0;
     Stmt *callee = fn_table_find(T, call->name);
     if (!inlineable(callee))
@@ -536,17 +573,20 @@ static int inline_substitute(InlineCtx *ic, FnTable *T, Expr **slot) {
     InlineCtx deeper = *ic;
     deeper.depth = ic->depth + 1;
     e = subst_expr(ic->p, e, binds, nb);
-    /* A nested call inside the substituted expression gets its own chance. */
-    if (nb > 0)
-        (void)deeper;
+    /* A nested call inside the substituted expression gets its own chance,
+     * one level deeper, so that the depth limit means what it says: an
+     * expansion nested in an expansion is bounded too.
+     *
+     * The replacement is rescanned rather than returned fresh, so a call in it
+     * can be expanded. That is what the depth limit is for: without it the
+     * nesting is unbounded, because each expansion can contain another. */
+    inline_expr(&deeper, T, &e);
     *slot = e;
-    ic->budget--;
+    (*ic->budget)--;
     ic->used_any = 1;
     return 1;
 }
 
-/* Substitutes every single-return call anywhere in an expression. Safe at any
- * depth because nothing is spliced: a call becomes its callee's expression. */
 static void inline_expr(InlineCtx *ic, FnTable *T, Expr **e) {
     if (e == NULL || *e == NULL)
         return;
@@ -596,7 +636,7 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
     Expr *call = *slot;
     if (call->kind != E_CALL || call->is_extern)
         return 0;
-    if (ic->budget <= 0 || ic->depth >= INLINE_MAX_DEPTH)
+    if (*ic->budget <= 0 || ic->depth >= INLINE_MAX_DEPTH)
         return 0;
     Stmt *callee = fn_table_find(T, call->name);
     if (!inlineable(callee) || callee == ic->self)
@@ -630,10 +670,18 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
     if (ic->self->locals_bytes < ptop)
         ic->self->locals_bytes = ptop;
     int rslot = inline_new_slot(&ic->self->locals_bytes, 8);
+    /* The frame has grown by now, and a refusal below has to give the slots
+     * back: a body that was not spliced must not leave the caller's frame
+     * bigger than it was. The size is restored from here rather than
+     * recomputed, because the two ways this can fail have each already
+     * allocated something of their own. */
+    int saved_bytes = ic->self->locals_bytes;
 
     Stmt *body = clone_stmt(p, callee->fbody);
-    if (body == NULL)
+    if (body == NULL) {
+        ic->self->locals_bytes = saved_bytes;
         return 0;
+    }
 
     /* The callee's locals have to move into the caller's frame before anything
      * else touches the copy. A body with a lambda in it is left alone: a lambda
@@ -645,6 +693,7 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
     int next_slot = ic->self->locals_bytes;
     if (inline_remap_stmt(ic, body, map, &nmap, &next_slot, &ptop, &pinned)) {
         /* Rolled back: the frame must not keep the slots a refused body took. */
+        ic->self->locals_bytes = saved_bytes;
         return 0;
     }
     ic->self->locals_bytes = next_slot;
@@ -655,8 +704,12 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
         inline_rewrite_list(ic, body->items, body->nitems, &fixed, rslot, callee->ret_type);
     else
         inline_rewrite(ic, body, &fixed, rslot, callee->ret_type);
-    if (fixed.n == 0)
+    if (fixed.n == 0) {
+        /* Rolled back for the same reason as the refusal above: the body was
+         * not spliced, so the frame must not keep its slots. */
+        ic->self->locals_bytes = saved_bytes;
         return 0;
+    }
 
     InlineBinding all[INLINE_MAX_STMT + 1];
     for (int i = 0; i < nb; i++)
@@ -682,7 +735,7 @@ static int inline_build_splice(InlineCtx *ic, FnTable *T, Stmt *st, int *next_la
 
     list_push(out, wrapper);
     list_push(out, st);
-    ic->budget--;
+    (*ic->budget)--;
     ic->used_any = 1;
     return 1;
 }
@@ -753,8 +806,12 @@ static void inline_function(InlineCtx *ic, FnTable *T, Stmt *fn) {
      * frame is not an ordinary one and this pass does not model it. */
     if (fn->fname != NULL && fn->fname[0] == '$')
         return;
+    /* The budget lives here rather than in the context, so that every level of
+     * nesting draws from the same count: the cap is on the function's total
+     * number of expansions, not on each level's. */
+    int budget = INLINE_MAX_PER_FN;
     ic->self = fn;
-    ic->budget = INLINE_MAX_PER_FN;
+    ic->budget = &budget;
     ic->depth = 0;
     ic->used_any = 0;
     StmtList out = {NULL, 0, 0, ic->p->arena};
@@ -781,8 +838,9 @@ static void inline_program(Parser *p, Stmt *program) {
     FnTable T = {NULL, 0, 0, p->arena};
     for (int i = 0; i < program->nitems; i++) {
         Stmt *it = program->items[i];
-        if (it != NULL && it->kind == S_FUNC && it->fbody != NULL)
+        if (it != NULL && it->kind == S_FUNC && it->fbody != NULL) {
             fn_table_add(&T, it);
+        }
     }
     for (int round = 0; round < 3; round++) {
         int changed = 0;
@@ -855,6 +913,47 @@ static int inline_remap_expr(InlineCtx *ic, Expr *e, SlotRemap *map, int *nmap, 
     for (int i = 0; i < e->nargs; i++)
         if (inline_remap_expr(ic, e->args[i], map, nmap, next_slot, base, pinned))
             return 1;
+    /* A match arm's body is an expression of its own, and it is where a
+     * parameter of the enclosing function is usually referenced: `match f(x) {
+     * Ok(v) => v, Err(_) => fallback }` names `fallback` in the arm and
+     * nowhere else.
+     *
+     * Without this the arm is not walked at all, so the reference keeps the
+     * callee's frame offset -- which names something else entirely in the
+     * caller's frame -- and the arm reads whatever is there. */
+    for (int i = 0; i < e->narms; i++) {
+        MatchArm *arm = &e->arms[i];
+        /* A match arm's bound names are frame slots of their own: the parser
+         * gave each one a slot in the arm's scope, and the code generator
+         * writes the payload there before the arm's body reads it. Those slots
+         * are the callee's, so they have to be given the caller's.
+         *
+         * Without this the payload is written into the caller's frame at the
+         * callee's offset, which is a different variable, and the arm reads
+         * whatever was there. */
+        for (int b = 0; b < arm->nbind; b++) {
+            int from = arm->bind_slots[b];
+            int to = from;
+            for (int m = 0; m < *nmap; m++) {
+                if (map[m].from == from) {
+                    to = map[m].to;
+                    break;
+                }
+            }
+            if (to == from && from >= *base) {
+                /* A local of the callee, given a slot of the caller's own. */
+                to = inline_new_slot(next_slot, 8);
+                if (*nmap < 64) {
+                    map[*nmap].from = from;
+                    map[*nmap].to = to;
+                    (*nmap)++;
+                }
+            }
+            arm->bind_slots[b] = to;
+        }
+        if (inline_remap_expr(ic, arm->body, map, nmap, next_slot, base, pinned))
+            return 1;
+    }
     return 0;
 }
 

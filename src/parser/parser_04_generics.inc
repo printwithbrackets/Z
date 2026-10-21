@@ -924,7 +924,28 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
                 idx->ival = 0;
                 idx->type = type_int(p->ty);
             } else {
+                /* An index expression is parsed here, so `a[b[c[d[...]]]]` is
+                 * as deep a nest as the brackets are. It is bounded like every
+                 * other descent. */
+                if (!enter_depth(p)) {
+                    /* The base is kept and the index is a literal, so the node
+                     * is a well-formed index rather than one whose base is
+                     * itself. The rest of the nest is stepped over, so the
+                     * enclosing levels find their own ']' where they expect
+                     * it. */
+                    Expr *base = e;
+                    skip_past_bracket(p);
+                    idx = new_expr(p, E_INT, span);
+                    idx->ival = 0;
+                    idx->type = type_int(p->ty);
+                    Expr *ix = new_expr(p, E_INDEX, span);
+                    ix->lhs = base;
+                    ix->rhs = idx;
+                    ix->type = type_int(p->ty);
+                    return ix;
+                }
                 idx = parse_expr(p);
+                leave_depth(p);
             }
             if (is_range || at(p, T_DOTDOT)) {
                 if (!match(p, T_DOTDOT))

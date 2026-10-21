@@ -21,6 +21,15 @@ static const char *s_texts[MAX_SOURCES];
 static int n_sources = 0;
 static int warned_sources = 0;
 
+/* How much of a source line a diagnostic excerpt shows. A line longer than
+ * this is shown truncated around the token, with the truncation marked.
+ *
+ * The limit is on the excerpt rather than on the line because the line is
+ * the user's and can be as long as they like, but the excerpt exists to show
+ * the reader where the problem is, and a hundred kilobytes of context does
+ * not do that. */
+#define EXCERPT_MAX 200
+
 void diag_set_source(const char *file, const char *text) {
     g_file = file;
     g_text = text;
@@ -376,7 +385,14 @@ static void put_sev(const char *sev) {
 /* Renders the physical line containing span.start and a caret run under the
  * token, gutter-numbered so a reader can see which line is meant. Only the
  * human format does this; `gcc` is one line per problem by definition and
- * `json` carries the offsets. */
+ * `json` carries the offsets.
+ *
+ * A line longer than EXCERPT_MAX is shown truncated around the token, with
+ * the truncation marked. A source line is not bounded by anything the
+ * compiler controls -- a file with a hundred thousand characters on one line
+ * is legal, and the excerpt of it is what a diagnostic prints -- so without a
+ * limit one diagnostic on such a line writes a hundred kilobytes to stderr,
+ * which is neither readable nor fast. */
 static void show_excerpt(Span span) {
     const char *text = text_for(span);
     if (text == NULL)
@@ -394,26 +410,56 @@ static void show_excerpt(Span span) {
     while (line_end < len && text[line_end] != '\n')
         line_end++;
 
-        /* A fixed-width gutter, so the caret line below lines up with the text
-         * above it without having to measure what was printed. */
+    /* The window of the line to show, and where the token sits inside it. The
+     * token is kept visible even when it is longer than the window, by
+     * starting the window at the token. */
+    int line_w = line_end - line_begin;
+    int caret_col = start - line_begin;
+    int win_begin = 0;
+    int win_end = line_w;
+    int truncated = 0;
+    if (line_w > EXCERPT_MAX) {
+        truncated = 1;
+        /* Half the window before the token and half after, so the context on
+         * either side of it is visible. The token may be longer than the
+         * window, in which case it starts the window. */
+        int before = EXCERPT_MAX / 2;
+        win_begin = caret_col - before;
+        if (win_begin < 0)
+            win_begin = 0;
+        win_end = win_begin + EXCERPT_MAX;
+        if (win_end > line_w) {
+            win_end = line_w;
+            win_begin = win_end - EXCERPT_MAX;
+            if (win_begin < 0)
+                win_begin = 0;
+        }
+        caret_col = start - line_begin - win_begin;
+    }
+
+    /* A fixed-width gutter, so the caret line below lines up with the text
+     * above it without having to measure what was printed. */
 #define GUTTER_W 8
     char num[24];
     snprintf(num, sizeof num, "%*d | ", GUTTER_W - 3, span.line);
     paint(CLR_DIM, num);
-    fprintf(stderr, "%.*s\n", line_end - line_begin, text + line_begin);
+    if (truncated && win_begin > 0)
+        fputs("...", stderr);
+    fprintf(stderr, "%.*s", win_end - win_begin, text + line_begin + win_begin);
+    if (truncated && win_end < line_w)
+        fputs("...", stderr);
+    fputc('\n', stderr);
 
-    int caret_col = start - line_begin;
-    int line_w = line_end - line_begin;
     int carets = span.len < 1 ? 1 : span.len;
     /* A caret run longer than the token is noise on a long literal, and one
      * running past the end of the line is unreadable, so both are clamped. */
     if (carets > 40)
         carets = 40;
-    if (caret_col + carets > line_w)
-        carets = line_w - caret_col;
+    if (caret_col + carets > win_end - win_begin)
+        carets = win_end - win_begin - caret_col;
     if (carets < 1)
         carets = 1;
-    for (int i = 0; i < GUTTER_W + caret_col; i++)
+    for (int i = 0; i < GUTTER_W + caret_col + (truncated && win_begin > 0 ? 3 : 0); i++)
         fputc(' ', stderr);
     if (diag_color_enabled())
         fputs(CLR_RED, stderr);

@@ -338,6 +338,18 @@ static Expr *parse_lambda(Parser *p, Span span) {
 
     advance(p); /* '(' */
     scope_push(p);
+    /* The lambda's own scope is where the destructor walk stops.
+     *
+     * The lambda has a frame of its own, so a slot number in it names a
+     * different object than the same slot number in the function that wrote
+     * the lambda. Releasing the enclosing function's locals from inside the
+     * lambda frees the wrong thing -- the lambda's environment cell, or one of
+     * its own parameters -- and releasing the lambda's own parameters frees
+     * the caller's.
+     *
+     * Name lookup does *not* stop here: a lambda naming the variables around
+     * it is what a capture is. */
+    p->scope->is_lambda_body = 1;
     /* The result buffer's slot is reserved before the environment's, and always.
      *
      * A struct is returned through memory, so a lambda returning one receives the

@@ -108,12 +108,38 @@ typedef struct Scope {
      * declared outside a function lives in a different frame, so naming it from
      * inside would read a slot holding something else entirely. */
     int is_fn_body;
+    /* The outermost scope of a lambda body.
+     *
+     * Name lookup does *not* stop here: a lambda can name the variables around
+     * it, and that is what a capture is. The destructor walk does, because the
+     * values a lambda's body releases must be the lambda's own. The lambda has
+     * its own frame, so a slot number in it means a different object than the
+     * same slot number in the function that wrote the lambda, and releasing
+     * the enclosing function's locals from inside the lambda frees the wrong
+     * thing -- the lambda's environment cell, or one of its own parameters.
+     *
+     * So this is a boundary for drops and not for names, which is why it is a
+     * separate flag rather than a reuse of is_fn_body. */
+    int is_lambda_body;
 } Scope;
 
 /* How deep the open-scope stack may get. A block nested this far is already past
  * the parser's own recursion limit, so a program that reaches it is rejected
  * before it can overflow the stack rather than after. */
 #define MAX_DROP_SCOPES 128
+
+/* How deep the recursive descent may go.
+ *
+ * Each level of nesting in the source -- a parenthesis, an index, a block --
+ * costs the parser a few C stack frames, and a program that nests far enough
+ * exhausts the stack before the parser reaches the end of the file. The limit
+ * is a multiple of what a program plausibly nests, so a real program is
+ * unaffected, and a hostile one gets a diagnostic instead of a signal.
+ *
+ * The number is deliberately not tied to the size of the input: a program with
+ * a hundred thousand terms in one expression is not deeply nested and must
+ * still compile. */
+#define MAX_PARSE_DEPTH 256
 
 /* A function declared inside another function, mapping the name the program
  * writes to the symbol emitted for it. */
@@ -305,6 +331,27 @@ typedef struct {
      * enclosing function's. */
     Scope *open_scopes[MAX_DROP_SCOPES];
     int nopen;
+
+    /* How deep the recursive descent currently is.
+     *
+     * The parser recurses on the shape of the input: a parenthesis, an index
+     * and a nested block each step one level deeper, and there is no bound on
+     * how deep a program may nest. A file with tens of thousands of open
+     * parens therefore ran the C stack out and the compiler died on a signal
+     * rather than reporting a problem with the program.
+     *
+     * The limit is well above anything a person writes, and it is a limit on
+     * the *parser's* recursion rather than on the input's length, because a
+     * long expression is fine and a deeply nested one is not. */
+    int depth;
+
+    /* Whether the depth limit has already been reported, so a program nested
+     * past it produces one diagnostic rather than one per level. */
+    int depth_reported;
+
+    /* Whether the scope-stack limit has already been reported, for the same
+     * reason. */
+    int scope_limit_reported;
 
     /* Every scope that has been closed, newest first, for the deferred
      * unused-local report. See scope_pop. */

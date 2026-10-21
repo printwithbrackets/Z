@@ -7,7 +7,7 @@ beyond a C toolchain.
 **Version 0.4.1.** `z --version` reports it, and it is the tag the release is cut
 from.
 
-**Status: v2 slices 1 and 2 are built, and slice 3 has taken the collector out.**
+**Status: v2 slices 1 and 2 are built apart from the `T&` reference type, and slice 3 has taken the collector out.**
 A working end-to-end compiler: source → lexer → parser → type checker → x86-64
 assembly → native binary. It has a real type system, pointers, heap arrays,
 structs with methods and properties, `for`/`foreach` and the range-based `for`,
@@ -40,13 +40,16 @@ reachable only through one of those, are all still live at exit. Leaks are the
 safe direction to be wrong in, which is why the frees are wired up per type
 rather than all at once.
 
-Leaks are also the only thing the suite is clean of. All 106 golden cases, which
-are the ones that produce a program to run, build and run under
-AddressSanitizer with no use-after-free, no double free and no buffer overflow.
-The rest of the 235 tests are diagnostics and gates, none of which runs a
-program, so "the suite is clean under ASan" is a statement about those 106 and
-not about the other 129. And it is a statement about the suite rather than about
-the language:
+Leaks are also the only thing the suite is not clean of. The suite is 285 checks:
+132 golden cases that build a program, run it and compare its output, 89
+diagnostic cases that compare a compiler error message, and 64 more that are
+exit-status, runtime-abort, interop, module, warning, gate and driver checks.
+Only the five cases in `tests/leaks/` are built with AddressSanitizer and run
+with leak detection on, and they assert that no string allocation is still live
+at exit and that the sanitizer reported no error. The other 280 are not run
+under ASan at all, so "the suite is clean under ASan" is a statement about those
+five and not about the rest. And it is a statement about the suite rather than
+about the language:
 a program outside it can release a captured string's cell instead of its string,
 or hand an already-released field to a destructor. Both are known, and each is
 written down next to the code that causes it.
@@ -97,13 +100,13 @@ test.
 The language is being re-cast from C#-flavored to **C++-flavored but dumber**:
 value semantics, references, RAII instead of a garbage collector, no
 inheritance, and threads that cannot data-race because ownership makes sharing
-unrepresentable. Slice 3 (ownership and RAII, which retires the collector) and
-slice 4 (threads and channels) are what remain. See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2
+unrepresentable. The rest of slice 3 (ownership and RAII, beyond the collector
+and `string`) and slice 4 (threads and channels) are what remain. See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2
 specification and the five slices it is built in; v1 is preserved verbatim in
 **[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md)**. To learn the language that
-compiles *today*, read [docs/TUTORIAL.md](docs/TUTORIAL.md) and
-[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md); the [Roadmap](#roadmap) below is the
-v1 history and what came of it.
+compiles *today*, read [docs/TUTORIAL.md](docs/TUTORIAL.md);
+[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md) is the v1 baseline minus the parts
+slice 2 and slice 3 changed. The [Roadmap](#roadmap) below is the v1 history and what came of it.
 
 ## Build & test
 
@@ -141,8 +144,10 @@ throughput flag. There is no separate `--no-null-check` flag: one flag covers
 both. With checks on, dereferencing a null pointer prints
 `runtime error: null pointer dereference` and exits 134; with `--no-bounds` it is
 a bare SIGSEGV and exit 139. The check covers the `*` operator, `p.field`
-through a null pointer, `arr.length` on a null array, `len(s)` on a null
-string, and indexing a null array or string.
+through a null pointer, `arr.length` on a null array, `s.length` on a null
+string, and indexing a null array or string. The builtin `len(s)` is the
+exception: it is a runtime call rather than a length load, and it answers 0 for
+a null string rather than aborting.
 
 ```csharp
 int main() {
@@ -1066,12 +1071,12 @@ See **[docs/LANGUAGE.md](docs/LANGUAGE.md)** for the v2 specification: the
 grammar and type rules, and the design rationale for the three decisions
 everything else depends on — ownership with explicit `move`, destruction on
 every exit path, and the concurrency model that ownership makes sufficient.
-[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md) is the v1 specification, which is what
-the compiler in this repository implements.
+[docs/LANGUAGE-v1.md](docs/LANGUAGE-v1.md) is the v1 specification the compiler
+started from; v2 slices 1–2 and part of slice 3 now sit on top of it.
 
 The two documents are kept side by side on purpose. v2 changes the language, not
 the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
-diagnostics system, the 106 golden tests — are still the spec for the parts that
+diagnostics system, the 132 golden tests — are still the spec for the parts that
 do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License

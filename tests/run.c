@@ -390,6 +390,9 @@ int main(int argc, char **argv) {
         "capture_read_fastpaths",
         "capture_param_spill",
         "capture_drop_box",
+        "lambda_drops",
+        "assign_index_once",
+        "inline_match_arm",
         "mangle_collision",
         "vec_grow_owned",
         "map_rehash_owned",
@@ -1215,6 +1218,205 @@ int main(int argc, char **argv) {
          * left behind per run is a directory left behind per run forever. A run
          * that died mid-way leaves one, which is what `make clean` is for. */
         rmdir(dir);
+    }
+
+    /* A source file's *name* is data too, and it reaches the assembler.
+     *
+     * With `-g`, the compiler emits a `.file` directive naming each source file,
+     * and the name used to be interpolated into that directive unescaped. A file
+     * name is not under the program's control: a quote in one ended the string
+     * early, and the rest of the name was assembled as directives rather than as
+     * a name. Git and tar both permit such a name, so a checkout is enough.
+     *
+     * The payload here is a `.globl` and a `.byte`, so a build that injected it
+     * would define a symbol nobody asked for. The check is on the symbol rather
+     * than on the exit status, because the injection assembles cleanly: the
+     * build succeeding is not what proves the payload did not land. */
+    {
+        char dir[128];
+        snprintf(dir, sizeof dir, "/tmp/z_test_dbgname_%ld", (long)getpid());
+        mkdir(dir, 0700);
+        /* The name carries a quote, a newline and a directive. A newline is
+         * what makes the injected text a separate line, and the assembler ends a
+         * `.file` directive at the newline, so without one there is nothing to
+         * inject. */
+        char evil[256], out_path[256];
+        snprintf(evil, sizeof evil, "%s/a\".globl z_injected_dbg\n.byte 0x90\n\".z", dir);
+        snprintf(out_path, sizeof out_path, "%s/out.bin", dir);
+
+        static const char src[] = "int main() { Console.WriteLog(7); return 0; }\n";
+        FILE *f = fopen(evil, "wb");
+        if (f == NULL) {
+            fprintf(stderr, "FAIL dbgname (cannot write the test source)\n");
+            fail++;
+        } else {
+            fwrite(src, 1, sizeof src - 1, f);
+            fclose(f);
+
+            char qevil[600], qout[600], bcmd[3072];
+            shell_quote(evil, qevil, sizeof qevil);
+            shell_quote(out_path, qout, sizeof qout);
+            snprintf(bcmd, sizeof bcmd, "%s build %s -o %s -g %s 2>&1", zq, qevil, qout,
+                     opt_flag());
+            char actual[1 << 16];
+            int rc = run_cmd_capture(bcmd, actual, sizeof actual);
+
+            /* The symbol is read out of the built binary rather than out of the
+             * assembly, because a symbol in the assembly is not the thing that
+             * matters: what matters is a symbol in the program the user runs. */
+            int injected = 0;
+            char nmcmd[3072];
+            snprintf(nmcmd, sizeof nmcmd, "nm %s 2>/dev/null | grep -c z_injected_dbg", qout);
+            char nmout[256] = "";
+            run_cmd_capture(nmcmd, nmout, sizeof nmout);
+            if (strstr(nmout, "1") != NULL)
+                injected = 1;
+
+            if (injected) {
+                fprintf(stderr,
+                        "FAIL dbgname (the file name was assembled as directives: the symbol "
+                        "'z_injected_dbg' is in the binary)\n");
+                fail++;
+            } else if (rc != 0) {
+                fprintf(stderr,
+                        "FAIL dbgname (the build failed on a file name with a quote in it, "
+                        "rc=%d)\n--- actual ---\n%s\n",
+                        rc, actual);
+                fail++;
+            } else {
+                printf("ok   dbgname (a quote in a file name stayed data)\n");
+                pass++;
+            }
+        }
+        remove(evil);
+        remove(out_path);
+        rmdir(dir);
+    }
+
+    /* A program nested far deeper than anything a person writes must be a
+     * diagnostic, not a crash.
+     *
+     * The parser recurses on the shape of the input, so a file with tens of
+     * thousands of open parens, or of nested blocks, or of chained
+     * assignments, ran the C stack out and the compiler died on a signal. The
+     * assertion is on the exit status: 139 is a SIGSEGV, which is the crash
+     * this is about, and 1 is the compiler reporting a problem with the
+     * program.
+     *
+     * The diagnostic is checked too, and so is that there is only one of it.
+     * The depth error used to be reported once per level, and each one
+     * rendered the source excerpt under it, so a file nested a thousand deep
+     * produced a thousand diagnostics and a hundred kilobytes of output. */
+    {
+        static const struct {
+            const char *label;
+            const char *body;
+        } deep[] = {
+            {"parens", "int main() { var x = (((1))); return 0; }"},
+            {"blocks", "int main() { { { { return 0; } } } }"},
+            {"assign", "int main() { var a = 1; a = a = a = 1; return 0; }"},
+            {"index", "int main() { var a = new int[1]; var x = a[a[0]]; return 0; }"},
+        };
+        for (size_t i = 0; i < sizeof deep / sizeof(*deep); i++) {
+            /* The nest is built by repeating a fragment, so the depth is a
+             * number in the test rather than a literal too long to read. The
+             * count is well past the depth at which the parser used to run the
+             * stack out, and the buffer is large enough to hold the whole
+             * file: a truncated one is a different program, and one whose
+             * brackets do not balance produces a diagnostic per leftover
+             * bracket rather than one for the nest. */
+            enum { DEEP_N = 20000 };
+            char src[1 << 18];
+            int n = 0;
+            if (strcmp(deep[i].label, "parens") == 0) {
+                n = snprintf(src, sizeof src, "int main() { var x = ");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "(");
+                n += snprintf(src + n, sizeof src - (size_t)n, "1");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, ")");
+                n += snprintf(src + n, sizeof src - (size_t)n, "; return 0; }\n");
+            } else if (strcmp(deep[i].label, "blocks") == 0) {
+                n = snprintf(src, sizeof src, "int main() { ");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "{");
+                n += snprintf(src + n, sizeof src - (size_t)n, "return 0; ");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "}");
+                n += snprintf(src + n, sizeof src - (size_t)n, " }\n");
+            } else if (strcmp(deep[i].label, "assign") == 0) {
+                n = snprintf(src, sizeof src, "int main() { var a = 1; ");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "a = ");
+                n += snprintf(src + n, sizeof src - (size_t)n, "1; return 0; }\n");
+            } else {
+                n = snprintf(src, sizeof src, "int main() { var a = new int[1]; var x = ");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "a[");
+                n += snprintf(src + n, sizeof src - (size_t)n, "0");
+                for (int k = 0; k < DEEP_N; k++)
+                    n += snprintf(src + n, sizeof src - (size_t)n, "]");
+                n += snprintf(src + n, sizeof src - (size_t)n, "; return 0; }\n");
+            }
+
+            char path[256], out[256];
+            snprintf(path, sizeof path, "/tmp/z_test_deep_%ld.z", (long)getpid());
+            snprintf(out, sizeof out, "/tmp/z_test_deep_%ld.out", (long)getpid());
+            FILE *f = fopen(path, "wb");
+            if (f == NULL) {
+                fprintf(stderr, "FAIL deepnest %s (cannot write the test source)\n", deep[i].label);
+                fail++;
+                continue;
+            }
+            fwrite(src, 1, (size_t)n, f);
+            fclose(f);
+
+            char qpath[600], qout[600], bcmd[3072];
+            shell_quote(path, qpath, sizeof qpath);
+            shell_quote(out, qout, sizeof qout);
+            snprintf(bcmd, sizeof bcmd, "%s build %s -o %s 2>&1", zq, qpath, qout);
+            char actual[1 << 16];
+            int rc = run_cmd_capture(bcmd, actual, sizeof actual);
+
+            /* 139 is a SIGSEGV: the stack ran out. Anything else that is not a
+             * plain error is a different failure and is reported as one. */
+            int segv = rc == 139;
+            int said = strstr(actual, "deep") != NULL;
+            /* The depth error is reported once, not once per level. Counting
+             * the "error:" lines rather than the messages is what makes this
+             * the assertion it is: a program nested forty thousand deep would
+             * otherwise report forty thousand of them. */
+            int nerr = 0;
+            for (const char *q = actual; (q = strstr(q, "error:")) != NULL; q += 6)
+                nerr++;
+
+            if (segv) {
+                fprintf(stderr, "FAIL deepnest %s (the compiler died on a signal)\n",
+                        deep[i].label);
+                fail++;
+            } else if (rc == 0) {
+                fprintf(stderr,
+                        "FAIL deepnest %s (the program compiled, so nothing was rejected)\n",
+                        deep[i].label);
+                fail++;
+            } else if (!said) {
+                fprintf(stderr,
+                        "FAIL deepnest %s (no diagnostic about the depth)\n--- actual ---\n%s\n",
+                        deep[i].label, actual);
+                fail++;
+            } else if (nerr > 4) {
+                fprintf(stderr,
+                        "FAIL deepnest %s (%d diagnostics for one nest)\n--- actual ---\n%s\n",
+                        deep[i].label, nerr, actual);
+                fail++;
+            } else {
+                printf("ok   deepnest %s (a deep nest is a diagnostic, not a crash)\n",
+                       deep[i].label);
+                pass++;
+            }
+            remove(path);
+            remove(out);
+        }
     }
 
     /* Runtime-abort cases: the program must exit nonzero and every non-empty line
