@@ -457,15 +457,23 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
             s->drops_done = 1;
             /* A function is an item of the program list, and its body is where
              * every local it owns lives. Without this the pass never looks
-             * inside a function at all. */
+             * inside a function at all.
+             *
+             * The count is this function's own, not the walk's. The accumulator
+             * above is shared by every item in the program, so adding to it here
+             * would make `owns_drops` true for every function after the first
+             * one that owns something -- and `owns_drops` is what stops the
+             * inliner from copying a body whose destructors would run twice. */
+            int own = 0;
             if (s->fbody != NULL) {
                 if (s->fbody->kind == S_BLOCK)
-                    emitted += emit_drops_in(p, s->fbody->items, s->fbody->nitems);
+                    own += emit_drops_in(p, s->fbody->items, s->fbody->nitems);
                 else {
                     Stmt *wrap[1];
                     wrap[0] = s->fbody;
-                    emitted += emit_drops_in(p, wrap, 1);
+                    own += emit_drops_in(p, wrap, 1);
                 }
+                emitted += own;
                 /* The fall-off-the-end exit. Every `return` above destroys the
                  * body scope on its way out, but a function that ends without
                  * one -- every void function -- reaches the end of its body with
@@ -482,10 +490,11 @@ static int emit_drops_in(Parser *p, Stmt **items, int n) {
                     if (d != NULL) {
                         list_append(p, &s->fbody->items, &s->fbody->nitems, d);
                         emitted += d->nitems;
+                        own += d->nitems;
                     }
                 }
             }
-            s->owns_drops = emitted > 0;
+            s->owns_drops = own > 0;
             continue;
         }
         if (s->kind == S_STRUCT || s->kind == S_UNION) {

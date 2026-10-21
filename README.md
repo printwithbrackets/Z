@@ -40,13 +40,13 @@ reachable only through one of those, are all still live at exit. Leaks are the
 safe direction to be wrong in, which is why the frees are wired up per type
 rather than all at once.
 
-Leaks are also the only thing the suite is not clean of. The suite is 282 checks:
-129 golden cases that build a program, run it and compare its output, 89
+Leaks are also the only thing the suite is not clean of. The suite is 285 checks:
+132 golden cases that build a program, run it and compare its output, 89
 diagnostic cases that compare a compiler error message, and 64 more that are
 exit-status, runtime-abort, interop, module, warning, gate and driver checks.
 Only the five cases in `tests/leaks/` are built with AddressSanitizer and run
 with leak detection on, and they assert that no string allocation is still live
-at exit and that the sanitizer reported no error. The other 277 are not run
+at exit and that the sanitizer reported no error. The other 280 are not run
 under ASan at all, so "the suite is clean under ASan" is a statement about those
 five and not about the rest. And it is a statement about the suite rather than
 about the language:
@@ -1076,7 +1076,7 @@ started from; v2 slices 1–2 and part of slice 3 now sit on top of it.
 
 The two documents are kept side by side on purpose. v2 changes the language, not
 the backend, so the parts of v1 that carry over — the optimizer, the ABI, the
-diagnostics system, the 129 golden tests — are still the spec for the parts that
+diagnostics system, the 132 golden tests — are still the spec for the parts that
 do not change, and the diff between them is the reviewable part of the rewrite.
 
 ## License

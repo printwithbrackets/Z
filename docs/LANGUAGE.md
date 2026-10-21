@@ -335,7 +335,7 @@ Depends on slice 3 and is small because of it.
 Runs alongside 1–4 rather than after, because a golden suite that has not been
 ported yet is the thing that catches slice 3's destructor paths being wrong.
 
-- All 129 golden tests and 89 error tests rewritten to the v2 surface.
+- All 132 golden tests and 89 error tests rewritten to the v2 surface.
 - `lib/collections.z` and `lib/string.z` become structs with destructors.
 - `make test-all` at `-O0`–`-O3` stays the gate, for the reason in
   [LANGUAGE-v1.md](LANGUAGE-v1.md#optimization-levels--command-line): a pass
@@ -1470,7 +1470,7 @@ slice 3. Specifically, all of the following is real and tested today, and stays:
 - modules via `import`, `extern`/`export` C interop
 - the full optimizer ladder, DWARF, the diagnostics system with did-you-mean and
   three output formats
-- 282 checks in all — 129 golden, 89 diagnostic, and 64 runtime, interop, module,
+- 285 checks in all — 132 golden, 89 diagnostic, and 64 runtime, interop, module,
   warning, gate and driver tests — with `make test-all` green across four `-O`
   levels
 

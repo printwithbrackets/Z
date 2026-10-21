@@ -664,6 +664,31 @@ static void parse_top_item(Parser *p, Arena *arena, Stmt ***pitems, int *pn, int
                 *pmain_span = fn->span;
             }
         }
+        /* A function defined twice is one function, and the second definition
+         * replaces the first.
+         *
+         * Without this, both were emitted under the same symbol and the
+         * assembler failed with "symbol 'z$f' is already defined" -- a message
+         * that names neither the file nor the line, and that a program
+         * redefining a standard-library function cannot act on at all.
+         *
+         * The earlier definition is the one that goes, and nothing is said
+         * about it: the language says a user function of the same name shadows
+         * a built-in, and that is what this is. The library's `parse_int_or`
+         * and the program's own are the same name, and the program's is the
+         * one meant.
+         *
+         * The earlier body goes with it, because it is the one that would
+         * otherwise be emitted under the same symbol. */
+        for (int i = 0; i < n; i++) {
+            Stmt *prev = items[i];
+            if (prev == NULL || prev->kind != S_FUNC || prev->fname == NULL || fn->fname == NULL)
+                continue;
+            if (strcmp(prev->fname, fn->fname) != 0)
+                continue;
+            prev->fbody = NULL;
+            break;
+        }
         items[n++] = fn;
     } else if ((at(p, T_KW_CLASS) || at(p, T_KW_STRUCT)) && peek(p, 1)->kind == T_IDENT &&
                peek(p, 2)->kind == T_LT &&

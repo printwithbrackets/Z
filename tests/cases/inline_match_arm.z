@@ -1,0 +1,54 @@
+// A parameter named only in a match arm survives inlining.
+//
+// The inliner copies a callee's body into the caller's frame. The copy
+// followed the expression's `lhs`/`rhs`/`args` spine, and a match's arms are
+// not on that spine -- so the copied match still pointed at the *callee's*
+// arms. The substitution then reached the callee's expression rather than the
+// copy, and the callee's expression names the callee's frame slots, which in
+// the caller's frame are different variables entirely.
+//
+// A parameter referenced only in a match arm is the case that shows it:
+//
+//     int parse_int_or(string s, int fallback) {
+//         return match parse_int(s) { Ok(v) => v, Err(_) => fallback };
+//     }
+//
+// `fallback` is named in the arm and nowhere else, so nothing else in the
+// body carried the reference. Inlined, the arm read whatever the caller's
+// frame held at the callee's offset for it, and the fallback came back as the
+// wrong number.
+//
+// The second half of the file is the same shape written by hand, so that the
+// difference between the two is the inliner's and not the program's.
+
+Result<int, string> classify(int v) {
+    if (v < 0) { return Err("negative"); }
+    return Ok(v);
+}
+
+int with_fallback(int v, int fallback) {
+    return match classify(v) { Ok(x) => x, Err(_) => fallback };
+}
+
+// The same shape, with the parameter named in the arm and nowhere else.
+int arm_only(int v, int fallback) {
+    return match classify(v) { Ok(x) => x, Err(_) => fallback };
+}
+
+int main() {
+    // A value that classifies as Ok, so the fallback is not the answer.
+    Console.WriteLog(with_fallback(7, -1));   // 7
+    // A value that classifies as Err, so the fallback is the answer.
+    Console.WriteLog(with_fallback(-3, -1));  // -1
+    Console.WriteLog(with_fallback(-4, 99));   // 99
+
+    Console.WriteLog(arm_only(7, -1));        // 7
+    Console.WriteLog(arm_only(-3, -1));       // -1
+    Console.WriteLog(arm_only(-4, 99));        // 99
+
+    // A match whose arms bind, so the payload slots are exercised too.
+    Console.WriteLog(match classify(4) { Ok(x) => x * 2, Err(_) => -5 });  // 8
+    Console.WriteLog(match classify(-4) { Ok(x) => x * 2, Err(_) => -5 }); // -5
+
+    return 0;
+}

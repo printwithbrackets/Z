@@ -391,6 +391,8 @@ int main(int argc, char **argv) {
         "capture_param_spill",
         "capture_drop_box",
         "lambda_drops",
+        "assign_index_once",
+        "inline_match_arm",
         "mangle_collision",
         "vec_grow_owned",
         "map_rehash_owned",

@@ -766,8 +766,14 @@ static void gen_expr_body(CG *cg, Expr *e) {
          * the one it had. The value is captured first and released after the
          * store, because `s = s + "x"` reads the destination, and because the
          * release is a call and a call clobbers the register the new value is
-         * sitting in. */
+         * sitting in.
+         *
+         * The destination's *address* is computed once, here, and reused by the
+         * store below. Computing it twice ran the index expression twice, so
+         * `a[i++] = "x"` freed the value in `a[i]` and wrote to `a[i + 1]`, and
+         * left `i` one higher than the program wrote. */
         int t_old = -1;
+        int t_dst = -1;
         if (e->frees_old) {
             t_old = temp_alloc(cg);
             if (e->lhs != NULL && e->lhs->kind == E_VAR && e->lhs->gidx < 0 && !e->lhs->agg_param &&
@@ -778,7 +784,11 @@ static void gen_expr_body(CG *cg, Expr *e) {
                 else
                     buf_printf(cg->out, "  mov rax, QWORD PTR [rbp - %d]\n", e->lhs->slot);
             } else {
+                /* The address is kept rather than only the value at it, so that
+                 * the store below writes where the release read. */
+                t_dst = temp_alloc(cg);
                 gen_addr(cg, e->lhs);
+                store_temp(cg, t_dst);
                 buf_printf(cg->out, "  mov rax, QWORD PTR [rax]\n");
             }
             store_temp(cg, t_old);
@@ -925,7 +935,14 @@ static void gen_expr_body(CG *cg, Expr *e) {
             goto assign_done;
         }
         int tA = temp_alloc(cg);
-        gen_addr(cg, e->lhs);
+        if (t_dst >= 0) {
+            /* The address was already computed above, to read the old value
+             * out of it. Reusing it keeps the index expression from running
+             * twice. */
+            load_temp(cg, t_dst, "rax");
+        } else {
+            gen_addr(cg, e->lhs);
+        }
         store_temp(cg, tA);
         if (e->compound) {
             int tB = temp_alloc(cg);
